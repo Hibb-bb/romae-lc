@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+runs/
+*.ckpt
+*.pt
+*.png
+.DS_Store
+logs/
+results/
+*.npz

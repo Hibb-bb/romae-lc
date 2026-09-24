@@ -1,0 +1,78 @@
+romae-lc 0.2.0 -- summary of the review and of the LeWorldModel feature (2026-09-23)
+
+WHAT WAS DONE
+
+1. Package review (multi-agent: 8 reviewers, 3 independent refuters per finding, fixes per file, full test run).
+   34 findings raised, 29 confirmed and fixed, 5 rejected as non-defects. Highlights of the fixes:
+   - transformer.py: the default TransformerConfig (342/6) had an odd head_dim, so any partial encoder dict crashed;
+     SIZES no longer credits a "large" size to the RoMAE paper (the paper defines tiny-shallow/tiny/small/base);
+     pos_dropout docs corrected (not applied in linear attention).
+   - rope.py: SimplexRope validates p; layouts that would give a block zero active angles now raise
+     (new helpers min_axial_dim / min_simplex_scales, exported); simplex directions made deterministic across
+     LAPACK backends (the SVD was ambiguous for degenerate singular values and lived in non-persistent buffers).
+   - analysis.py: nd_rope_theta_bound now takes the simplex block's channel count and axis count (the paper's bound
+     is per ladder, and the library's simplex block is only part of the head) and mirrors SimplexRope's single-axis case;
+     the periodogram noise floor no longer exceeds 1 for sparse curves (they could never be "detected"); curves with
+     < 2 distinct epochs no longer crash; time_shuffle_score accepts shared standardisation stats (batch of 1 fixed).
+   - model.py: MAE with mask_ratio=0 / all-False mask no longer returns the whole sequence as "pred"; MASK token is
+     no longer initialised on the RMSNorm gradient singularity; RoMAEForClassification validates pool;
+     _decoder_layout is p-aware; empty token batches without CLS raise a clear error.
+   - lejepa.py: torch.distributed.nn import is lazy (import romae_lc works on torch builds without distributed);
+     DDP detection is no longer frozen at construction; LeJEPAOutput.embedding is detached in eval mode as documented.
+   - data.py / tokenize.py: whole-curve view no longer drops the last epoch (float32 window edge); "full" is the whole
+     curve when view_cfg=None (was silently capped at 512 points); zero-MAD bands get a sane fallback scale;
+     negative band ids are rejected.
+   - examples: train_mae.py decoder has its own --decoder-width/--decoder-depth/--decoder-heads (paper sizes crashed);
+     default --time-scale/--rope-base no longer sit in the README's "silent failure" band for the simulated data;
+     analyze_time_encoding.py embeds the validation set once with shared stats.
+   - packaging/docs: py.typed marker; attention_mask exported; README snippets re-verified by execution; README
+     predictor recipe includes view_inst; README describes the LeJEPA 'full' batch and the active-angle rule.
+   Packaging was verified by building the wheel/sdist (uv build), installing from a path and from a git URL into a
+   fresh venv, importing without the optional extras, and running every README python block.
+
+2. New feature: LeWorldModel (LeWM, Maes, Le Lidec et al. 2026, arXiv:2603.19312) on light curves with a RoMAE encoder.
+   Spec written first, adversarially critiqued (faithfulness / astronomy / implementability) against the paper text and
+   the official code (lucas-maes/le-wm), then implemented, then reviewed again line by line against the official
+   modules (state dicts copied across and outputs compared numerically).
+   New files: romae_lc/lewm.py, romae_lc/frames.py, tests/test_lewm.py, tests/test_frames.py, examples/train_lewm.py.
+   Edited: lejepa.py (mlp activation keyword, EppsPulley accepts even knot counts), __init__.py, model.py,
+   examples/common.py (evaluate(embed_fn=...), load_world_model), README.md, pyproject.toml (0.2.0), uv.lock.
+
+   API: LeWorldModel(backbone, projector, predictor, action_encoder, pred_proj, embed_dim, action_dim=1, history=3,
+        lamb=0.1, n_slices=1024, t_max=3.0, n_points=17) with encode / predict / forward / rollout / surprise /
+        hparams / from_hparams; ARPredictor, ActionEncoder, lewm_mlp, straightness; FrameConfig, sample_frames,
+        frame_grid, FrameDataset, collate_frames.
+
+   Faithful to the paper and released code (all defaults traceable, see the table in scratch spec and the README):
+   - encoder CLS -> projector Linear-BatchNorm-GELU-Linear (hidden 2048) -> latent z (D = encoder width, 192 default);
+   - predictor: causal transformer, 6 layers, 16 heads of 64, MLP 2048, dropout 0.1, learned positional embedding
+     over history=3, AdaLN-zero conditioning (weight and bias zero-initialised), the official double LayerNorms,
+     final LayerNorm; pred_proj (same MLP) on every predicted step;
+   - action encoder Conv1d(A, 10, k=1) -> Linear(4D) -> SiLU -> Linear(D);
+   - loss = MSE(pred, next z) + lamb * SIGReg(z over all T frames, per time step, x B, mean over 1024 projections);
+     Epps-Pulley on 17 trapezoid knots over [0, 3] (the released code; the paper's appendix text says [0.2, 4]);
+     no stop-gradient, no EMA, gradients flow into the target; lamb = 0.1 (paper), released config uses 0.09;
+   - optimiser in examples/train_lewm.py: AdamW lr 5e-5, wd 1e-3, 1% linear warmup + cosine, grad clip 1.0,
+     batch 128, bf16 autocast on CUDA, encoder defaults depth 12 / 3 heads / width 192 as the paper's ViT-Tiny.
+   Light-curve translation (documented as such, the only deviations):
+   - a "frame" is a time window of a curve (all bands), tokenised with time re-zeroed at the window start;
+   - the "action" is the time advance to the next window in window units (default U(1, 2)); actions=None is an
+     extension that runs the predictor unconditioned;
+   - FrameConfig defaults (window 30 d, 4 frames, min 8 points) were chosen from measured statistics of the simulator;
+     for PHOEBE-like data use a window of a few periods (see README).
+   Not implemented (needs actions / not applicable to passive time series): CEM latent planning; the official
+   num_preds > 1 k-step-ahead mode (T > history + 1 instead trains every position on next-frame prediction, Alg. 3).
+
+3. Tests: 120 passed, 1 skipped (CPU, ~25 s); black clean; uv lock current. Smoke runs of all four example scripts pass.
+
+HOW TO USE
+   uv sync && uv run pytest                      # dev checkout
+   pip install "git+https://<your-remote>/romae-lc.git"   # or pip install /path/to/clone ; extras: [hf], [plot]
+   uv run python examples/train_lewm.py --n 2048 --epochs 20 --auto-time --window 30 --advance 1 2
+   (CPU smoke: --n 256 --epochs 2 --width 96 --depth 2 --heads 3 --pred-depth 1 --pred-heads 2 --n-slices 64)
+
+NOTES / NEXT STEPS
+   - The repository still has no git commits; everything is untracked. Commit before pushing a remote for git installs.
+   - runs/*.pt from earlier experiments are gitignored and untouched.
+   - Design spec with the per-default source table: see the session scratchpad spec/lewm_spec.md (not part of the repo);
+     the same information is condensed in the docstrings of LeWorldModel, ARPredictor and FrameConfig.
