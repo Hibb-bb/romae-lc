@@ -74,6 +74,11 @@ class FrameConfig:
         max_tries: Redraws before the best draw is kept.
         resample: Redraw ``y`` from ``N(y, err)``; off, the official pipeline
             has no augmentation.
+        with_err: Frames also carry the per-point one-sigma errors: every
+            frame is a ``(t, y, band, err)`` quadruple instead of a triple
+            and :func:`collate_frames` passes ``err`` to the tokenizer as
+            ``extras`` (``Tokens.extras [B, N]``), for encoders that take the
+            uncertainty as an input channel and for decoders that need it.
     """
 
     n_frames: int = 4
@@ -83,6 +88,7 @@ class FrameConfig:
     max_tokens: int = 512
     max_tries: int = 20
     resample: bool = False
+    with_err: bool = False
 
     def __post_init__(self):
         if self.n_frames < 2:
@@ -115,9 +121,10 @@ def _window_masks(t: np.ndarray, starts: np.ndarray, window: float) -> list:
 
 
 def _cut(record: Record, t: np.ndarray, masks, starts, cfg, rng, augment: bool):
-    """``(t, y, band)`` float32/float32/int64 triples of the masked windows,
-    times relative to the window start; ``augment`` applies the ``max_tokens``
-    subsample and ``resample`` of ``cfg``."""
+    """``(t, y, band)`` float32/float32/int64 triples of the masked windows
+    (``(t, y, band, err)`` quadruples with ``cfg.with_err``), times relative
+    to the window start; ``augment`` applies the ``max_tokens`` subsample and
+    ``resample`` of ``cfg``."""
     frames = []
     for mask, start in zip(masks, starts):
         idx = np.flatnonzero(mask)
@@ -126,13 +133,14 @@ def _cut(record: Record, t: np.ndarray, masks, starts, cfg, rng, augment: bool):
         y = record.y[idx]
         if augment and cfg.resample:
             y = y + rng.standard_normal(len(idx)) * record.err[idx]
-        frames.append(
-            (
-                (t[idx] - start).astype(np.float32),
-                y.astype(np.float32),
-                record.band[idx].astype(np.int64),
-            )
+        frame = (
+            (t[idx] - start).astype(np.float32),
+            y.astype(np.float32),
+            record.band[idx].astype(np.int64),
         )
+        if cfg.with_err:
+            frame = frame + (record.err[idx].astype(np.float32),)
+        frames.append(frame)
     return frames
 
 
@@ -159,9 +167,10 @@ def sample_frames(record: Record, cfg: FrameConfig, rng: np.random.Generator):
 
     Returns:
         ``(frames, actions)``: ``frames`` is a list of ``cfg.n_frames``
-        ``(t, y, band)`` float32/float32/int64 triples with ``t`` relative to
-        the window start (in ``[0, window)``), ``actions`` a float32
-        ``[n_frames, 1]`` array with ``actions[i] = d_i``.
+        ``(t, y, band)`` float32/float32/int64 triples (``(t, y, band, err)``
+        with ``cfg.with_err``) with ``t`` relative to the window start (in
+        ``[0, window)``), ``actions`` a float32 ``[n_frames, 1]`` array with
+        ``actions[i] = d_i``.
 
     Raises:
         ValueError: The record span cannot host ``n_frames`` windows even
@@ -337,7 +346,10 @@ def collate_frames(batch: list[dict], **tokenize_kwargs) -> dict:
     to pass the :func:`~romae_lc.tokenize.tokenize` keywords, exactly like
     :func:`romae_lc.data.collate`. Frame ``t`` of every item is tokenized
     together, one padded :class:`~romae_lc.tokenize.Tokens` per time step, so
-    windows with different point counts pad within their step.
+    windows with different point counts pad within their step. Frames cut
+    with ``FrameConfig(with_err=True)`` carry a fourth ``err`` array, which
+    is passed to the tokenizer as ``extras`` and comes back as
+    ``Tokens.extras [B, N]`` (padding entries are 0).
 
     Returns:
         ``dict(frames=[Tokens] * T, actions FloatTensor [B, T, 1], n_tokens
@@ -348,11 +360,12 @@ def collate_frames(batch: list[dict], **tokenize_kwargs) -> dict:
     if any(len(item["frames"]) != n_frames for item in batch):
         raise ValueError("every item must carry the same number of frames")
 
-    def tok(triples) -> Tokens:
+    def tok(tuples) -> Tokens:
         cols = [
-            [torch.from_numpy(np.ascontiguousarray(a)) for a in c]
-            for c in zip(*triples)
+            [torch.from_numpy(np.ascontiguousarray(a)) for a in c] for c in zip(*tuples)
         ]
+        if len(cols) == 4:  # (t, y, band, err): the errors ride along as extras
+            return tokenize(*cols[:3], extras=cols[3], **tokenize_kwargs)
         return tokenize(*cols, **tokenize_kwargs)
 
     frames = [tok([item["frames"][t] for item in batch]) for t in range(n_frames)]

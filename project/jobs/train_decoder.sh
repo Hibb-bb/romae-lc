@@ -1,0 +1,39 @@
+#!/bin/bash
+#SBATCH --job-name=decoder
+#SBATCH --account=bfrf-dtai-gh
+#SBATCH --partition=ghx4-interactive
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=96g
+#SBATCH --time=02:00:00
+#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
+#SBATCH --output=project/logs/%x-%j.out
+#SBATCH --error=project/logs/%x-%j.err
+# Stage 3 (M5) decoder on a stage-1 checkpoint, as a chain like train_wm.sh
+# (the successor link is queued at the start of every link). KIND=flow|mse.
+#   KIND=mse sbatch --job-name=dec-mse project/jobs/train_decoder.sh project/runs/wm_w500/wm.pt --baselines
+set -euo pipefail
+export HF_DATASETS_DISABLE_PROGRESS_BARS=1
+export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1
+source .venv/bin/activate
+CKPT=${1:?stage-1 checkpoint}
+shift
+KIND=${KIND:-flow}
+OUT=${OUT:-$(dirname "$CKPT")/dec_$KIND}
+LINK=${LINK:-1}
+MAX_LINKS=${MAX_LINKS:-4}
+BUDGET=${BUDGET:-6000}
+echo "link $LINK / $MAX_LINKS, kind $KIND, out $OUT, args: $*"
+if [ -f "$OUT/DONE" ]; then
+    echo "already done: $(cat "$OUT/DONE")"
+    exit 0
+fi
+if [ "$LINK" -lt "$MAX_LINKS" ]; then
+    sbatch --job-name="$SLURM_JOB_NAME" --dependency=afterany:"$SLURM_JOB_ID" \
+        --export=ALL,KIND="$KIND",OUT="$OUT",LINK=$((LINK + 1)),MAX_LINKS="$MAX_LINKS",BUDGET="$BUDGET" \
+        project/jobs/train_decoder.sh "$CKPT" "$@" || echo "could not queue the next link (queue full)"
+fi
+python -m project.train_decoder --ckpt "$CKPT" --kind "$KIND" --out "$OUT" \
+    --workers 8 --time-budget "$BUDGET" --wandb "$@"

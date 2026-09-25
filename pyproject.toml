@@ -11,6 +11,9 @@ dependencies = ["torch>=2.4", "numpy>=1.24"]
 [project.optional-dependencies]
 hf = ["datasets>=2.20"]
 plot = ["matplotlib>=3.7"]
+track = [
+    "wandb>=0.17",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "black>=24"]

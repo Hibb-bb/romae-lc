@@ -9,7 +9,7 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from romae_lc.data import Record, SimConfig, SurveyConfig, simulate
+from romae_lc.data import Record, SimConfig, SurveyConfig, normalize, simulate
 from romae_lc.frames import (
     FrameConfig,
     FrameDataset,
@@ -249,3 +249,36 @@ def test_loader_epoch_refresh(records):
     assert torch.equal(first["actions"], second["actions"])
     for a, b in zip(first["frames"], second["frames"]):
         assert torch.equal(a.values, b.values) and torch.equal(a.pad_mask, b.pad_mask)
+
+
+def test_with_err_frames_carry_errors_as_extras():
+    from romae_lc import RoMAE
+
+    records = [normalize(r) for r in simulate(4, SURVEYS, CFG, seed=3)]
+    cfg = FrameConfig(n_frames=3, window=30.0, with_err=True)
+    rng = np.random.default_rng(0)
+    frames, actions = sample_frames(records[0], cfg, rng)
+    assert actions.shape == (3, 1)
+    for t, y, band, err in frames:
+        assert t.shape == y.shape == band.shape == err.shape
+        assert err.dtype == np.float32 and (err > 0).all()
+    # the error of every point is the record's error at that point
+    t0, y0, _, e0 = frames[0]
+    for ti, yi, ei in zip(t0, y0, e0):
+        j = np.flatnonzero(np.isclose(records[0].y, yi))
+        assert np.any(np.isclose(records[0].err[j], ei))
+    grid, _ = frame_grid(records[0], cfg, fill=True)
+    assert all(len(f) == 4 for f in grid)
+    ds = FrameDataset(records, cfg, epoch_seed=False)
+    batch = collate_frames([ds[i] for i in range(len(ds))], band_wavelengths=WL)
+    for f in batch["frames"]:
+        assert f.extras is not None and f.extras.shape == f.pad_mask.shape
+        assert (f.extras[f.pad_mask] == 0).all() and (f.extras[~f.pad_mask] > 0).all()
+    # triples without the flag are unchanged and carry no extras
+    plain = FrameDataset(
+        records, FrameConfig(n_frames=3, window=30.0), epoch_seed=False
+    )
+    batch = collate_frames([plain[0], plain[1]], band_wavelengths=WL)
+    assert all(f.extras is None for f in batch["frames"])
+    z = RoMAE(encoder=dict(d_model=24, nhead=2, depth=1))(*batch["frames"][0])
+    assert z.shape == (2, 24)
