@@ -11,6 +11,9 @@ position vector ``[n_axes]`` (time, then wavelength coordinates), see
 * :class:`RoMAEForPreTraining` - the paper's masked-autoencoding recipe:
   the encoder sees the visible tokens, a light decoder reconstructs the
   values of the masked tokens from MASK tokens at their positions.
+* :class:`MaskedDecoder` - the decoder side of that recipe alone, as a head
+  over an encoder owned by another model (a reconstruction term next to a
+  world-model or JEPA loss on the same backbone).
 * :class:`RoMAEForClassification` - encoder plus a linear head.
 """
 
@@ -23,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from . import rope as rope_lib
-from .rope import BlockRope
+from .rope import BlockRope, Rotation
 from .transformer import Transformer, TransformerConfig, attention_mask, config
 
 
@@ -68,6 +71,17 @@ def _init_weights(m: nn.Module) -> None:
         nn.init.ones_(m.weight)
 
 
+def _layouts(rope) -> list[list[dict]]:
+    """A layout (list of block dicts) or a per-layer list of layouts as a
+    list of layouts."""
+    rope = list(rope)
+    if not rope:
+        raise ValueError("an explicit rope layout needs at least one block")
+    if isinstance(rope[0], dict):
+        return [rope]
+    return [list(lay) for lay in rope]
+
+
 class RoMAEBase(nn.Module):
     """Layers shared by all RoMAE models: value projection, CLS token,
     rotary layout and the transformer encoder.
@@ -79,8 +93,12 @@ class RoMAEBase(nn.Module):
         n_channels: Value channels per token.
         n_axes: Position axes per token (rows of ``positions``).
         rope: ``"axial"`` (equal p-RoPE split over the axes), ``"simplex"``
-            (time axial + nD-RoPE simplex over the other axes), or an
-            explicit layout list (see :class:`~romae_lc.rope.BlockRope`).
+            (time axial + nD-RoPE simplex over the other axes), an explicit
+            layout list (see :class:`~romae_lc.rope.BlockRope`), or a list
+            of ``depth`` such layouts, one per encoder layer, so that the
+            layers (and, through per-head ladders, the heads) resolve
+            different timescales. :attr:`rope` is the first layer's block
+            and :attr:`rope_layout` the description that rebuilds them all.
         rope_base: Rotary base of the time axis (axis 0) for the string
             layouts. Together with the time unit of the positions it sets the
             band of resolvable timescales, see :mod:`romae_lc.analysis`.
@@ -96,7 +114,7 @@ class RoMAEBase(nn.Module):
         encoder: str | dict | TransformerConfig = "small",
         n_channels: int = 1,
         n_axes: int = 2,
-        rope: str | list[dict] = "axial",
+        rope: str | list[dict] | list[list[dict]] = "axial",
         rope_base: float = 10000.0,
         p_rope: float = 0.75,
         use_cls: bool = True,
@@ -107,22 +125,33 @@ class RoMAEBase(nn.Module):
         self.n_channels, self.n_axes, self.use_cls = n_channels, n_axes, use_cls
         if isinstance(rope, str):
             frac = None if rope == "axial" else 0.5
-            rope = rope_lib.layout(
-                self.cfg.head_dim,
-                n_axes,
-                rope,
-                time_frac=frac,
-                time_base=rope_base,
-                p=p_rope,
-                time_timescales=rope_timescales,
-            )
-        elif rope_timescales is not None:
-            raise ValueError("rope_timescales only applies to the string layouts")
-        self.rope = BlockRope(self.cfg.head_dim, self.cfg.nhead, rope)
-        if self.rope.n_axes > n_axes:
-            raise ValueError(
-                f"rope layout uses {self.rope.n_axes} axes, n_axes={n_axes}"
-            )
+            layouts = [
+                rope_lib.layout(
+                    self.cfg.head_dim,
+                    n_axes,
+                    rope,
+                    time_frac=frac,
+                    time_base=rope_base,
+                    p=p_rope,
+                    time_timescales=rope_timescales,
+                )
+            ]
+        else:
+            if rope_timescales is not None:
+                raise ValueError("rope_timescales only applies to the string layouts")
+            layouts = _layouts(rope)
+            if len(layouts) not in (1, self.cfg.depth):
+                raise ValueError(
+                    f"{len(layouts)} per-layer rope layouts for depth {self.cfg.depth}"
+                )
+        self.rope_layers = nn.ModuleList(
+            BlockRope(self.cfg.head_dim, self.cfg.nhead, lay) for lay in layouts
+        )
+        for block in self.rope_layers:
+            if block.n_axes > n_axes:
+                raise ValueError(
+                    f"rope layout uses {block.n_axes} axes, n_axes={n_axes}"
+                )
         self.projection = nn.Linear(n_channels, self.cfg.d_model)
         self.transformer = Transformer(self.cfg)
         self.cls = nn.Parameter(torch.zeros(self.cfg.d_model)) if use_cls else None
@@ -135,15 +164,41 @@ class RoMAEBase(nn.Module):
         return self.cfg.d_model
 
     @property
+    def rope(self) -> BlockRope:
+        """The rotary block of the first layer (of every layer when shared)."""
+        return self.rope_layers[0]
+
+    @property
+    def per_layer_rope(self) -> bool:
+        """Whether every encoder layer has its own rotary block."""
+        return len(self.rope_layers) > 1
+
+    @property
+    def rope_layout(self) -> list:
+        """The layout (shared) or the per-layer list of layouts that rebuilds
+        :attr:`rope_layers`; the ``rope`` entry of :attr:`hparams`."""
+        if self.per_layer_rope:
+            return [block.layout for block in self.rope_layers]
+        return self.rope.layout
+
+    @property
     def hparams(self) -> dict:
         """Constructor arguments that rebuild this backbone."""
         return dict(
             encoder=self.cfg,
             n_channels=self.n_channels,
             n_axes=self.n_axes,
-            rope=self.rope.layout,
+            rope=self.rope_layout,
             use_cls=self.use_cls,
         )
+
+    def rotations(self, positions: torch.Tensor) -> Rotation | list[Rotation]:
+        """The rotary tables for ``positions [B, n_axes, N]``: one
+        :class:`~romae_lc.rope.Rotation` shared by the layers, or one per
+        layer, as :class:`~romae_lc.transformer.Transformer` takes them."""
+        if self.per_layer_rope:
+            return [block.prepare(positions) for block in self.rope_layers]
+        return self.rope.prepare(positions)
 
     def add_cls(self, x, positions, pad_mask):
         """Prepend the CLS token (position 0, never padding) if enabled."""
@@ -171,7 +226,7 @@ class RoMAEBase(nn.Module):
                 "empty token batch: with use_cls=False the encoder needs at least "
                 "one token in some row (an all-empty frame window; see FrameConfig)"
             )
-        x = self.transformer(x, self.rope.prepare(positions), attention_mask(pad_mask))
+        x = self.transformer(x, self.rotations(positions), attention_mask(pad_mask))
         return x, pad_mask
 
 
@@ -274,6 +329,122 @@ class MAEOutput:
     mask: torch.Tensor
 
 
+def decoder_layout(enc_layout, enc_head_dim: int, dec_head_dim: int) -> list[dict]:
+    """An encoder's rotary layout rescaled to a decoder head dimension.
+
+    A per-layer list of layouts, or per-head ladders, are first folded into
+    one shared layout by :func:`~romae_lc.rope.collapse_layout`. Every block
+    after the first is rounded to its own channel unit (2 for axial, ``2 *
+    (n_axes + 1)`` for a multi-axis simplex) and floored at the smallest
+    size that keeps one active angle at its ``p``
+    (:func:`~romae_lc.rope.min_axial_dim`,
+    :func:`~romae_lc.rope.min_simplex_scales`); the first (time) block takes
+    whatever is left. Explicit ladders (``timescales`` of an axial block,
+    ``scales`` of a simplex block) are resampled in log space to the
+    decoder block's number of active angles, ends kept
+    (:func:`~romae_lc.rope.resample_ladder`).
+    """
+    enc, dec = enc_head_dim, dec_head_dim
+    base = rope_lib.collapse_layout(enc_layout)
+    blocks = [dict(spec) for spec in base]
+    for spec in blocks[1:]:
+        n, p = len(spec["axes"]), spec.get("p", 1.0)
+        if spec["kind"] == "simplex" and n > 1:
+            unit = 2 * (n + 1)
+            floor = unit * rope_lib.min_simplex_scales(p)
+        else:
+            unit, floor = 2, rope_lib.min_axial_dim(p)
+        spec["dim"] = max(floor, int(round(spec["dim"] * dec / enc / unit)) * unit)
+    blocks[0]["dim"] = dec - sum(b["dim"] for b in blocks[1:])
+    d_min = rope_lib.min_axial_dim(blocks[0].get("p", 1.0))
+    if blocks[0]["dim"] < d_min or blocks[0]["dim"] % 2:
+        raise ValueError(
+            f"decoder head_dim {dec} too small for the rope layout at "
+            f"p={blocks[0].get('p', 1.0)}"
+        )
+    for old, spec in zip(base, blocks):
+        for key, unit in (("timescales", 2), ("scales", None)):
+            if spec.get(key) is None:
+                continue
+            if unit is None:  # simplex: 2 (n + 1) channels per scale
+                n = len(spec["axes"])
+                unit = 2 * (n + 1) if n > 1 else 2
+            slots_enc, slots_dec = old["dim"] // unit, spec["dim"] // unit
+            n_new = max(1, int(round(len(spec[key]) * slots_dec / slots_enc)))
+            spec[key] = rope_lib.resample_ladder(spec[key], min(n_new, slots_dec))
+    return blocks
+
+
+def _mae_head(enc_cfg: TransformerConfig, enc_layout, dec_cfg, target_channels: int):
+    """The decoder-side modules of the masked-autoencoding recipe:
+    ``(decoder, decoder_rope, encoder_to_decoder, mask_token, head)``."""
+    decoder = Transformer(dec_cfg)
+    decoder_rope = BlockRope(
+        dec_cfg.head_dim,
+        dec_cfg.nhead,
+        decoder_layout(enc_layout, enc_cfg.head_dim, dec_cfg.head_dim),
+    )
+    encoder_to_decoder = nn.Linear(enc_cfg.d_model, dec_cfg.d_model)
+    mask_token = nn.Parameter(torch.zeros(1, 1, dec_cfg.d_model))
+    head = nn.Sequential(
+        nn.RMSNorm(dec_cfg.d_model, eps=dec_cfg.norm_eps),
+        nn.Linear(dec_cfg.d_model, target_channels),
+    )
+    for m in (decoder, encoder_to_decoder, head):
+        m.apply(_init_weights)
+    # Like the CLS token (and the MAE recipe): an exactly-zero MASK token
+    # sits on the RMSNorm gradient singularity and is position-blind in
+    # the first decoder layer.
+    nn.init.trunc_normal_(mask_token, std=0.02)
+    return decoder, decoder_rope, encoder_to_decoder, mask_token, head
+
+
+def _mae_forward(
+    encoder: RoMAEBase,
+    parts,
+    mask_ratio: float,
+    target_channels: int,
+    values,
+    positions,
+    pad_mask=None,
+    mask=None,
+) -> MAEOutput:
+    """Mask, encode the visible tokens with ``encoder``, decode the masked
+    ones with the modules of ``parts`` (see :func:`_mae_head`)."""
+    b, n, _ = values.shape
+    if pad_mask is None:
+        pad_mask = torch.zeros(b, n, dtype=torch.bool, device=values.device)
+    if mask is None:
+        mask = gen_mask(mask_ratio, pad_mask)
+    pos_t = positions.transpose(1, 2)  # [B, N, n_axes]
+
+    def split(t, m):
+        return t[m].reshape(b, -1, *t.shape[2:])
+
+    target = split(values[..., :target_channels], mask)
+    if target.shape[1] == 0:
+        raise ValueError("mask selects no tokens; nothing to reconstruct")
+    m_pos, m_pad = split(pos_t, mask).transpose(1, 2), split(pad_mask, mask)
+    x = encoder.projection(split(values, ~mask))
+    v_pos, v_pad = split(pos_t, ~mask).transpose(1, 2), split(pad_mask, ~mask)
+
+    x, v_pos, v_pad = encoder.add_cls(x, v_pos, v_pad)
+    x = encoder.transformer(x, encoder.rotations(v_pos), attention_mask(v_pad))
+    x = parts.encoder_to_decoder(x)
+
+    k = target.shape[1]
+    x = torch.cat([x, parts.mask_token.expand(b, k, -1).to(x.dtype)], dim=1)
+    pos = torch.cat([v_pos, m_pos], dim=2)
+    pad = torch.cat([v_pad, m_pad], dim=1)
+    x = parts.decoder(x, parts.decoder_rope.prepare(pos), attention_mask(pad))
+    pred = parts.head(x[:, -k:])
+
+    real = (~m_pad).to(pred.dtype)[..., None]
+    loss = (F.mse_loss(pred.float(), target.float(), reduction="none") * real).sum()
+    loss = loss / (real.sum() * target_channels).clamp(min=1)
+    return MAEOutput(loss=loss, pred=pred, target=target, mask=mask)
+
+
 class RoMAEForPreTraining(RoMAEBase):
     """Masked autoencoding with a light decoder (the RoMAE pretraining recipe).
 
@@ -305,64 +476,20 @@ class RoMAEForPreTraining(RoMAEBase):
             raise ValueError(f"mask_ratio must be in (0, 1], got {mask_ratio}")
         self.mask_ratio, self.target_channels = mask_ratio, target_channels
         self.dec_cfg = config(decoder)
-        self.decoder = Transformer(self.dec_cfg)
-        self.decoder_rope = BlockRope(
-            self.dec_cfg.head_dim, self.dec_cfg.nhead, self._decoder_layout()
-        )
-        self.encoder_to_decoder = nn.Linear(self.cfg.d_model, self.dec_cfg.d_model)
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, self.dec_cfg.d_model))
-        self.head = nn.Sequential(
-            nn.RMSNorm(self.dec_cfg.d_model, eps=self.dec_cfg.norm_eps),
-            nn.Linear(self.dec_cfg.d_model, target_channels),
-        )
-        for m in (self.decoder, self.encoder_to_decoder, self.head):
-            m.apply(_init_weights)
-        # Like the CLS token (and the MAE recipe): an exactly-zero MASK token
-        # sits on the RMSNorm gradient singularity and is position-blind in
-        # the first decoder layer.
-        nn.init.trunc_normal_(self.mask_token, std=0.02)
+        (
+            self.decoder,
+            self.decoder_rope,
+            self.encoder_to_decoder,
+            self.mask_token,
+            self.head,
+        ) = _mae_head(self.cfg, self.rope_layout, self.dec_cfg, target_channels)
 
     def _decoder_layout(self) -> list[dict]:
-        """The encoder's layout rescaled to the decoder head dimension.
-
-        Every block after the first is rounded to its own channel unit (2 for
-        axial, ``2 * (n_axes + 1)`` for a multi-axis simplex) and floored at
-        the smallest size that keeps one active angle at its ``p``
-        (:func:`~romae_lc.rope.min_axial_dim`,
-        :func:`~romae_lc.rope.min_simplex_scales`); the first (time) block
-        takes whatever is left. Explicit ladders (``timescales`` of an axial
-        block, ``scales`` of a simplex block) are resampled in log space to
-        the decoder block's number of active angles, ends kept
-        (:func:`~romae_lc.rope.resample_ladder`).
-        """
-        enc, dec = self.cfg.head_dim, self.dec_cfg.head_dim
-        blocks = [dict(spec) for spec in self.rope.layout]
-        for spec in blocks[1:]:
-            n, p = len(spec["axes"]), spec.get("p", 1.0)
-            if spec["kind"] == "simplex" and n > 1:
-                unit = 2 * (n + 1)
-                floor = unit * rope_lib.min_simplex_scales(p)
-            else:
-                unit, floor = 2, rope_lib.min_axial_dim(p)
-            spec["dim"] = max(floor, int(round(spec["dim"] * dec / enc / unit)) * unit)
-        blocks[0]["dim"] = dec - sum(b["dim"] for b in blocks[1:])
-        d_min = rope_lib.min_axial_dim(blocks[0].get("p", 1.0))
-        if blocks[0]["dim"] < d_min or blocks[0]["dim"] % 2:
-            raise ValueError(
-                f"decoder head_dim {dec} too small for the rope layout at "
-                f"p={blocks[0].get('p', 1.0)}"
-            )
-        for old, spec in zip(self.rope.layout, blocks):
-            for key, unit in (("timescales", 2), ("scales", None)):
-                if spec.get(key) is None:
-                    continue
-                if unit is None:  # simplex: 2 (n + 1) channels per scale
-                    n = len(spec["axes"])
-                    unit = 2 * (n + 1) if n > 1 else 2
-                slots_enc, slots_dec = old["dim"] // unit, spec["dim"] // unit
-                n_new = max(1, int(round(len(spec[key]) * slots_dec / slots_enc)))
-                spec[key] = rope_lib.resample_ladder(spec[key], min(n_new, slots_dec))
-        return blocks
+        """The encoder's layout rescaled to the decoder head dimension, see
+        :func:`decoder_layout`."""
+        return decoder_layout(
+            self.rope_layout, self.cfg.head_dim, self.dec_cfg.head_dim
+        )
 
     def forward(self, values, positions, pad_mask=None, mask=None) -> MAEOutput:
         """Mask, encode the visible tokens, decode the masked ones.
@@ -375,38 +502,16 @@ class RoMAEForPreTraining(RoMAEBase):
                 True entries per row, at least one (see :func:`gen_mask`);
                 sampled from ``mask_ratio`` when omitted.
         """
-        b, n, _ = values.shape
-        if pad_mask is None:
-            pad_mask = torch.zeros(b, n, dtype=torch.bool, device=values.device)
-        if mask is None:
-            mask = gen_mask(self.mask_ratio, pad_mask)
-        pos_t = positions.transpose(1, 2)  # [B, N, n_axes]
-
-        def split(t, m):
-            return t[m].reshape(b, -1, *t.shape[2:])
-
-        target = split(values[..., : self.target_channels], mask)
-        if target.shape[1] == 0:
-            raise ValueError("mask selects no tokens; nothing to reconstruct")
-        m_pos, m_pad = split(pos_t, mask).transpose(1, 2), split(pad_mask, mask)
-        x = self.projection(split(values, ~mask))
-        v_pos, v_pad = split(pos_t, ~mask).transpose(1, 2), split(pad_mask, ~mask)
-
-        x, v_pos, v_pad = self.add_cls(x, v_pos, v_pad)
-        x = self.transformer(x, self.rope.prepare(v_pos), attention_mask(v_pad))
-        x = self.encoder_to_decoder(x)
-
-        k = target.shape[1]
-        x = torch.cat([x, self.mask_token.expand(b, k, -1).to(x.dtype)], dim=1)
-        pos = torch.cat([v_pos, m_pos], dim=2)
-        pad = torch.cat([v_pad, m_pad], dim=1)
-        x = self.decoder(x, self.decoder_rope.prepare(pos), attention_mask(pad))
-        pred = self.head(x[:, -k:])
-
-        real = (~m_pad).to(pred.dtype)[..., None]
-        loss = (F.mse_loss(pred.float(), target.float(), reduction="none") * real).sum()
-        loss = loss / (real.sum() * self.target_channels).clamp(min=1)
-        return MAEOutput(loss=loss, pred=pred, target=target, mask=mask)
+        return _mae_forward(
+            self,
+            self,
+            self.mask_ratio,
+            self.target_channels,
+            values,
+            positions,
+            pad_mask,
+            mask,
+        )
 
     def backbone(self, pool: str = "cls") -> RoMAE:
         """A :class:`RoMAE` encoder initialised from the pretrained weights."""
@@ -416,3 +521,68 @@ class RoMAEForPreTraining(RoMAEBase):
         if self.cls is not None:
             model.cls.data.copy_(self.cls.data)
         return model
+
+
+class MaskedDecoder(nn.Module):
+    """The decoder side of :class:`RoMAEForPreTraining` as a head over an
+    encoder that belongs to another model.
+
+    The encoder is not registered here (its parameters stay with their
+    owner, e.g. the ``backbone`` of a :class:`~romae_lc.lewm.LeWorldModel`),
+    it is passed to :meth:`forward`, so a masked reconstruction loss can be
+    added to any objective trained on the same backbone. The decoder's
+    rotary layout is the encoder's, rescaled by :func:`decoder_layout`
+    (per-head and per-layer ladders collapsed to one), so build it after the
+    encoder and rebuild it from the same encoder with :attr:`hparams`.
+
+    Args:
+        encoder: The :class:`RoMAEBase` whose outputs are decoded.
+        decoder: Decoder size name, dict or config.
+        mask_ratio: Fraction of real tokens to mask when no mask is given.
+        target_channels: Leading value channels to reconstruct.
+    """
+
+    def __init__(
+        self,
+        encoder: RoMAEBase,
+        decoder: str | dict | TransformerConfig = "tiny-shallow",
+        mask_ratio: float = 0.5,
+        target_channels: int = 1,
+    ):
+        super().__init__()
+        if not 0 < mask_ratio <= 1:
+            raise ValueError(f"mask_ratio must be in (0, 1], got {mask_ratio}")
+        self.mask_ratio, self.target_channels = mask_ratio, target_channels
+        self.dec_cfg = config(decoder)
+        (
+            self.decoder,
+            self.decoder_rope,
+            self.encoder_to_decoder,
+            self.mask_token,
+            self.head,
+        ) = _mae_head(encoder.cfg, encoder.rope_layout, self.dec_cfg, target_channels)
+
+    @property
+    def hparams(self) -> dict:
+        """Constructor arguments after ``encoder``."""
+        return dict(
+            decoder=self.dec_cfg,
+            mask_ratio=self.mask_ratio,
+            target_channels=self.target_channels,
+        )
+
+    def forward(
+        self, encoder: RoMAEBase, values, positions, pad_mask=None, mask=None
+    ) -> MAEOutput:
+        """Mask, encode the visible tokens with ``encoder``, decode the masked
+        ones; arguments as :meth:`RoMAEForPreTraining.forward`."""
+        return _mae_forward(
+            encoder,
+            self,
+            self.mask_ratio,
+            self.target_channels,
+            values,
+            positions,
+            pad_mask,
+            mask,
+        )

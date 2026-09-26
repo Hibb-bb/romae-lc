@@ -122,6 +122,8 @@ def log_density(
                     div = div + (jvp * probe).sum(-1)
             div = div / n_probes
         x = x - ds * v.detach()
-        logdet = logdet + ds * div.detach()  # d log p / ds = -div v along the flow
+        # log p_1(x_1) = log p_0(x_0) - int_0^1 div v ds (instantaneous change
+        # of variables): the integrated divergence is subtracted.
+        logdet = logdet - ds * div.detach()
     base = -0.5 * (x.square().sum(-1) + d * math.log(2 * math.pi))
     return base + logdet

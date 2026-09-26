@@ -34,8 +34,9 @@ from project.common import (
     get_device,
     get_ladder,
     load_data,
+    resolve_model_args,
+    rope_geometry,
     seed_all,
-    time_block_dim,
     to_device,
 )
 from project.tracking import StepTimer, Tracker, add_wandb_args, gpu_stats
@@ -164,6 +165,7 @@ def main(argv=None):
     p.add_argument("--out", default="project/results/bench")
     add_device_arg(p)
     args = p.parse_args(argv)
+    resolve_model_args(args)
     seed_all(args.seed)
     dev = get_device(args)
     out = Path(args.out)
@@ -175,8 +177,7 @@ def main(argv=None):
         else data["train"][: args.train_objects]
     )
     cfg = frame_config(args)
-    dim = time_block_dim(args.width, args.heads, args.p_rope)
-    ladder = get_ladder(args, train, out, dim, args.p_rope)
+    ladder = get_ladder(args, train, out, rope_geometry(args))
     spec = TokenSpec(
         dict(band_wavelengths=data.wavelengths, time_scale=ladder.time_scale),
         None if args.no_err_channel else err_stats(train),

@@ -265,3 +265,79 @@ def test_explicit_ladder_rotation_is_relative():
     lhs = (rope.prepare(pos_q)(q) * rope.prepare(pos_k)(k)).sum(-1)
     rhs = (rope.prepare(pos_q - pos_k)(q) * k).sum(-1)
     assert torch.allclose(lhs, rhs, atol=1e-4)
+
+
+def test_per_head_ladders():
+    from romae_lc.rope import ladder_rows
+
+    rows = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+    rope = AxialRope(8, timescales=rows, nhead=3)
+    assert rope.per_head and rope.timescales == rows and rope.p == 0.5
+    assert rope.timescale.shape == (3, 4) and torch.isinf(rope.timescale[:, 2:]).all()
+    expected = 2 * math.pi * torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    assert torch.allclose(rope.wavelengths, expected)
+    ang = rope.angles(torch.rand(2, 5))
+    assert ang.shape == (2, 5, 3, 4)
+    assert torch.allclose(ang[:, :, 1, 0], ang[:, :, 0, 0] / 3)
+    assert not AxialRope(8, timescales=rows[0]).per_head
+    with pytest.raises(ValueError, match="rows"):
+        AxialRope(8, timescales=rows, nhead=2)
+    with pytest.raises(ValueError):
+        AxialRope(8, timescales=[[1.0, 2.0], [3.0]])
+    with pytest.raises(ValueError, match="do not fit"):
+        AxialRope(4, timescales=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    assert ladder_rows([1.0, 2.0]) == [[1.0, 2.0]]
+    assert ladder_rows(torch.tensor(rows)) == rows
+    with pytest.raises(ValueError):
+        ladder_rows([[[1.0]]])
+    with pytest.raises(ValueError):
+        ladder_rows([[1.0, 0.0], [2.0, 3.0]])
+
+
+def test_per_head_rotation_is_relative_and_the_layout_serialises():
+    rows = [[0.3, 1.0], [4.5, 20.0]]
+    blocks = layout(16, 2, time_timescales=rows)
+    assert blocks[0]["timescales"] == rows and blocks[0]["p"] == 0.5
+    rope = BlockRope(16, 2, blocks)
+    assert rope.layout[0]["timescales"] == rows and rope.blocks[0].per_head
+    g = torch.Generator().manual_seed(2)
+    q = torch.randn(4, 1, 2, 16, generator=g)
+    k = torch.randn(4, 1, 2, 16, generator=g)
+    pos_q = torch.rand(4, 2, 1, generator=g) * 5
+    pos_k = torch.rand(4, 2, 1, generator=g) * 5
+    rq = rope.prepare(pos_q)(q)
+    assert torch.allclose(rq.norm(dim=-1), q.norm(dim=-1), atol=1e-5)
+    lhs = (rq * rope.prepare(pos_k)(k)).sum(-1)
+    rhs = (rope.prepare(pos_q - pos_k)(q) * k).sum(-1)
+    assert torch.allclose(lhs, rhs, atol=1e-4)
+    # head 0 rotates as with the shared ladder rows[0]; head 1 does not
+    shared = BlockRope(16, 2, layout(16, 2, time_timescales=rows[0]))
+    r_shared = shared.prepare(pos_q)(q)
+    assert torch.allclose(r_shared[:, :, 0], rq[:, :, 0], atol=1e-6)
+    assert not torch.allclose(r_shared[:, :, 1], rq[:, :, 1], atol=1e-3)
+    with pytest.raises(ValueError, match="rows"):
+        BlockRope(16, 3, blocks)
+
+
+def test_collapse_layout():
+    from romae_lc.rope import collapse_layout
+
+    flat = layout(16, 2, time_timescales=[1.0, 3.0, 10.0])
+    assert collapse_layout(flat) == flat
+    per_head = layout(16, 2, time_timescales=[[1.0, 2.0], [3.0, 4.0]])
+    c = collapse_layout(per_head)
+    assert c[0]["timescales"] == pytest.approx([1.0, 4.0]) and c[0]["p"] == 0.5
+    assert c[1] == per_head[1]
+    per_layer = [
+        layout(16, 2, time_timescales=[[1.0, 2.0], [3.0, 4.0]]),
+        layout(16, 2, time_timescales=[[5.0, 6.0], [7.0, 8.0]]),
+    ]
+    c2 = collapse_layout(per_layer)
+    assert c2[0]["timescales"] == pytest.approx([1.0, 8.0])
+    kept = collapse_layout(layout(16, 2, time_timescales=[[1.0, 2.0], [1.0, 2.0]]))
+    assert kept[0]["timescales"] == [1.0, 2.0]
+    assert BlockRope(16, 5, c2).blocks[0].per_head is False
+    with pytest.raises(ValueError):
+        collapse_layout([])
+    with pytest.raises(ValueError, match="same blocks"):
+        collapse_layout([per_layer[0], layout(16, 1, time_timescales=[1.0])])

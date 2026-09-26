@@ -319,10 +319,25 @@ def straightness(z: torch.Tensor) -> torch.Tensor:
 
 
 def _hidden(m: nn.Module) -> int | None:
-    """Hidden width of a :func:`lewm_mlp`; ``None`` for anything else."""
+    """Hidden width of a :func:`lewm_mlp`, ``0`` for an ``nn.Identity`` (no
+    projector at all, e.g. over a frozen encoder); ``None`` for anything
+    else."""
+    if isinstance(m, nn.Identity):
+        return 0
     if isinstance(m, nn.Sequential) and len(m) and isinstance(m[0], nn.Linear):
         return m[0].out_features
     return None
+
+
+def _projector(in_dim: int, hidden: int, out_dim: int) -> nn.Module:
+    """:func:`lewm_mlp` of ``hidden`` width, or ``nn.Identity`` for 0."""
+    if hidden == 0:
+        if in_dim != out_dim:
+            raise ValueError(
+                f"an Identity projector needs equal widths, got {in_dim} -> {out_dim}"
+            )
+        return nn.Identity()
+    return lewm_mlp(in_dim, hidden, out_dim)
 
 
 class LeWorldModel(nn.Module):
@@ -419,7 +434,8 @@ class LeWorldModel(nn.Module):
     @property
     def hparams(self) -> dict:
         """Arguments for :meth:`from_hparams`; ``proj_hidden`` /
-        ``pred_proj_hidden`` are ``None`` for custom projector modules."""
+        ``pred_proj_hidden`` are ``0`` for an ``nn.Identity`` and ``None``
+        for other custom projector modules."""
         return dict(
             embed_dim=self.embed_dim,
             action_dim=self.action_dim,
@@ -438,7 +454,8 @@ class LeWorldModel(nn.Module):
         """Rebuild an (untrained) model from :attr:`hparams`; the caller then
         ``load_state_dict``. ``predictor`` is an :class:`ARPredictor` from its
         hparams when that entry is a dict (else the default), the projectors
-        are :func:`lewm_mlp` with the stored hidden widths; ``ValueError``
+        are :func:`lewm_mlp` with the stored hidden widths, or ``nn.Identity``
+        for a width of 0 (a world model over a frozen encoder); ``ValueError``
         when a width is ``None`` (custom modules cannot be rebuilt)."""
         kw = dict(hparams)
         pred = kw.pop("predictor", None)
@@ -452,9 +469,9 @@ class LeWorldModel(nn.Module):
         embed_dim = kw.get("embed_dim") or backbone.embed_dim
         return cls(
             backbone,
-            projector=lewm_mlp(backbone.embed_dim, proj_hidden, embed_dim),
+            projector=_projector(backbone.embed_dim, proj_hidden, embed_dim),
             predictor=ARPredictor(**pred) if isinstance(pred, dict) else None,
-            pred_proj=lewm_mlp(embed_dim, pred_proj_hidden),
+            pred_proj=_projector(embed_dim, pred_proj_hidden, embed_dim),
             **kw,
         )
 

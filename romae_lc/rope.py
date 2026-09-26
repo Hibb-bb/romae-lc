@@ -7,7 +7,9 @@ with its own scheme:
 
 * :class:`AxialRope` - standard continuous p-RoPE on **one** axis (RoMAE,
   Zivanovic et al. 2025). A fraction ``p`` of the rotation angles are active,
-  the rest are NoPE channels (infinite timescale, angle 0).
+  the rest are NoPE channels (infinite timescale, angle 0). An explicit
+  ladder may differ per head (a nested ``[nhead][n]`` list), so that the
+  heads of one layer resolve different timescales.
 * :class:`SimplexRope` - nD-RoPE (Li et al. 2026, arXiv:2606.12146) over a
   **group** of axes: every angle is the inner product between the whole
   position vector and a wave vector drawn from the centroid-to-vertex
@@ -17,7 +19,10 @@ with its own scheme:
 
 Tables are prepared once per forward with :meth:`BlockRope.prepare` and the
 resulting :class:`Rotation` is passed down the transformer, so there is no
-mutable cache to reset between forwards.
+mutable cache to reset between forwards. A model may hold one
+:class:`BlockRope` per layer (a per-layer list of layouts, see
+:class:`~romae_lc.model.RoMAEBase`); :func:`collapse_layout` folds such
+per-head, per-layer ladders back into one shared layout for a decoder.
 """
 
 from __future__ import annotations
@@ -50,6 +55,28 @@ def as_ladder(values, name: str = "timescales") -> list[float]:
     return [float(v) for v in ts]
 
 
+def ladder_rows(values, name: str = "timescales") -> list[list[float]]:
+    """Validate an explicit ladder that is either flat (one ladder shared by
+    every head) or per-head (a nested list with one row per head, all of the
+    same length) and return its rows, a single row for a flat ladder. Values
+    must be finite and positive."""
+    try:
+        arr = np.asarray(values, dtype=np.float64)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"{name} rows must all have the same length") from e
+    if arr.ndim == 1:
+        arr = arr[None]
+    elif arr.ndim != 2:
+        raise ValueError(
+            f"{name} must be a flat or per-head (2-D) ladder, got shape {arr.shape}"
+        )
+    if arr.shape[1] < 1:
+        raise ValueError(f"{name} must hold at least one value")
+    if not (np.isfinite(arr).all() and (arr > 0).all()):
+        raise ValueError(f"{name} must be finite and positive, got {values}")
+    return [[float(v) for v in row] for row in arr]
+
+
 def resample_ladder(values, n: int) -> list[float]:
     """``n`` values along the log-interpolated ladder ``values`` (its ends
     kept), for carrying a ladder to a block with a different number of
@@ -75,14 +102,19 @@ class AxialRope(nn.Module):
     spacing (log, linear, quantiles of a period distribution, ...), one per
     active angle, at most ``dim / 2`` of them; the remaining angles are NoPE
     and ``p`` becomes the active fraction. Build such ladders with
-    :func:`romae_lc.analysis.rotary_ladder`.
+    :func:`romae_lc.analysis.rotary_ladder`. A nested ``[nhead][n]`` ladder
+    gives every head its own timescales (``timescale`` is then ``[nhead, dim
+    / 2]`` and the angles carry a head axis), so the heads of a layer can
+    tile a band of timescales between them instead of sharing one ladder.
 
     Args:
         dim: Channels of this block (even).
         base: Base of the geometric timescale ladder ``base ** (2i / dim)``.
         p: Fraction of the ``dim / 2`` angles that rotate; the rest are NoPE.
-        timescales: Explicit ladder in position units (overrides ``base`` and
-            ``p``).
+        timescales: Explicit ladder in position units, flat or per head
+            (overrides ``base`` and ``p``).
+        nhead: With a per-head ladder, the number of heads it must match;
+            ``None`` accepts any row count.
     """
 
     def __init__(
@@ -91,6 +123,7 @@ class AxialRope(nn.Module):
         base: float = 10000.0,
         p: float = 1.0,
         timescales: Ladder | None = None,
+        nhead: int | None = None,
     ):
         super().__init__()
         if dim % 2:
@@ -99,14 +132,21 @@ class AxialRope(nn.Module):
             raise ValueError(f"p must be in [0, 1], got {p}")
         self.dim, self.base = dim, float(base)
         if timescales is not None:
-            self.timescales = as_ladder(timescales)
-            n_rope = len(self.timescales)
+            rows = ladder_rows(timescales)
+            n_rope = len(rows[0])
             if n_rope > dim // 2:
                 raise ValueError(
                     f"{n_rope} timescales do not fit dim={dim} ({dim // 2} angles)"
                 )
+            if len(rows) > 1 and nhead is not None and len(rows) != nhead:
+                raise ValueError(
+                    f"per-head ladder has {len(rows)} rows for nhead={nhead}"
+                )
+            self.timescales = rows[0] if len(rows) == 1 else rows
             self.p = n_rope / (dim // 2)
-            ts = torch.tensor(self.timescales, dtype=torch.float32)
+            ts = torch.tensor(rows, dtype=torch.float32)  # [H, n_rope]
+            if len(rows) == 1:
+                ts = ts[0]
         else:
             self.timescales = None
             self.p = p
@@ -115,16 +155,26 @@ class AxialRope(nn.Module):
                 raise ValueError(f"no active rotary angle for dim={dim}, p={p}")
             ts = base ** (2.0 * torch.arange(n_rope) / dim)
         timescale = F.pad(ts, (0, dim // 2 - n_rope), value=torch.inf)
+        # [dim // 2] for a shared ladder, [nhead, dim // 2] for a per-head one
         self.register_buffer("timescale", timescale, persistent=False)
 
     @property
+    def per_head(self) -> bool:
+        """Whether every head has its own ladder."""
+        return self.timescale.ndim == 2
+
+    @property
     def wavelengths(self) -> torch.Tensor:
-        """Position lag at which each active angle completes one turn."""
+        """Position lag at which each active angle completes one turn (all
+        heads' angles flattened, head-major, for a per-head ladder)."""
         ts = self.timescale
         return 2 * math.pi * ts[torch.isfinite(ts)]
 
     def angles(self, positions: torch.Tensor) -> torch.Tensor:
-        """``[B, N]`` positions -> ``[B, N, 1, dim // 2]`` angles."""
+        """``[B, N]`` positions -> ``[B, N, 1, dim // 2]`` angles, or
+        ``[B, N, nhead, dim // 2]`` with a per-head ladder."""
+        if self.per_head:
+            return positions[..., None, None] / self.timescale
         return (positions[..., None] / self.timescale)[:, :, None, :]
 
 
@@ -276,19 +326,23 @@ class BlockRope(nn.Module):
         [{"kind": "axial", "axes": [0], "dim": 36, "timescales": [0.5, 1, 4, 30]},
          ...]
 
-    Explicit ladders are kept as lists of floats in ``layout`` so that the
-    layout stays a plain, serialisable description of the encoding.
+    Explicit ladders are kept as lists of floats in ``layout`` (nested per
+    head when they are, see :class:`AxialRope`) so that the layout stays a
+    plain, serialisable description of the encoding.
 
     Use :func:`layout` to build the standard light-curve layouts.
     """
 
     def __init__(self, head_dim: int, nhead: int, layout: list[dict]):
         super().__init__()
-        self.head_dim, self.layout = head_dim, [dict(b) for b in layout]
+        self.head_dim, self.nhead = head_dim, nhead
+        self.layout = [dict(b) for b in layout]
         for spec in self.layout:
-            for key in ("timescales", "scales"):
-                if spec.get(key) is not None:
-                    spec[key] = [float(v) for v in np.asarray(spec[key]).flatten()]
+            if spec.get("timescales") is not None:
+                rows = ladder_rows(spec["timescales"])
+                spec["timescales"] = rows[0] if len(rows) == 1 else rows
+            if spec.get("scales") is not None:
+                spec["scales"] = as_ladder(spec["scales"], "scales")
         self.axes, self.dims, blocks = [], [], []
         for spec in self.layout:
             spec = dict(spec)
@@ -296,7 +350,7 @@ class BlockRope(nn.Module):
             if kind == "axial":
                 if len(axes) != 1:
                     raise ValueError("an axial block takes exactly one axis")
-                blocks.append(AxialRope(dim, **spec))
+                blocks.append(AxialRope(dim, nhead=nhead, **spec))
             elif kind == "simplex":
                 blocks.append(SimplexRope(dim, len(axes), nhead, **spec))
             else:
@@ -367,7 +421,9 @@ def layout(
     Axis 0 (time) always gets its own axial block with base ``time_base``, or
     with the explicit ladder ``time_timescales`` (position units, any
     spacing; it must fit the time block, i.e. hold at most ``time_dim / 2``
-    values, and it fixes the block's active fraction instead of ``p``).
+    values, and it fixes the block's active fraction instead of ``p``; a
+    nested ``[nhead][n]`` ladder gives every head its own, see
+    :class:`AxialRope`).
     The remaining axes share the rest of the head either as equal axial
     slices (``kind="axial"``, base ``base``) or as one nD-RoPE simplex block
     (``kind="simplex"``, base ``theta``).
@@ -394,14 +450,14 @@ def layout(
     def time_block(dim: int) -> dict:
         block = dict(kind="axial", axes=[0], dim=dim, base=time_base, p=p)
         if time_timescales is not None:
-            ts = as_ladder(time_timescales)
-            if len(ts) > dim // 2:
+            rows = ladder_rows(time_timescales)
+            if len(rows[0]) > dim // 2:
                 raise ValueError(
-                    f"{len(ts)} time timescales do not fit the time block "
+                    f"{len(rows[0])} time timescales do not fit the time block "
                     f"(dim {dim}, {dim // 2} angles)"
                 )
-            block["timescales"] = ts
-            block["p"] = len(ts) / (dim // 2)
+            block["timescales"] = rows[0] if len(rows) == 1 else rows
+            block["p"] = len(rows[0]) / (dim // 2)
         return block
 
     if n_axes == 1:
@@ -443,3 +499,40 @@ def layout(
     else:
         raise ValueError(f"kind must be 'axial' or 'simplex', got {kind!r}")
     return blocks
+
+
+def collapse_layout(layouts) -> list[dict]:
+    """One shared layout from a layout or a per-layer list of layouts whose
+    axial blocks may carry per-head ladders.
+
+    Every explicit ``timescales`` ladder becomes the sorted union of all its
+    rows over heads and layers, resampled in log space
+    (:func:`resample_ladder`) to the block's own number of angles when the
+    union is larger; a flat ladder of a single layout is returned as it is.
+    Blocks without an explicit ladder and every other key come from the
+    first layout. This is what a decoder with its own head count takes from
+    an encoder whose heads and layers tile a dense ladder between them.
+    """
+    if not layouts:
+        raise ValueError("collapse_layout needs at least one layout")
+    if isinstance(layouts[0], dict):
+        layouts = [layouts]
+    if any(len(lay) != len(layouts[0]) for lay in layouts):
+        raise ValueError("per-layer layouts must have the same blocks")
+    out = [dict(b) for b in layouts[0]]
+    for i, spec in enumerate(out):
+        if spec.get("timescales") is None:
+            continue
+        rows = []
+        for lay in layouts:
+            rows += ladder_rows(lay[i]["timescales"])
+        n = len(rows[0])
+        if len(rows) == 1:
+            spec["timescales"] = rows[0]
+            continue
+        union = sorted({v for row in rows for v in row})
+        spec["timescales"] = (
+            resample_ladder(union, n) if len(union) > n else [float(v) for v in union]
+        )
+        spec["p"] = len(spec["timescales"]) / (spec["dim"] // 2)
+    return out

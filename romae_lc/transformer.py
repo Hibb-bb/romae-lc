@@ -1,14 +1,16 @@
 """Pre-norm transformer with rotary attention (softmax or linear kernel).
 
 Every attention layer receives a prepared :class:`~romae_lc.rope.Rotation`
-and applies it to queries and keys, so positional information enters only
-through the relative rotary phase. Padding is handled with a boolean mask
+(one shared by all layers, or one per layer) and applies it to queries and
+keys, so positional information enters only through the relative rotary
+phase. Padding is handled with a boolean mask
 ``[B, 1, L, L]`` (True = may attend), built by :func:`attention_mask`.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Sequence
 
 import torch
 import torch.nn as nn
@@ -225,7 +227,8 @@ class Block(nn.Module):
 
 
 class Transformer(nn.Module):
-    """A stack of :class:`Block` sharing one rotary :class:`Rotation`."""
+    """A stack of :class:`Block` sharing one rotary :class:`Rotation`, or
+    taking one per block."""
 
     def __init__(self, cfg: TransformerConfig):
         super().__init__()
@@ -238,10 +241,17 @@ class Transformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        rot: Rotation | None = None,
+        rot: Rotation | Sequence[Rotation] | None = None,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Run all blocks on ``x [B, L, d_model]``."""
-        for layer in self.layers:
-            x = layer(x, rot, mask)
+        """Run all blocks on ``x [B, L, d_model]``; ``rot`` is one rotation
+        for every block or a sequence with exactly one per block."""
+        if isinstance(rot, (list, tuple)):
+            if len(rot) != len(self.layers):
+                raise ValueError(f"{len(rot)} rotations for {len(self.layers)} blocks")
+            rots = rot
+        else:
+            rots = [rot] * len(self.layers)
+        for layer, r in zip(self.layers, rots):
+            x = layer(x, r, mask)
         return x

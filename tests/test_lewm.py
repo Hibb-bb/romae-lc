@@ -460,3 +460,29 @@ def test_hparams_roundtrip():
     assert torch.allclose(m.encode(fr), m2.encode(fr), atol=1e-6)
     with pytest.raises(ValueError):
         LeWorldModel.from_hparams(backbone(), dict(hp, proj_hidden=None))
+
+
+def test_identity_projector_roundtrip():
+    """A world model over a frozen encoder has no projector: ``nn.Identity``
+    reports ``proj_hidden`` 0 and rebuilds through ``from_hparams``."""
+    m = model(projector=nn.Identity(), pred_proj=nn.Identity())
+    hp = m.hparams
+    assert hp["proj_hidden"] == 0 and hp["pred_proj_hidden"] == 0
+    m2 = LeWorldModel.from_hparams(backbone(), hp)
+    assert isinstance(m2.projector, nn.Identity)
+    assert isinstance(m2.pred_proj, nn.Identity)
+    m2.load_state_dict(m.state_dict())
+    m.eval()
+    m2.eval()
+    fr = frames(4)
+    z = m.encode(fr)
+    assert torch.allclose(z, m2.encode(fr), atol=1e-6)
+    assert torch.allclose(z, m.encode(fr, project=False), atol=1e-6)
+    # a mixed model: Identity projector next to an MLP pred_proj
+    mixed = model(projector=nn.Identity())
+    hp = mixed.hparams
+    assert hp["proj_hidden"] == 0 and hp["pred_proj_hidden"] == 64
+    m3 = LeWorldModel.from_hparams(backbone(), hp)
+    m3.load_state_dict(mixed.state_dict())
+    with pytest.raises(ValueError, match="equal widths"):
+        LeWorldModel.from_hparams(backbone(), dict(hp, embed_dim=D + 1))

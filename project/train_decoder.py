@@ -1,8 +1,13 @@
-"""Stage 3 training (M5): a :class:`~project.decoder.QueryDecoder` on the
-frozen latents of a stage-1 checkpoint, and the imputation evaluation.
+"""Stage 3 (M5): a :class:`~project.decoder.QueryDecoder` on frozen latents,
+and the imputation evaluation.
 
-Every window of the stage-1 frame sequences is a training example: the
-frozen encoder embeds it with ``--encoder-drop`` of its points hidden, the
+``--ckpt`` is the stage-1 autoencoder ``mae.pt`` (the frozen pooled CLS
+feature of the MAE encoder; :func:`project.common.load_wm` wraps it in a
+world model with an identity projector) or a stage-2 ``wm.pt`` of
+``train_wm.py`` (its post-projector latent); either way the encoder gets no
+gradient. Every window of the checkpoint's frame sequences is a training
+example: the frozen encoder embeds it with ``--encoder-drop`` of its points
+hidden, the
 decoder is trained on all its points. Evaluation hides ``--holdout-frac`` of
 the points of every validation window (``random`` points or one contiguous
 ``gap`` in time), encodes the rest and decodes the hidden ones; the headline
@@ -14,8 +19,8 @@ process, and the periodic GP oracle that uses the catalogue period with
 ``--oracle``). Resumable like ``train_wm``; ``--wandb`` logs ``train/loss``
 (the decoder loss), the validation imputation metrics, timing and GPU stats.
 
-    python -m project.train_decoder --ckpt project/runs/wm_w500/wm.pt --kind flow \\
-        --out project/runs/wm_w500/dec_flow --baselines --wandb
+    python -m project.train_decoder --ckpt project/runs/mae_w250/mae.pt --kind flow \\
+        --out project/runs/mae_w250/dec_flow --baselines --wandb
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from project.common import (
     cosine_schedule,
     data_args_from,
     dump_json,
+    flat_layout,
     frame_loader,
     get_device,
     load_data,
@@ -307,7 +313,7 @@ def main(argv=None):
     )
     dec = QueryDecoder(
         model.embed_dim,
-        model.backbone.rope.layout,
+        flat_layout(model.backbone),
         err,
         args.kind,
         args.width,

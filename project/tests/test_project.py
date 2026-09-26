@@ -323,6 +323,12 @@ def test_flow_utils():
     lp = flow.log_density(zero, x1, n_steps=2)
     expect = -0.5 * (x1.square().sum(-1) + 3 * np.log(2 * np.pi))
     assert torch.allclose(lp, expect, atol=1e-5)
+    # the sign of the integrated divergence: v(x, s) = x sends N(0, I) to
+    # N(0, e^2 I), so log p_1(x_1) = log N(x_1; 0, I e^2) = base(x_1 / e) - d
+    linear = lambda x, s: x
+    lp = flow.log_density(linear, x1, n_steps=1000)
+    expect = -0.5 * ((x1 / np.e).square().sum(-1) + 3 * np.log(2 * np.pi)) - 3
+    assert torch.allclose(lp, expect, atol=1e-2)
 
 
 # ----------------------------------------------------------------- baselines
@@ -471,12 +477,36 @@ def test_train_scripts_end_to_end(tmp_path):
         "cpu",
         "--out",
         str(out),
+        "--n-frames",
+        "4",
+        "--recon-weight",
+        "0.5",
+        "--recon-width",
+        "24",
+        "--recon-heads",
+        "2",
+        "--recon-depth",
+        "1",
     ]
     train_wm.main(common + ["--steps", "4"])
     assert (out / "wm.pt").is_file() and (out / "DONE").is_file()
     train_wm.main(common + ["--steps", "6"])  # resume from last.pt
     lines = [json.loads(l) for l in open(out / "log.jsonl")]
     assert max(l["step"] for l in lines) == 6
+    kinds = [l["kind"] for l in lines]
+    assert (
+        kinds[0] == "baseline" and lines[1]["kind"] == "eval" and lines[1]["step"] == 0
+    )
+    evals = [l for l in lines if l["kind"] == "eval"]
+    for key in ("val_sigreg_bn_train", "val_recon", "probe_macro_f1", "logP_r2_within"):
+        assert all(key in e for e in evals)
+    assert all(l["recon"] is not None for l in lines if l["kind"] == "train")
+    ckpt = torch.load(out / "wm.pt", map_location="cpu", weights_only=False)
+    assert (
+        "recon" in ckpt
+        and ckpt["ladder"]["heads"] == 2
+        and ckpt["args"]["n_frames"] == 4
+    )
     train_decoder.main(
         [
             "--ckpt",
@@ -573,3 +603,325 @@ def test_fused_encode_matches_per_frame(records, spec, cfg, model):
     s = model.surprise(frames, batch["actions"])
     use_fused_encode(model, False)
     assert torch.isfinite(out.loss) and s.shape == (3, cfg.n_frames - 1)
+
+
+def test_pretrain_mae_then_init_backbone(tmp_path):
+    from project import pretrain_mae, train_wm
+    from project.common import load_mae, load_wm
+
+    out = tmp_path / "mae"
+    common = [
+        "--data", "sim", "--n-sim", "48", "--width", "24", "--depth", "2",
+        "--heads", "2", "--dec-width", "24", "--dec-heads", "2", "--dec-depth", "1",
+        "--window", "30", "--min-tokens", "4", "--max-tokens", "32", "--n-frames", "4",
+        "--batch-size", "4", "--eval-every", "4", "--ckpt-every", "2", "--log-every", "2",
+        "--probe-train", "16", "--probe-val", "8", "--shuffle-objects", "6",
+        "--ladder-curves", "8", "--workers", "0", "--device", "cpu", "--out", str(out),
+    ]  # fmt: skip
+    pretrain_mae.main(common + ["--steps", "4"])
+    assert (out / "mae.pt").is_file() and (out / "DONE").is_file()
+    pretrain_mae.main(common + ["--steps", "6"])  # resume from last.pt
+    lines = [json.loads(l) for l in open(out / "log.jsonl")]
+    assert max(l["step"] for l in lines) == 6 and lines[0]["kind"] == "baseline"
+    assert [l["step"] for l in lines if l["kind"] == "eval"][0] == 0
+    mae, meta = load_mae(out / "mae.pt")
+    assert (
+        meta.ladder.layers == 2 and meta.ladder.heads == 2 and meta.ladder.n_rungs == 12
+    )
+    assert mae.per_layer_rope and mae.rope.blocks[0].per_head
+
+    wm = tmp_path / "wm"
+    train_wm.main(
+        [
+            "--data", "sim", "--n-sim", "48", "--pred-depth", "1", "--pred-heads", "2",
+            "--pred-dim-head", "8", "--pred-mlp", "32", "--proj-hidden", "32",
+            "--n-slices", "16", "--window", "30", "--min-tokens", "4", "--max-tokens", "32",
+            "--n-frames", "4", "--batch-size", "4", "--eval-every", "4", "--ckpt-every", "2",
+            "--log-every", "2", "--probe-train", "16", "--probe-val", "8",
+            "--shuffle-objects", "6", "--surprise-objects", "2", "--workers", "0",
+            "--device", "cpu", "--steps", "4", "--no-eval-at-start",
+            "--init-backbone", str(out / "mae.pt"), "--out", str(wm),
+        ]  # fmt: skip
+    )
+    model, wmeta = load_wm(wm / "wm.pt")
+    assert (
+        wmeta.args["width"] == 24
+        and wmeta.args["depth"] == 2
+        and wmeta.args["heads"] == 2
+    )
+    assert wmeta.ladder.to_dict() == meta.ladder.to_dict()
+    assert model.backbone.rope_layout == mae.rope_layout
+    enc = mae.backbone("cls")
+    for (n, a), (m, b) in zip(
+        enc.named_parameters(), model.backbone.named_parameters()
+    ):
+        assert (
+            n == m and a.shape == b.shape
+        )  # same architecture as the pretrained encoder
+
+
+def test_freeze_backbone(tmp_path):
+    """Stage-2 MSE ablation on frozen stage-1 latents: the encoder is
+    untouched, the projector an identity, SIGReg off, baselines logged."""
+    from project import pretrain_mae, train_wm
+    from project.common import load_mae, load_wm
+
+    out = tmp_path / "mae"
+    common = [
+        "--data", "sim", "--n-sim", "48", "--width", "24", "--depth", "2",
+        "--heads", "2", "--dec-width", "24", "--dec-heads", "2", "--dec-depth", "1",
+        "--window", "30", "--min-tokens", "4", "--max-tokens", "32", "--n-frames", "4",
+        "--batch-size", "4", "--eval-every", "4", "--ckpt-every", "2", "--log-every", "2",
+        "--probe-train", "16", "--probe-val", "8", "--shuffle-objects", "6",
+        "--ladder-curves", "8", "--workers", "0", "--device", "cpu", "--out", str(out),
+    ]  # fmt: skip
+    pretrain_mae.main(common + ["--steps", "4"])
+    mae, _ = load_mae(out / "mae.pt")
+    enc = mae.backbone("cls")
+
+    wm = tmp_path / "wm"
+    wm_args = [
+        "--data", "sim", "--n-sim", "48", "--pred-depth", "1", "--pred-heads", "2",
+        "--pred-dim-head", "8", "--pred-mlp", "32", "--proj-hidden", "32",
+        "--n-slices", "16", "--window", "30", "--min-tokens", "4", "--max-tokens", "32",
+        "--n-frames", "4", "--batch-size", "4", "--eval-every", "4", "--ckpt-every", "2",
+        "--log-every", "2", "--probe-train", "16", "--probe-val", "8",
+        "--shuffle-objects", "6", "--surprise-objects", "2", "--workers", "0",
+        "--device", "cpu", "--no-eval-at-start", "--init-backbone", str(out / "mae.pt"),
+        "--freeze-backbone",
+    ]  # fmt: skip
+
+    def check(steps):
+        ckpt = torch.load(wm / "wm.pt", map_location="cpu", weights_only=False)
+        assert ckpt["step"] == steps
+        assert ckpt["args"]["freeze_backbone"] is True and ckpt["args"]["lamb"] == 0.0
+        assert ckpt["hparams"]["proj_hidden"] == 0 and ckpt["hparams"]["lamb"] == 0.0
+        model, _ = load_wm(wm / "wm.pt")
+        assert isinstance(model.projector, torch.nn.Identity)
+        assert not model.encoder_only
+        names = [n for n, _ in enc.named_parameters()]
+        assert names == [n for n, _ in model.backbone.named_parameters()]
+        for (_, a), (_, b) in zip(enc.named_parameters(), model.backbone.named_parameters()):
+            assert torch.equal(a, b)  # the frozen encoder is the MAE encoder
+        evals = [
+            json.loads(l) for l in open(wm / "log.jsonl") if '"eval"' in l
+        ]
+        evals = [e for e in evals if e["kind"] == "eval"]
+        assert evals and evals[-1]["step"] == steps
+        for e in evals:
+            for k in ("val_pred_persist", "val_pred_histmean", "val_pred_ratio"):
+                assert np.isfinite(e[k])
+            assert e["val_pred_ratio"] == pytest.approx(
+                e["val_pred"] / e["val_pred_persist"], rel=1e-6
+            )
+        return model
+
+    train_wm.main(wm_args + ["--steps", "4", "--out", str(wm)])
+    check(4)
+    train_wm.main(wm_args + ["--steps", "6", "--out", str(wm)])  # resume
+    check(6)
+
+    with pytest.raises((SystemExit, ValueError)):
+        train_wm.main(
+            [a for a in wm_args if a not in ("--init-backbone", str(out / "mae.pt"))]
+            + ["--steps", "4", "--out", str(tmp_path / "bad_no_init")]
+        )
+    with pytest.raises((SystemExit, ValueError)):
+        train_wm.main(
+            wm_args
+            + ["--recon-weight", "0.5", "--steps", "4", "--out", str(tmp_path / "bad_recon")]
+        )
+
+
+def test_prediction_baselines():
+    from project.train_wm import prediction_baselines
+
+    z = torch.randn(3, 5, 7)
+    persist, hist = prediction_baselines(z, history=3)
+    assert persist == pytest.approx((z[:, :-1] - z[:, 1:]).square().mean().item())
+    # t = 0: mean of z[:, :1]; t = 3: mean of z[:, 1:4]
+    m3 = z[:, 1:4].mean(1)
+    manual = torch.stack([z[:, 0], z[:, :2].mean(1), z[:, :3].mean(1), m3], 1)
+    assert hist == pytest.approx((manual - z[:, 1:]).square().mean().item())
+    assert prediction_baselines(z, history=1) == pytest.approx((persist, persist))
+
+
+# --------------------------------------------------------- ladders and probes
+
+
+def test_dense_ladder_dealing_and_geometry():
+    from project.common import (
+        Ladder,
+        RopeGeometry,
+        _nest,
+        check_ladder,
+        deal_ladder,
+        resolve_model_args,
+        rope_geometry,
+    )
+
+    w = np.geomspace(0.1, 100.0, 12)
+    bands = np.array(deal_ladder(w, 2, 2, 3, "bands"))
+    comb = np.array(deal_ladder(w, 2, 2, 3, "comb"))
+    for dealt in (bands, comb):
+        assert dealt.shape == (2, 2, 3)
+        assert np.allclose(np.sort(dealt.ravel()), w)  # every rung exactly once
+        for layer in dealt:  # every layer spans the whole range
+            assert layer.min() <= w[1] and layer.max() >= w[-2]
+    assert bands[0, 0].max() < bands[0, 1].min()  # bands: contiguous per head
+    assert comb[0, 0].max() > comb[0, 1].min()  # comb: heads interleave
+    assert np.array(deal_ladder(w[:3], 1, 1, 3)).shape == (1, 1, 3)
+    with pytest.raises(ValueError):
+        deal_ladder(w, 2, 2, 2, "bands")
+    with pytest.raises(ValueError):
+        deal_ladder(w, 2, 2, 3, "spiral")
+
+    def ns(size):
+        return resolve_model_args(
+            argparse.Namespace(
+                size=size,
+                width=None,
+                heads=None,
+                depth=None,
+                time_frac=0.875,
+                p_rope=0.75,
+            )
+        )
+
+    geo = rope_geometry(ns("light"))
+    assert (geo.layers, geo.heads, geo.head_dim, geo.time_dim, geo.n_angles) == (
+        6,
+        3,
+        64,
+        56,
+        21,
+    )
+    assert geo.n_rungs == 378 and rope_geometry(ns("wide")).n_rungs == 756
+    assert (
+        rope_geometry(
+            argparse.Namespace(width=192, heads=3, depth=6, time_frac=None, p_rope=0.75)
+        ).n_angles
+        == 12
+    )  # the old even split
+    ladder = Ladder(
+        0.01,
+        _nest(bands / 0.0628, 2, 2),
+        _nest(bands, 2, 2),
+        0.1,
+        100.0,
+        "log",
+        "",
+        2,
+        2,
+        "bands",
+    )
+    assert ladder.n_rungs == 12 and ladder.per_head == 3
+    assert ladder.flat == pytest.approx(w.tolist())
+    check_ladder(ladder, RopeGeometry(2, 2, 12, 8, 3))
+    with pytest.raises(ValueError, match="layers"):
+        check_ladder(ladder, RopeGeometry(3, 2, 12, 8, 3))
+    with pytest.raises(ValueError, match="heads"):
+        check_ladder(ladder, RopeGeometry(2, 3, 12, 8, 3))
+    with pytest.raises(ValueError, match="do not fit"):
+        check_ladder(ladder, RopeGeometry(2, 2, 4, 4, 1))
+    old = Ladder.from_dict(
+        dict(time_scale=0.01, timescales=[1.0, 2.0], wavelengths=[0.06, 0.13], lam_min=0.06, lam_max=0.13, spacing="log")
+    )  # fmt: skip
+    assert old.layers == old.heads == 1 and old.deal == "shared" and old.n_rungs == 2
+    assert _nest(np.ones((1, 1, 3)), 1, 1) == [1.0, 1.0, 1.0]
+    assert np.array(_nest(np.ones((1, 2, 3)), 1, 2)).shape == (2, 3)
+
+
+def test_dense_backbone_and_flat_layout(records, spec):
+    from project.common import build_backbone, dense_ladder, flat_layout, rope_geometry
+
+    args = argparse.Namespace(
+        width=24, heads=2, depth=2, mlp_ratio=4.0, time_frac=0.875, p_rope=0.75, attention="softmax"
+    )  # fmt: skip
+    geo = rope_geometry(args)
+    assert (geo.time_dim, geo.n_angles, geo.n_rungs) == (8, 3, 12)
+    ladder = dense_ladder(
+        records, geo, 30.0, "bands", "log", 0.75, 50.0, 8, 0, None, None
+    )
+    assert ladder.layers == 2 and ladder.heads == 2 and ladder.n_rungs == 12
+    assert ladder.lam_max == 60.0 and ladder.deal == "bands"
+    backbone = build_backbone(args, ladder, 2)
+    assert backbone.per_layer_rope and len(backbone.rope_layers) == 2
+    assert backbone.rope.blocks[0].per_head and backbone.rope.dims == [8, 4]
+    got = sorted(
+        float(v)
+        for b in backbone.rope_layers
+        for v in b.blocks[0].timescale[torch.isfinite(b.blocks[0].timescale)]
+    )
+    assert got == pytest.approx(sorted(np.asarray(ladder.timescales).ravel().tolist()))
+    flat = flat_layout(backbone)
+    assert len(flat[0]["timescales"]) == 3 and flat[0]["p"] == 0.75
+    dec = QueryDecoder(24, flat, spec.err_stats, "mse", d_model=36, nhead=3, depth=1)
+    assert dec.rope.blocks[0].per_head is False
+    shared = build_backbone(
+        args, dense_ladder(records, rope_geometry(argparse.Namespace(**dict(vars(args), depth=1))), 30.0, "comb", "log", 0.75, 50.0, 8, 0, None, None), 2
+    )  # fmt: skip
+    assert shared.per_layer_rope is False and shared.rope.blocks[0].per_head
+    with pytest.raises(ValueError, match="layers"):
+        build_backbone(argparse.Namespace(**dict(vars(args), depth=3)), ladder, 2)
+
+
+def test_probe_metrics_and_baseline(records):
+    from project.common import (
+        balanced_accuracy,
+        baseline_probe,
+        describe_by_class,
+        describe_probe,
+        hand_features,
+        macro_f1,
+        probe_metrics,
+    )
+
+    y, pred = np.array([0, 0, 0, 1, 1, 2]), np.array([0, 0, 1, 1, 1, 0])
+    assert macro_f1(y, pred) == pytest.approx((4 / 6 + 4 / 5 + 0.0) / 3)
+    assert balanced_accuracy(y, pred) == pytest.approx((2 / 3 + 1.0 + 0.0) / 3)
+    tr, va = records[:16], records[16:]
+    bands = sorted({int(b) for r in records for b in r.bands})
+    x = hand_features(tr[0], bands)
+    assert x.shape == (4 + 10 * len(bands),) and np.isfinite(x).all()
+    x_tr = np.stack([hand_features(r, bands) for r in tr])
+    x_va = np.stack([hand_features(r, bands) for r in va])
+    m = probe_metrics(x_tr, tr, x_va, va, 5, min_train=1, min_val=1)
+    for k in (
+        "acc",
+        "train_acc",
+        "macro_f1",
+        "balanced_acc",
+        "majority_acc",
+        "r2",
+        "r2_within",
+    ):
+        assert k in m and np.isfinite(m[k])
+    assert 0 <= m["acc"] <= 1 and 0 <= m["macro_f1"] <= 1 and m["n_val"] == len(va)
+    assert set(m["n_by_superclass"]) == {f"c{r.label}" for r in va}
+    assert sum(m["n_by_superclass"].values()) == len(va)
+    assert baseline_probe(tr, va, bands, 5).keys() == m.keys()
+    line = describe_by_class(
+        {"ECL": 0.5, "ROT": 0.1, "X": 0.2}, {"ECL": 10, "ROT": 5, "X": 1}
+    )
+    assert line == "ROT 0.10/5 ECL 0.50/10 X 0.20/1"
+    assert describe_probe(m).startswith("probe acc")
+
+
+def test_batch_stats_context(model):
+    from project.common import batch_stats
+
+    bn = [m for m in model.projector.modules() if isinstance(m, torch.nn.BatchNorm1d)][
+        0
+    ]
+    running = bn.running_mean.clone()
+    x = torch.randn(8, 24)
+    model.eval()
+    with torch.no_grad():
+        y_eval = model.projector(x)
+        with batch_stats(model.projector):
+            assert bn.training and bn.momentum == 0.0
+            y_bn = model.projector(x)
+        assert not bn.training and bn.momentum == 0.1
+    assert torch.equal(bn.running_mean, running)
+    assert not torch.allclose(y_eval, y_bn)

@@ -13,3 +13,4 @@ runs/
 logs/
 results/
 *.npz
+.venv-x86/

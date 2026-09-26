@@ -11,10 +11,13 @@
 #SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
-# Everything after stage 1, sequentially on one GPU, from a stage-1 wm.pt:
-# M4 residual, M5 mse decoder (the workhorse of E_obs), M6 calibrate /
-# anomaly-with-injection / smooth / forecast, M7 period. The flow decoder is
-# a separate chain (train_decoder.sh with KIND=flow).
+# The milestones after the world model, sequentially on one GPU, from a
+# stage-2 wm.pt of train_wm.py (its frozen encoder and MSE predictor are
+# E_dyn; the flow predictor of train_predictor.py is not wired into the
+# energies yet): M4 residual, M5 mse decoder (stage 3, the workhorse of
+# E_obs), M6 calibrate / anomaly-with-injection / smooth / forecast, M7
+# period. The flow decoder is a separate chain (train_decoder.sh with
+# KIND=flow).
 #   sbatch project/jobs/pipeline.sh project/runs/wm_w500/wm.pt
 set -euo pipefail
 export HF_DATASETS_DISABLE_PROGRESS_BARS=1

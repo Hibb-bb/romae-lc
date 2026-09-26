@@ -1,4 +1,7 @@
-"""Energy-based inference with the stage 1-3 checkpoints (M6, M7).
+"""Energy-based inference (M6, M7) with a stage-2 ``wm.pt`` of ``train_wm.py``
+(frozen encoder plus MSE predictor), its ``residual.py`` Gaussian and the
+stage-3 decoder; the flow predictor of ``train_predictor.py`` is not wired
+into the energies yet.
 
 Tasks (all on the ``fill`` window grid of each object, advance 1):
 

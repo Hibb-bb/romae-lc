@@ -1,5 +1,21 @@
 # Latent World Model for Light Curves with Energy-Based Inference
 
+> **Revision 2026-09-26.** Sections 4 and 5 below (stage 1 = encoder and
+> predictor trained jointly on next-latent MSE + SIGReg, stage 2 = a residual
+> model on top of it) are superseded by the frozen-autoencoder pipeline of
+> `project/README.md` ("Decisions (2026-09-26)"). Reason: started from a
+> masked-pretrained encoder that had learned period (within-superclass
+> log-period R2 0.53), the joint objective erased it in 50k steps (0.50 to
+> 0.24, ROT 0.42 to -0.21) while its prediction loss kept improving, because a
+> static per-object latent is the easiest solution of a prediction loss with
+> gradients into the encoder (`project/SESSION-2026-09-25.md`). The stages are
+> now: 1 the autoencoder (`project/pretrain_mae.py`, frozen afterwards); 2 a
+> conditional flow-matching predictor on cached frozen latents, anchored at the
+> last latent (`project/train_predictor.py`; its log density replaces the
+> residual model of section 5); 3 the decoder of section 6
+> (`project/train_decoder.py`) on the same frozen latents. Sections 6 to 8 and
+> the milestones keep their content; their stage numbers are the old ones.
+
 Design doc, v0.1. Single survey (ZTF via PC_matches `ZTFxPC`), built on
 [`romae-lc`](https://github.com/Hibb-bb/romae-lc).
 

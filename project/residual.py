@@ -1,6 +1,12 @@
-"""Stage 2 (M4): the residual of the deterministic predictor.
+"""The residual of the stage-2 MSE predictor (M4, LeWorldModel path).
 
-On frozen stage-1 latents, ``r_t = z_{t+1} - P(z_{<=t}, a_{<=t})`` is
+Stage 1 is the autoencoder (``pretrain_mae.py``), stage 2 the predictor on
+its frozen latents. In the frozen pipeline the conditional flow predictor
+of :mod:`project.train_predictor` is the stochastic transition itself (its
+log density plays the part of the residual model), so this script is only
+for the LeWorldModel variant: with the encoder and the deterministic
+predictor of a ``train_wm.py`` checkpoint (``wm.pt``, jointly trained or
+``--freeze-backbone``) frozen, ``r_t = z_{t+1} - P(z_{<=t}, a_{<=t})`` is
 collected over the training windows with its advance ``Delta`` (window
 units) and modelled at two levels:
 

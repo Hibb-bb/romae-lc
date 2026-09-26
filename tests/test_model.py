@@ -163,3 +163,87 @@ def test_explicit_time_ladder_reaches_the_decoder_and_the_checkpoint():
         RoMAE(encoder=ENCODER, rope=model.rope.layout, rope_timescales=ladder)
     with pytest.raises(ValueError, match="do not fit"):
         RoMAE(encoder=ENCODER, rope_timescales=list(range(1, 20)))
+
+
+def per_layer_layouts():
+    return [
+        layout(16, 2, time_timescales=[[1.0, 2.0], [3.0, 4.0]]),
+        layout(16, 2, time_timescales=[[5.0, 6.0], [7.0, 8.0]]),
+    ]
+
+
+def test_per_layer_layouts_round_trip():
+    lays = per_layer_layouts()
+    model = RoMAE(encoder=ENCODER, rope=lays).eval()
+    assert model.per_layer_rope and len(model.rope_layers) == 2
+    assert model.rope is model.rope_layers[0]
+    assert model.rope_layout == [b.layout for b in model.rope_layers]
+    assert model.rope_layout[1][0]["timescales"] == [[5.0, 6.0], [7.0, 8.0]]
+    values, positions, pad_mask = batch()
+    z = model(values, positions, pad_mask)
+    rots = model.rotations(positions)
+    assert isinstance(rots, list) and len(rots) == 2
+    rebuilt = RoMAE(**model.hparams).eval()
+    rebuilt.load_state_dict(model.state_dict())
+    assert rebuilt.hparams == model.hparams
+    assert torch.allclose(rebuilt(values, positions, pad_mask), z, atol=1e-6)
+    shared = RoMAE(encoder=ENCODER, rope=lays[0]).eval()
+    shared.load_state_dict(model.state_dict())
+    assert not shared.per_layer_rope and shared.rope_layout == lays[0]
+    assert not torch.allclose(shared(values, positions, pad_mask), z, atol=1e-4)
+    with pytest.raises(ValueError, match="per-layer"):
+        RoMAE(encoder=ENCODER, rope=lays * 2)
+    with pytest.raises(ValueError, match="string layouts"):
+        RoMAE(encoder=ENCODER, rope=lays, rope_timescales=[1.0])
+    with pytest.raises(ValueError):
+        RoMAE(encoder=ENCODER, rope=[])
+
+
+def test_masked_decoder_matches_the_pretraining_model():
+    from romae_lc.model import MaskedDecoder
+
+    mae = RoMAEForPreTraining(decoder=DECODER, encoder=ENCODER, mask_ratio=0.5)
+    enc = RoMAE(encoder=ENCODER)
+    enc.load_state_dict(mae.backbone().state_dict())
+    head = MaskedDecoder(enc, decoder=DECODER, mask_ratio=0.5)
+    for name in ("decoder", "encoder_to_decoder", "head"):
+        getattr(head, name).load_state_dict(getattr(mae, name).state_dict())
+    head.mask_token.data.copy_(mae.mask_token.data)
+    values, positions, pad_mask = batch()
+    mask = gen_mask(0.5, pad_mask, torch.Generator().manual_seed(0))
+    mae.eval(), enc.eval(), head.eval()
+    a = mae(values, positions, pad_mask, mask)
+    b = head(enc, values, positions, pad_mask, mask)
+    assert torch.allclose(a.loss, b.loss, atol=1e-6)
+    assert torch.allclose(a.pred, b.pred, atol=1e-6)
+    assert head.hparams["mask_ratio"] == 0.5 and head.hparams["decoder"].d_model == 32
+    owned = {n for n, _ in mae.named_parameters()}
+    owned = {
+        n
+        for n in owned
+        if n.split(".")[0] in ("decoder", "encoder_to_decoder", "mask_token", "head")
+    }
+    assert {n for n, _ in head.named_parameters()} == owned
+    assert not any(p is q for p in head.parameters() for q in enc.parameters())
+    b.loss.backward()
+    assert enc.projection.weight.grad is not None and head.mask_token.grad is not None
+    with pytest.raises(ValueError):
+        MaskedDecoder(enc, DECODER, mask_ratio=0.0)
+
+
+def test_masked_decoder_and_pretraining_over_a_per_layer_encoder():
+    from romae_lc.model import MaskedDecoder, decoder_layout
+
+    lays = per_layer_layouts()
+    enc = RoMAE(encoder=ENCODER, rope=lays)
+    head = MaskedDecoder(enc, decoder=DECODER)
+    assert head.decoder_rope.layout[0]["timescales"] == pytest.approx([1.0, 8.0])
+    assert decoder_layout(lays, 16, 16)[0]["timescales"] == pytest.approx([1.0, 8.0])
+    values, positions, pad_mask = batch()
+    assert torch.isfinite(head(enc, values, positions, pad_mask).loss)
+    mae = RoMAEForPreTraining(decoder=DECODER, encoder=ENCODER, rope=lays)
+    assert mae.per_layer_rope
+    assert mae.decoder_rope.layout[0]["timescales"] == pytest.approx([1.0, 8.0])
+    assert mae._decoder_layout() == mae.decoder_rope.layout
+    assert torch.isfinite(mae(values, positions, pad_mask).loss)
+    assert mae.backbone().hparams == mae.hparams

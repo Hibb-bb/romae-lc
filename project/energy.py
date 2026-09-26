@@ -3,12 +3,16 @@
 
 A path is ``Z [C, K, D]``: ``C`` chains over the ``K`` windows of a grid
 (``frame_grid(fill=True)`` with advance ``a`` in window units, so the action
-after every window is ``a``). With the stage-1 model frozen:
+after every window is ``a``). With the stage-2 world model of ``train_wm.py``
+(``wm.pt``: frozen encoder plus MSE predictor) and the stage-3 decoder frozen:
 
     E_prior(z_k)         = 1/2 ||z_k||^2 / D
-    E_dyn(z_<=k -> z_k)  = mean_D (P(z_{k-h..k-1}, a) - z_k)^2        (stage 1)
-                         = 1/2 r^T Sigma(a)^-1 r / D                  (stage 2 Gaussian)
+    E_dyn(z_<=k -> z_k)  = mean_D (P(z_{k-h..k-1}, a) - z_k)^2        (stage-2 MSE predictor)
+                         = 1/2 r^T Sigma(a)^-1 r / D                  (residual.py Gaussian)
     E_obs(z_k, x_k)      = mean_j (m_j - mu_hat(t_j, b_j | z_k))^2 / (2 sigma_j^2)  (stage 3)
+
+The flow predictor of ``train_predictor.py`` (the main stage-2 path on
+frozen autoencoder latents) is not wired into ``E_dyn`` yet.
 
 all per window and O(1), so the weights ``w_dyn : w_obs : w_prior`` set the
 balance (start by equalising the per-window magnitudes on training data, see

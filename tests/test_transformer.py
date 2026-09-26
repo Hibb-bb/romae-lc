@@ -117,3 +117,18 @@ def test_linear_attention_rejects_query_dependent_masks():
     causal = torch.ones(8, 8).tril().bool()[None, None].expand(2, 1, 8, 8)
     with pytest.raises(NotImplementedError):
         net(x, rope.prepare(positions), causal)
+
+
+def test_per_layer_rotations():
+    net, rope_a = build()
+    _, rope_b = build(p=1.0)
+    x, positions, pad = batch()
+    mask = attention_mask(pad)
+    ra, rb = rope_a.prepare(positions), rope_b.prepare(positions)
+    y = net(x, [ra, rb], mask)
+    h = net.layers[1](net.layers[0](x, ra, mask), rb, mask)
+    assert torch.allclose(y, h, atol=1e-6)
+    assert not torch.allclose(y, net(x, ra, mask), atol=1e-4)
+    assert torch.allclose(net(x, (ra, ra), mask), net(x, ra, mask), atol=1e-6)
+    with pytest.raises(ValueError, match="rotations"):
+        net(x, [ra], mask)

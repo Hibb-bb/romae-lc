@@ -12,7 +12,8 @@
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 # Stage 3 (M5) decoder on a stage-1 checkpoint, as a chain like train_wm.sh
-# (the successor link is queued at the start of every link). KIND=flow|mse.
+# (the successor link is queued at the start of every link; a refused sbatch
+# is retried for 20 min). KIND=flow|mse.
 #   KIND=mse sbatch --job-name=dec-mse project/jobs/train_decoder.sh project/runs/wm_w500/wm.pt --baselines
 set -euo pipefail
 export HF_DATASETS_DISABLE_PROGRESS_BARS=1
@@ -25,15 +26,26 @@ OUT=${OUT:-$(dirname "$CKPT")/dec_$KIND}
 LINK=${LINK:-1}
 MAX_LINKS=${MAX_LINKS:-4}
 BUDGET=${BUDGET:-6000}
+# The QOS refuses a third queued job; retry for 20 min before giving up so a
+# busy queue does not end the chain (the link still trains to its budget).
+queue() {
+    for i in $(seq 40); do
+        sbatch "$@" && return 0
+        echo "sbatch refused (queue full), retry $i / 40 in 30 s"
+        sleep 30
+    done
+    echo "could not queue: $*; resubmit by hand if needed"
+    return 1
+}
 echo "link $LINK / $MAX_LINKS, kind $KIND, out $OUT, args: $*"
 if [ -f "$OUT/DONE" ]; then
     echo "already done: $(cat "$OUT/DONE")"
     exit 0
 fi
 if [ "$LINK" -lt "$MAX_LINKS" ]; then
-    sbatch --job-name="$SLURM_JOB_NAME" --dependency=afterany:"$SLURM_JOB_ID" \
+    queue --job-name="$SLURM_JOB_NAME" --dependency=afterany:"$SLURM_JOB_ID" \
         --export=ALL,KIND="$KIND",OUT="$OUT",LINK=$((LINK + 1)),MAX_LINKS="$MAX_LINKS",BUDGET="$BUDGET" \
-        project/jobs/train_decoder.sh "$CKPT" "$@" || echo "could not queue the next link (queue full)"
+        project/jobs/train_decoder.sh "$CKPT" "$@" || true
 fi
 python -m project.train_decoder --ckpt "$CKPT" --kind "$KIND" --out "$OUT" \
     --workers 8 --time-budget "$BUDGET" --wandb "$@"

@@ -1,4 +1,5 @@
-"""Injected-anomaly test (M2): does the surprise spike where a curve changes?
+"""Injected-anomaly test (M2, on the stage-2 ``wm.pt`` of ``train_wm.py``):
+does the surprise spike where a curve changes?
 
 Every object is scored twice with :func:`~project.diagnostics.grid_surprise`,
 clean and with one anomaly injected at a random time ``t*``. The anomalies
