@@ -2,8 +2,10 @@
 autoencoder (``pretrain_mae``, 4 steps) is trained once per module, its
 window grid is cached with :mod:`project.cache_latents`, and the flow and
 MSE predictors of :mod:`project.train_predictor` are trained, resumed and
-reloaded on the cache. Unit tests cover the anchored log density, sampling
-on a zero velocity field and the advance rounding. About a minute in all."""
+reloaded on the cache, in both architectures (``--arch mlp``, the fixed
+history, and ``--arch seq``, the whole light curve as a sequence). Unit
+tests cover the anchored log density, sampling on a zero velocity field,
+the advance rounding and the sequence sampler. A few minutes in all."""
 
 from __future__ import annotations
 
@@ -21,9 +23,13 @@ from project.train_predictor import (
     FlowPredictor,
     LatentStore,
     MsePredictor,
+    SeqFlowPredictor,
+    SeqMsePredictor,
     anchored_log_density,
+    build_predictor,
     load_predictor,
     round_advance,
+    seq_positions,
 )
 
 MAE_ARGS = [
@@ -118,6 +124,39 @@ def test_cache_layout_and_starts(latents, mae_ckpt):
     assert torch.allclose(z[row].float(), ref, atol=1e-2, rtol=1e-2)
 
 
+def test_cache_realisations(latents, mae_ckpt):
+    from project.train_predictor import LatentStore
+
+    out = mae_ckpt.parent / "latents_real.pt"
+    cache_latents.main(
+        [
+            "--ckpt", str(mae_ckpt), "--out", str(out), "--stride", str(STRIDE),
+            "--device", "cpu", "--workers", "0", "--batch-size", "7", "--realisations", "3",
+        ]  # fmt: skip
+    )
+    c, base = torch.load(out, map_location="cpu", weights_only=False), torch.load(latents, map_location="cpu", weights_only=False)
+    n = c["z"].shape[0]
+    # realisation 0 is the plain cache (different batch padding: float16 rounding only)
+    assert torch.allclose(c["z"].float(), base["z"].float(), atol=2e-3, rtol=1e-2)
+    assert c["z_alt"].shape == (2, n, 24) and torch.isfinite(c["z_alt"].float()).all()
+    assert c["meta"]["realisations"] == 3 and c["meta"]["real_drop"] == 0.5
+    d = (c["z_alt"].float() - c["z"].float()[None]).norm(dim=-1)
+    assert (d > 0).float().mean() > 0.9  # a realisation moves the latent
+    assert (c["z_alt"][0] != c["z_alt"][1]).any()  # and the two differ
+    store = LatentStore(c, "validation", "cpu", int(c["meta"]["min_tokens"]))
+    assert store.n_real == 3 and store.z_all.shape == (3, store.n, 24)
+    rows = torch.arange(min(5, store.n))
+    g = torch.Generator().manual_seed(0)
+    got = store.gather(rows, g)
+    assert got.shape == (len(rows), 24)
+    ok = torch.stack([(got == store.z_all[k, rows]).all(-1) for k in range(3)]).any(0)
+    assert ok.all()  # every gathered row is one of its realisations
+    assert torch.isfinite(store.replicate_std(rows)).all() and store.replicate_std(rows).shape == (len(rows), 24)
+    plain = LatentStore(base, "validation", "cpu", int(base["meta"]["min_tokens"]))
+    assert plain.n_real == 1 and torch.equal(plain.gather(rows), plain.z[rows])
+    assert torch.isnan(plain.replicate_std(rows)).all()
+
+
 def test_cache_max_objects_and_seed(latents, mae_ckpt):
     # With --max-objects the obj column must still be the data[split]
     # position (what objects[split]["index"] holds), and --seed picks the
@@ -172,6 +211,11 @@ EVAL_KEYS = (
     "val_mse_ratio",
     "val_nll",
     "val_nll_persist_gauss",
+    "val_nll_persist_full",
+    "val_mse_ridge",
+    "val_mse_ratio_ridge",
+    "val_nll_ridge_full",
+    "val_replicate_std",
     "val_rollout_mse_h1",
     "val_rollout_persist_h1",
     "val_rollout_norm_drift_h1",
@@ -199,7 +243,7 @@ def test_train_predictor_end_to_end(latents, kind, tmp_path):
     for e in evals:
         for key in EVAL_KEYS:
             assert key in e, key
-        for key in ("val_mse", "val_mse_persist", "val_mse_ratio", "val_nll_persist_gauss", "val_rollout_mse_h1", "val_rollout_norm_drift_h1", "val_true_std"):
+        for key in ("val_mse", "val_mse_persist", "val_mse_ratio", "val_nll_persist_gauss", "val_nll_persist_full", "val_mse_ridge", "val_nll_ridge_full", "val_rollout_mse_h1", "val_rollout_norm_drift_h1", "val_true_std"):
             assert math.isfinite(e[key]), key
         assert e["val_rollout_norm_drift_h1"] > 0
         if kind == "mse":
@@ -231,6 +275,180 @@ def test_train_predictor_end_to_end(latents, kind, tmp_path):
     lp = model.log_prob(target, hist, adv)
     assert lp.shape == (6,) and (torch.isfinite(lp).all() if kind == "flow" else torch.isnan(lp).all())
     assert not torch.equal(model.mu, torch.zeros(24))  # standardisation was set
+
+
+# ---------------------------------------------------------------- sequences
+
+
+def _valid_rows(store, ptr, o):
+    lo, hi = int(ptr[o]), int(ptr[o + 1])
+    return torch.nonzero(store.valid[lo:hi]).flatten() + lo
+
+
+def test_draw_sequences(latents):
+    c = torch.load(latents, map_location="cpu", weights_only=False)
+    store = LatentStore(c, "train", "cpu", 4)
+    ptr = c["ptr"]["train"] - c["splits"]["train"][0]
+    assert store.n_seq_objects > 0 and store.seq_rows.shape[0] == store.n_seq_objects
+    gen = torch.Generator().manual_seed(0)
+    seq = store.draw_sequences(6, 0.5, 8, gen, train=True)
+    rows, gaps, mask, obj = seq["rows"], seq["gaps"], seq["mask"], seq["obj"]
+    assert rows.shape == gaps.shape == mask.shape == (6, 8) and obj.shape == (6,)
+    assert rows.dtype == torch.int64 and mask.dtype == torch.bool
+    assert torch.equal(rows == -1, ~mask)  # -1 exactly where padded
+    assert (mask.sum(1) >= 3).all()
+    assert (mask[:, 1:].long() - mask[:, :-1].long() <= 0).all()  # real windows first
+    assert (gaps[:, 0] == 0).all() and (gaps[~mask] == 0).all()
+    assert (gaps[:, 1:][mask[:, 1:]] >= STRIDE).all()
+    for i in range(6):
+        r = rows[i][mask[i]]
+        lo, hi = int(ptr[obj[i]]), int(ptr[obj[i] + 1])
+        assert (r >= lo).all() and (r < hi).all() and (r[1:] > r[:-1]).all()
+        assert store.valid[r].all()
+        w = store.win[r]
+        expect = torch.cat([torch.zeros(1), (w[1:] - w[:-1]).float() * STRIDE])
+        assert torch.allclose(gaps[i][mask[i]], expect)  # (win difference) * stride
+    # keep 1 and no crop: every valid window of the object, in order
+    full = store.draw_sequences(4, 1.0, 10_000, gen, train=True)
+    for i in range(4):
+        assert torch.equal(full["rows"][i][full["mask"][i]], _valid_rows(store, ptr, full["obj"][i]))
+    # validation: every object once, the full sequence cropped to the LAST max_len
+    val = store.draw_sequences(1000, 1.0, 5, gen, train=False)
+    assert val["rows"].shape == (store.n_seq_objects, 5)
+    assert len(set(val["obj"].tolist())) == store.n_seq_objects
+    for i in range(store.n_seq_objects):
+        expect = _valid_rows(store, ptr, val["obj"][i])[-5:]
+        assert torch.equal(val["rows"][i][val["mask"][i]], expect)
+        assert val["gaps"][i, 0] == 0
+    # the same seed gives the same fixed set
+    a = store.draw_sequences(3, 1.0, 5, torch.Generator().manual_seed(5), train=False)
+    b = store.draw_sequences(3, 1.0, 5, torch.Generator().manual_seed(5), train=False)
+    assert torch.equal(a["rows"], b["rows"])
+    bi, ti = seq_positions(val["mask"], 3)
+    assert (ti >= 3).all() and val["mask"][bi, ti + 1].all() and val["mask"][bi, ti].all()
+
+
+SEQ_ARGS = [
+    "--arch", "seq", "--batch-size", "4", "--max-len", "8", "--seq-hidden", "16",
+    "--seq-depth", "1", "--seq-heads", "2", "--seq-dim-head", "8", "--seq-mlp", "32",
+    "--hidden", "16", "--depth", "1", "--eval-every", "10", "--ckpt-every", "10",
+    "--log-every", "5", "--val-objects", "8", "--eval-samples", "2", "--n-euler", "4",
+    "--device", "cpu",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("kind", ["flow", "mse"])
+def test_train_seq_predictor_end_to_end(latents, kind, tmp_path):
+    out = tmp_path / f"seq_{kind}"
+    common = ["--latents", str(latents), "--out", str(out), "--kind", kind] + SEQ_ARGS
+    train_predictor.main(common + ["--steps", "20"])
+    assert (out / "pred.pt").is_file() and (out / "DONE").is_file()
+    lines = [json.loads(l) for l in open(out / "log.jsonl")]
+    evals = [l for l in lines if l["kind"] == "eval"]
+    assert [e["step"] for e in evals] == [10, 20]
+    for e in evals:
+        for key in EVAL_KEYS:
+            assert key in e, key
+        for key in ("val_mse", "val_mse_persist", "val_mse_histmean", "val_mse_ratio", "val_nll_persist_gauss", "val_nll_persist_full", "val_mse_ridge", "val_mse_ratio_ridge", "val_nll_ridge_full", "val_rollout_mse_h1", "val_rollout_persist_h1", "val_rollout_norm_drift_h1", "val_rollout_mse_h4", "val_true_std"):
+            assert math.isfinite(e[key]), key
+        assert e["val_sequences"] > 0 and e["val_rollout_norm_drift_h1"] > 0
+        bins = e["val_mse_by_history"]
+        assert list(bins) == ["3-5", "6-10", "11-20", "21+"]
+        for v in bins.values():
+            assert set(v) == {"mse", "persist", "ridge", "n"} and v["n"] >= 0
+        assert bins["3-5"]["n"] > 0 and math.isfinite(bins["3-5"]["mse"]) and math.isfinite(bins["3-5"]["persist"])
+        assert sum(v["n"] for v in bins.values()) == e["val_sequences"]  # every position is binned
+        if kind == "mse":
+            assert math.isnan(e["val_nll"]) and math.isnan(e["val_sample_std"])
+        else:
+            assert math.isfinite(e["val_nll"]) and e["val_sample_std"] > 0
+    assert [l["step"] for l in lines if l["kind"] == "train"] == [5, 10, 15, 20]
+    args = json.load(open(out / "args.json"))
+    assert args["arch"] == "seq" and args["batch_size"] == 4
+
+    train_predictor.main(common + ["--steps", "30"])  # resume from last.pt
+    lines = [json.loads(l) for l in open(out / "log.jsonl")]
+    assert max(l["step"] for l in lines) == 30
+    assert [l["step"] for l in lines if l["kind"] == "eval"] == [10, 20, 30]
+
+    model, meta = load_predictor(out / "pred.pt")
+    assert meta["step"] == 30 and meta["kind"] == kind and meta["arch"] == "seq"
+    assert meta["hparams"]["arch"] == "seq" and meta["hparams"]["max_len"] == 8
+    assert meta["hparams"]["hidden"] == 16 and meta["hparams"]["head_hidden"] == 16
+    assert isinstance(model, SeqFlowPredictor if kind == "flow" else SeqMsePredictor)
+    assert not model.training and "opt" not in meta
+    c = torch.load(latents, map_location="cpu", weights_only=False)
+    store = LatentStore(c, "validation", "cpu", meta["latent_meta"]["min_tokens"])
+    seq = store.draw_sequences(5, 1.0, 8, torch.Generator().manual_seed(0), train=False)
+    z = store.z[seq["rows"].clamp(min=0)]
+    h = model.states(z, seq["gaps"], seq["mask"])
+    assert h.shape == (5, seq["rows"].shape[1], 16) and torch.isfinite(h).all()
+    b, t = seq_positions(seq["mask"], 3)
+    h_t, g, z_t, z_next = h[b, t], seq["gaps"][b, t + 1], z[b, t], z[b, t + 1]
+    model2, _ = load_predictor(out / "pred.pt")
+    p1 = model.predict_mean(h_t, g, z_t, 2, generator=torch.Generator().manual_seed(1))
+    p2 = model2.predict_mean(h_t, g, z_t, 2, generator=torch.Generator().manual_seed(1))
+    assert p1.shape == (len(b), 24) and torch.allclose(p1, p2)
+    lp = model.log_prob(z_next, h_t, g, z_t, n_steps=3)
+    assert lp.shape == (len(b),) and (torch.isfinite(lp).all() if kind == "flow" else torch.isnan(lp).all())
+    roll = model.rollout(z, seq["gaps"], seq["mask"], torch.ones(5, 3), generator=torch.Generator().manual_seed(2))
+    assert roll.shape == (5, 3, 24) and torch.isfinite(roll).all()
+    assert not torch.equal(model.mu, torch.zeros(24))
+
+
+def test_build_predictor_old_hparams():
+    # a pred.pt written before --arch existed has no "arch": the mlp model
+    m = build_predictor(dict(kind="flow", dim=3, history=2, hidden=8, depth=1))
+    assert isinstance(m, FlowPredictor) and m.arch == "mlp" and m.hparams["arch"] == "mlp"
+    m = build_predictor(dict(kind="mse", dim=3, history=2, hidden=8, depth=1))
+    assert isinstance(m, MsePredictor) and m.arch == "mlp"
+    s = build_predictor(dict(kind="flow", arch="seq", dim=3, hidden=8, depth=1, heads=2, dim_head=4, mlp_dim=8, max_len=4))
+    assert isinstance(s, SeqFlowPredictor) and s.hparams["arch"] == "seq"
+    assert isinstance(build_predictor(s.hparams), SeqFlowPredictor)
+
+
+def test_seq_flow_zero_field():
+    m = SeqFlowPredictor(
+        3, hidden=8, depth=1, heads=2, dim_head=4, mlp_dim=8, max_len=5,
+        head_hidden=8, head_depth=1, sigma0=0.3, n_euler=3,
+    ).eval()
+    z, gaps = torch.randn(4, 5, 3), torch.rand(4, 5) + 0.5
+    gaps[:, 0] = 0
+    mask = torch.ones(4, 5, dtype=torch.bool)
+    mask[0, 4] = False
+    mask[1, 3:] = False
+    h = m.states(z, gaps, mask)
+    assert h.shape == (4, 5, 8)
+    # a pad never changes a real position, and a later window never an earlier one
+    z2 = z.clone()
+    z2[0, 4] += 5.0
+    assert torch.allclose(m.states(z2, gaps, mask)[0, :4], h[0, :4], atol=1e-5)
+    z3 = z.clone()
+    z3[2, 3] += 5.0
+    h3 = m.states(z3, gaps, mask)
+    assert torch.allclose(h3[2, :3], h[2, :3], atol=1e-5) and not torch.allclose(h3[2, 3], h[2, 3])
+    # a zero-initialised head: the anchored Gaussian, and samples at z_t + sigma0 eps
+    b, t = seq_positions(mask, 2)
+    h_t, g, z_t, z_next = h[b, t], gaps[b, t + 1], z[b, t], z[b, t + 1]
+    lp = m.log_prob(z_next, h_t, g, z_t, n_steps=4)
+    assert torch.allclose(lp, gauss_logpdf(z_next, z_t, 0.3), atol=1e-5)
+    x = m.sample_next(h_t, g, z_t, generator=torch.Generator().manual_seed(0))
+    eps = torch.randn(len(b), 3, generator=torch.Generator().manual_seed(0))
+    assert torch.allclose(x, z_t + 0.3 * eps)
+    # 7 steps from a 5-window prefix: the chain is cropped to max_len each step
+    roll = m.rollout(z, gaps, mask, torch.ones(4, 7), generator=torch.Generator().manual_seed(1))
+    assert roll.shape == (4, 7, 3) and torch.isfinite(roll).all()
+    m.train()
+    loss = m.loss(z, gaps, mask, torch.Generator().manual_seed(0))
+    loss.backward()
+    assert torch.isfinite(loss) and m.head.out.weight.grad is not None
+    mse = SeqMsePredictor(3, hidden=8, depth=1, heads=2, dim_head=4, mlp_dim=8, max_len=5, head_hidden=8, head_depth=1).eval()
+    hm = mse.states(z, gaps, mask)
+    assert torch.allclose(mse.predict_mean(hm[b, t], g, z_t), z_t)  # zero output
+    assert torch.isnan(mse.log_prob(z_next, hm[b, t], g, z_t)).all()
+    assert torch.isfinite(mse.loss(z, gaps, mask))
+    with pytest.raises(ValueError):
+        m.states(torch.randn(2, 6, 3), torch.zeros(2, 6), torch.ones(2, 6, dtype=torch.bool))
 
 
 # --------------------------------------------------------------------- units

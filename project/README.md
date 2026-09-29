@@ -23,6 +23,14 @@ residual" are superseded (see its revision note and the decisions below).
   superclass is kept in `record.meta` for grouped summaries). Nothing is
   excluded: LPVs are in, so the first window is 500 d (they need at least one
   period per window).
+- Added 2026-09-26: the fine classes are the classification target, and
+  three of them are anomaly classes rather than classes to name: RRab-Blazhko,
+  RRc-Blazhko and EW/EB-OC (`common.ANOMALY_CLASSES`). They stay in the data
+  and in every period metric, and are left out of the class probe's fit and
+  score (`n_class_excluded` in the probe output) so that no classifier is
+  trained to recognise what the anomaly scores are meant to find. A later
+  presentation: phase-fold a light curve on the period the model predicts,
+  with no catalogue period involved.
 - The per-point error is a token channel from the start: every token is
   `(m, (log sigma - mu) / sd)`; `--no-err-channel` is the ablation.
 - The catalogue period never enters a model. It is a probe target, the
@@ -149,8 +157,10 @@ with the stage 1-3 pieces.
 What confirms success, in the order the pipeline produces it: the gate's
 effect ratio at the training advance above 1.5 with the probe above the
 baseline; `val/mse_ratio` of the predictor well below 1 (persistence is the
-null); `val/nll` below `val/nll_persist_gauss` (the Gaussian fitted to the
-training changes); `val/rollout_norm_drift_h*` near 1 (the chain stays on
+null) and `val/mse_ratio_ridge` below 1 (the ridge regression from the
+history is the null); `val/nll` below `val/nll_ridge_full` (the ridge
+predictor with a full residual covariance; the diagonal Gaussian
+`val/nll_persist_gauss` is too weak a null); `val/rollout_norm_drift_h*` near 1 (the chain stays on
 the encoder's manifold); `val/sample_std` comparable to `val/true_std` (the
 flow has not collapsed to its mean); the stage-3 decoder's imputation NLL
 below the RBF GP's.
@@ -164,8 +174,8 @@ below the RBF GP's.
 | `pretrain_mae.py` | 1 | the autoencoder: masked pretraining of the window encoder (RoMAE recipe) on the stage-2 windows, or the bottleneck autoencoder with `--bottleneck [--bottleneck-loss all\|hidden]`; writes `mae.pt`, the frozen encoder of every later stage (`train_wm.py --init-backbone`, `cache_latents.py`, `gate.py`, `train_decoder.py`) |
 | `bottleneck.py` | 1 | `BottleneckAE`: the same RoMAE encoder plus a `QueryDecoder` that reconstructs a window's magnitudes from the pooled latent `z [B, D]` alone (the reconstruction demand acts on the latent the later stages read); `mae.pt` with `kind == "bottleneck"`, loaded like a masked-pretraining one |
 | `gate.py` | 1 -> 2 | the gate on frozen latents: probe vs hand-feature baseline, advance effect vs replicate floor, optionally the stage-3 decoder vs the GP; `gate.json`, exit 1 on failure |
-| `cache_latents.py` | 1 -> 2 | encodes a window grid (`--stride` window lengths between starts) of every record once with the frozen encoder into `latents.pt` (float16 `[N, D]` plus object / window / start / token-count indices and CSR pointers per split) |
-| `train_predictor.py` | 2 (M1, M4, M8) | the flow predictor on cached latents: conditional flow matching anchored at the last latent (`--kind flow`; standardised latents, history of `--history` latents and log advances, residual MLP trunk, Euler sampler, Hutchinson log density), `--kind mse` as the ablation; every eval number next to persistence, the history mean and a Gaussian null; resumable, `pred.pt` |
+| `cache_latents.py` | 1 -> 2 | encodes a window grid (`--stride` window lengths between starts) of every record once with the frozen encoder into `latents.pt` (float16 `[N, D]` plus object / window / start / token-count indices and CSR pointers per split); `--realisations K` adds `K - 1` noise realisations of every window (magnitudes redrawn from the errors, `--real-drop` of the points dropped) as `z_alt [K - 1, N, D]`, which the predictor trains on (a random realisation per row) and reports as the replicate floor `val_replicate_std` next to its own sample spread |
+| `train_predictor.py` | 2 (M1, M4, M8) | the flow predictor on cached latents: conditional flow matching anchored at the last latent (`--kind flow`; standardised latents, history of `--history` latents and log advances, residual MLP trunk, Euler sampler, Hutchinson log density), `--kind mse` as the ablation; `--arch seq` reads the whole light curve as a sequence of window latents through a causal transformer (`val_mse_by_history` says whether more history helps); every eval number next to persistence, the history mean and a Gaussian null; resumable, `pred.pt` |
 | `train_wm.py` | 2 (M1) | step-based, resumable LeWorldModel training with the error channel, dense ladder, advance curriculum; `--init-backbone mae.pt --freeze-backbone` is the LeWorldModel MSE ablation on the frozen encoder (identity projector, SIGReg off), `--recon-weight` the joint ablation (the old stage 1); evals: val losses next to the persistence and history-mean nulls (`val_pred_ratio`), class probe (accuracy, macro F1, balanced accuracy, majority), log-period R2 within and per superclass, shuffle score, surprise; hand-feature baseline and step-0 probe |
 | `inject.py` | M2 | injected anomalies (phase, amp, period, bump, color) by template resynthesis on a stage-2 `wm.pt`; hit rate, object / window AUROC, Delta profiles |
 | `residual.py` | 2 (M4, LeWorldModel path) | Gaussian residual of a `train_wm.py` MSE predictor per Delta bin (+ optional flow residual), multimodality diagnostic, latent forecast NLL vs persistence; the flow predictor replaces it in the frozen pipeline |
@@ -197,6 +207,13 @@ OUT=project/runs/bn_w250 sbatch --job-name=bn-w250 project/jobs/pretrain_mae.sh 
 sbatch project/jobs/gate.sh project/runs/mae_w250/mae.pt                    # -> project/runs/mae_w250/gate.json
 # Cache the latents once (1 h; --stride 0.5 for a finer grid)
 sbatch project/jobs/cache_latents.sh project/runs/mae_w250/mae.pt           # -> project/runs/mae_w250/latents.pt
+sbatch project/jobs/cache_latents.sh project/runs/bn_w250/mae.pt --realisations 4   # with 3 noise realisations per window
+sbatch project/jobs/pretrain_mae_wide.sh  # the wide plain MAE (maew_w250, 756 rungs, 150k steps), a chain
+# the bottleneck autoencoder (pretrain_mae_bn.sh, --bottleneck) is kept as an ablation only: with a learned,
+# a known or a unit variance its pooled-only decoder never learned period (bn_w250, bnkv_w250, bnu_w250,
+# within-class R2 0.24-0.27 against the plain MAE's 0.53), so the token-level MAE is the stage-1 encoder
+# the whole frozen pipeline from one submission: realisation cache -> predictor -> wide MAE
+sbatch --job-name=cache-r4 --export=ALL,LATENTS=project/runs/mae_w250/latents_r4.pt,THEN=project/jobs/train_predictor.sh,THEN_OUT=project/runs/pred_w250_r4,THEN_PIPELINE=project/jobs/pretrain_mae_wide.sh project/jobs/cache_latents.sh project/runs/mae_w250/mae.pt --realisations 4
 # Stage 2: the flow predictor on the cache (chain, 400k steps at batch 1024)
 LATENTS=project/runs/mae_w250/latents.pt OUT=project/runs/pred_w250 sbatch --job-name=pred project/jobs/train_predictor.sh
 # the same cache and predictor with the MSE objective (ablation)
@@ -312,7 +329,8 @@ across job chain links through the run id stored in the checkpoints):
   (`val/mse`, `val/mse_persist`, `val/mse_histmean`, `val/mse_ratio`,
   `val/nll`, `val/nll_persist_gauss`, `val/rollout_mse_h*`,
   `val/rollout_persist_h*`, `val/rollout_norm_drift_h*`, `val/sample_std`,
-  `val/true_std`), the final values in the run summary;
+  `val/true_std`; with `--arch seq` also `val/mse_by_history/<bin>/mse`,
+  `.../persist` and `.../n`), the final values in the run summary;
 - stage 2, LeWorldModel (`train_wm`): `train/loss`, `train/pred_loss` (the
   predictor's next-latent error), `train/sigreg_loss` (the encoder's
   Gaussianity regulariser), `train/straightness`, `train/recon_loss` (with
@@ -362,16 +380,27 @@ the final advance range. Every model number sits next to its null, computed
 on the same sequences:
 
 - `val_mse` (one-step error in standardised latent units) next to
-  `val_mse_persist` (predict `z_H`) and `val_mse_histmean` (predict the mean
-  of the history); `val_mse_ratio = val_mse / val_mse_persist`. Persistence
-  is what a static per-object latent makes trivially true, so a ratio near
-  1 means the predictor learned nothing beyond it; well below 1 is the
-  first sign of dynamics.
-- `val_nll` (flow only: the exact log density per dimension, standardised
-  units, from the reverse Euler flow with a Hutchinson divergence) next to
-  `val_nll_persist_gauss`, a Gaussian `N(z_H + m, diag v)` fitted to 50k
-  training changes. The flow has to beat that number to be worth its cost;
-  the `mse` kind reports NaN here.
+  `val_mse_persist` (predict `z_H`), `val_mse_histmean` (predict the mean
+  of the history) and `val_mse_ridge` (a ridge regression of the change on
+  the history and the advances, fitted to 50k training sequences: the
+  strongest cheap predictor); `val_mse_ratio = val_mse / val_mse_persist`
+  and `val_mse_ratio_ridge = val_mse / val_mse_ridge`. Persistence is what
+  a static per-object latent makes trivially true, so a ratio near 1 means
+  the predictor learned nothing beyond it; the ridge ratio is the one that
+  says whether the flow does more than a linear model.
+- `val_nll` (flow only: the log density per dimension, standardised units,
+  from the reverse Euler flow with `--nll-steps` steps and a Hutchinson
+  divergence) next to three nulls fitted to the same 50k training
+  sequences: `val_nll_persist_gauss`, a diagonal Gaussian `N(z_H + m, diag
+  v)`; `val_nll_persist_full`, the same with the full covariance; and
+  `val_nll_ridge_full`, the ridge predictor with the full covariance of its
+  residual. The diagonal null is far too weak when the change lives in a
+  low-dimensional subspace of the latent (2026-09-26 run: +0.84 diagonal,
+  -0.85 full, -0.96 ridge, flow -1.81 nats per dimension); read the flow
+  against the ridge null. The linearised log-determinant of the reverse
+  Euler flow is an upper bound on the log density that tightens with the
+  step count (20 steps overstated it by 0.13, 100 by 0.04, checked against
+  the exact Jacobian by `project/check_nll.py`). The `mse` kind reports NaN.
 - `val_rollout_mse_h{h}` next to `val_rollout_persist_h{h}` for `h` up to
   `--eval-horizons`, repeating the last advance, and
   `val_rollout_norm_drift_h{h}`: the norm of the rolled latent over the norm
@@ -384,8 +413,38 @@ on the same sequences:
 
 `pred.pt` and `DONE` appear at `--steps`; `last.pt` carries the run across
 links. `load_predictor(path)` gives the model in eval mode and its meta
-(kind, hparams, the latent meta with the encoder checkpoint, args, step,
-metrics).
+(kind, arch, hparams, the latent meta with the encoder checkpoint, args,
+step, metrics).
+
+### The sequence predictor (`--arch seq`)
+
+`--arch mlp` (the default, everything above) sees a fixed history of
+`--history` latents. `--arch seq` reads the whole light curve of a star as
+a sequence of window latents: every valid window of the object in window
+order, any number of them, so a star with a longer baseline gives more
+frames. A causal transformer (`romae_lc.ARPredictor`, `--seq-hidden`,
+`--seq-depth`, `--seq-heads`, `--seq-dim-head`, `--seq-mlp`,
+`--seq-dropout`; each window is conditioned on its gap from the previous
+one, in window units) summarises the past of every position into a state,
+and the same flow head as above (`--hidden`, `--depth`), given the state
+and the next gap, predicts the next latent anchored at the current one
+(`--kind mse` is the same ablation). A training step draws `--batch-size`
+objects (default 64), keeps each valid window with probability
+`--seq-keep` (default 0.5, so the gaps vary and sparse curves are seen; at
+least 3 windows are kept) and crops to `--max-len` windows (default 64) at
+random. The evaluation scores the full sequences of `--val-objects`
+validation objects (cropped to the last `--max-len` windows) at every
+position with at least 3 real windows before it, so it reports the same
+keys as the `mlp` evaluation (the nulls use the previous 3 latents and
+their gaps; the rollouts start from a random position and follow the true
+gaps; `val_sequences` counts the scored positions), plus
+`val_mse_by_history`: `mse`, `persist` and `n` in bins of the number of
+windows before the scored one (`3-5`, `6-10`, `11-20`, `21+`). That is the
+number that says whether more history helps: the `mse` (and its ratio to
+`persist`) should fall from bin to bin. Old `pred.pt` files have no `arch`
+and load as `mlp`. `model.states(z, gaps, mask)` gives the states `[B, T,
+hidden]` of a batch of sequences (`LatentStore.draw_sequences`), the input
+of anything that reads a whole light curve, such as a period regression.
 
 ## Gate
 

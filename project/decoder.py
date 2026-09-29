@@ -138,9 +138,20 @@ def decoder_loss(
         v = dec(z, tokens.positions, pad, ls, x_s, s)
         return fm_loss(v, m, eps, mask)
     mu, logvar = dec(z, tokens.positions, pad, ls)
-    var = tokens.extras.float().square() + logvar.exp()
-    nll = 0.5 * ((m - mu).square() / var + var.log())
+    var = gaussian_var(tokens.extras, logvar)
+    nll = 0.5 * ((m - mu.float()).square() / var + var.log())
     return (nll * mask).sum() / mask.sum().clamp(min=1)
+
+
+LOGVAR_RANGE = (-14.0, 10.0)
+
+
+def gaussian_var(sigma: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    """``sigma^2 + exp(logvar)`` in float32 with ``logvar`` clamped to
+    :data:`LOGVAR_RANGE` and a floor of 1e-8: an unclamped head under bf16
+    autocast overflowed to NaN at step 13.8k of the first stage-3 run and
+    poisoned the weights for good."""
+    return (sigma.float().square() + logvar.float().clamp(*LOGVAR_RANGE).exp()).clamp_min(1e-8)
 
 
 def decode_mean(
@@ -186,7 +197,7 @@ def decode_samples(
         noise = torch.randn(
             (n_samples,) + mu.shape, device=mu.device, generator=generator
         )
-        return mu[None] + noise * (0.5 * logvar).exp()[None]
+        return mu[None] + noise * (0.5 * logvar.float().clamp(*LOGVAR_RANGE)).exp()[None]
     v_fn = lambda x, s: dec(z, tokens.positions, pad, ls, x, s)
     return torch.stack(
         [

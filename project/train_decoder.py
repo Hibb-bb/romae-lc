@@ -327,12 +327,15 @@ def main(argv=None):
     opt = torch.optim.AdamW(dec.parameters(), lr=args.lr, weight_decay=args.wd)
     sched = LambdaLR(opt, cosine_schedule(args.steps, args.warmup))
     step, epoch, elapsed, last_metrics = 0, 0, 0.0, None
+    best_nll, n_skipped = float("inf"), 0
     if ckpt is not None:
         dec.load_state_dict(ckpt["state_dict"])
         opt.load_state_dict(ckpt["opt"])
         sched.load_state_dict(ckpt["sched"])
         step, epoch, elapsed = ckpt["step"], ckpt["epoch"], ckpt["elapsed"]
         last_metrics = ckpt.get("metrics")
+        best_nll = float(ckpt.get("best_nll", float("inf")))
+        n_skipped = int(ckpt.get("skipped", 0))
     tracker = Tracker(
         args,
         config=dict(
@@ -359,7 +362,12 @@ def main(argv=None):
     def save(path, metrics, with_opt=True):
         state = decoder_state(dec, dmeta, step, metrics)
         state.update(
-            args=dict(vars(args)), epoch=epoch, elapsed=elapsed, wandb_id=tracker.id
+            args=dict(vars(args)),
+            epoch=epoch,
+            elapsed=elapsed,
+            wandb_id=tracker.id,
+            best_nll=best_nll,
+            skipped=n_skipped,
         )
         if with_opt:
             state.update(opt=opt.state_dict(), sched=sched.state_dict())
@@ -421,14 +429,32 @@ def main(argv=None):
                     for t in range(len(frames))
                 ) / len(frames)
             opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(dec.parameters(), args.clip)
-            opt.step()
+            finite = bool(torch.isfinite(loss))
+            if finite:
+                loss.backward()
+                gn = torch.nn.utils.clip_grad_norm_(dec.parameters(), args.clip)
+                finite = bool(torch.isfinite(gn))
+            if finite:
+                opt.step()
+            else:
+                # one non-finite update poisons the weights for good (the first
+                # stage-3 run went NaN at step 13.8k and never recovered)
+                opt.zero_grad(set_to_none=True)
+                n_skipped += 1
+                if n_skipped in (1, 10) or n_skipped % 100 == 0:
+                    print(
+                        f"non-finite loss or gradient at step {step}: update skipped "
+                        f"({n_skipped} so far)",
+                        flush=True,
+                    )
+                if n_skipped > 1000:
+                    raise RuntimeError("more than 1000 non-finite updates: stopping")
             sched.step()
             timer.done_step()
             step += 1
-            run += loss.item()
-            n_acc += 1
+            if finite:
+                run += loss.item()
+                n_acc += 1
             if step % args.log_every == 0:
                 now = time.time()
                 rate, t_last = (now - t_last) / args.log_every, now
@@ -436,7 +462,7 @@ def main(argv=None):
                 timer.reset()
                 lr = sched.get_last_lr()[0]
                 print(
-                    f"step {step:6d}  loss {run / n_acc:.4f}  lr {lr:.2e}  {rate:.3f} s/step"
+                    f"step {step:6d}  loss {run / max(n_acc, 1):.4f}  lr {lr:.2e}  {rate:.3f} s/step"
                     f"  (data {perf['data_frac']:.0%}, gpu {gpu.get('gpu_util', float('nan')):.0f}%)",
                     flush=True,
                 )
@@ -445,6 +471,7 @@ def main(argv=None):
                     step=step,
                     loss=run / n_acc,
                     lr=lr,
+                    skipped=n_skipped,
                     s_per_step=rate,
                     **perf,
                     **gpu,
@@ -465,6 +492,12 @@ def main(argv=None):
                 elapsed, t_run = elapsed + time.time() - t_run, time.time()
                 last_metrics = evaluate(run / max(n_acc, 1))
                 run, n_acc = 0.0, 0
+                nll = (last_metrics.get("decoder") or {}).get("nll")
+                if nll is not None and nll == nll and nll < best_nll:
+                    # best.pt: the checkpoint the pipeline should use, whatever
+                    # happens later in the run
+                    best_nll = float(nll)
+                    save(out / "best.pt", last_metrics, with_opt=False)
                 t_run = time.time()
                 timer.reset()
             budget = (

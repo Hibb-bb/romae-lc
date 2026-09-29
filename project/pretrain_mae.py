@@ -140,6 +140,23 @@ def add_train_args(parser) -> None:
         default="all",
         help="score every real point of the window or only the hidden ones",
     )
+    g.add_argument(
+        "--bottleneck-var",
+        choices=("learned", "known", "unit"),
+        default="unit",
+        help="bottleneck: the variance the points are scored under: 'unit' "
+        "(plain squared error, the masked-pretraining loss that learns "
+        "period; default), 'known' (the reported error, a 1/sigma^2 weight), "
+        "'learned' (known plus a learned extra variance: lets the decoder "
+        "explain an oscillation as scatter and stalls period learning)",
+    )
+    g.add_argument(
+        "--denoise",
+        action="store_true",
+        help="bottleneck: the encoder sees magnitudes redrawn from N(m, sigma) "
+        "while the decoder is scored on the observed ones (measurement-noise "
+        "invariance at the known level)",
+    )
     g.add_argument("--eval-every", type=int, default=2500)
     g.add_argument("--ckpt-every", type=int, default=1000)
     g.add_argument("--log-every", type=int, default=100)
@@ -261,6 +278,8 @@ def main(argv=None):
             decoder=decoder,
             mask_ratio=args.mask_ratio,
             loss_on=args.bottleneck_loss,
+            denoise=args.denoise,
+            learned_var={"learned": True, "known": False, "unit": "unit"}[args.bottleneck_var],
         )
     else:
         model = RoMAEForPreTraining(

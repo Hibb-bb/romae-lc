@@ -40,12 +40,19 @@ queue() {
 echo "link $LINK / $MAX_LINKS, kind $KIND, out $OUT, args: $*"
 if [ -f "$OUT/DONE" ]; then
     echo "already done: $(cat "$OUT/DONE")"
+    if [ -n "${THEN:-}" ] && [ -f "$THEN" ]; then
+        # THEN=<script> runs after the decoder, handed the stage-1 checkpoint
+        echo "submitting $THEN $CKPT"
+        queue --export=ALL,OUT=,LINK=1,THEN=,PIPELINE= "$THEN" "$CKPT"
+    fi
     exit 0
 fi
 if [ "$LINK" -lt "$MAX_LINKS" ]; then
-    queue --job-name="$SLURM_JOB_NAME" --dependency=afterany:"$SLURM_JOB_ID" \
+    # in the background: a full queue makes this retry for up to 20 min, and
+    # waiting for it can push a link past its 2 h limit
+    ( queue --job-name="$SLURM_JOB_NAME" --dependency=afterany:"$SLURM_JOB_ID" \
         --export=ALL,KIND="$KIND",OUT="$OUT",LINK=$((LINK + 1)),MAX_LINKS="$MAX_LINKS",BUDGET="$BUDGET" \
-        project/jobs/train_decoder.sh "$CKPT" "$@" || true
+        project/jobs/train_decoder.sh "$CKPT" "$@" || true ) &
 fi
 python -m project.train_decoder --ckpt "$CKPT" --kind "$KIND" --out "$OUT" \
     --workers 8 --time-budget "$BUDGET" --wandb "$@"

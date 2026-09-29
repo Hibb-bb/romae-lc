@@ -15,14 +15,17 @@ replicate floor, a decision, exit 1 when it fails):
 2. **Advance effect vs replicate floor** (hard gate): for ``--n-objects``
    validation objects a reference window at a seeded start ``s`` is encoded,
    then the window shifted by every advance ``a`` of ``--advances`` (window
-   units); ``effect(a) = ||z(s + a w) - z(s)||``. The replicate floor of the
-   object is ``||z_a - z_b||`` for two independent random drops of ``--drop``
-   of the reference window's points: what the latent moves by when nothing
-   but the sampling changes. The ratio ``effect(a) / median floor`` must be
-   at least ``--min-effect`` at ``--train-advance`` (the smallest advance of
-   the stage-2 training range). The median cosine between ``z(s)`` and
-   ``z(s + a w)`` says how far the latent has turned; a suggested advance
-   range is printed as a hint.
+   units). The replicate floor of the object is ``||z_a - z_b||`` for two
+   independent random drops of ``--drop`` of the reference window's points:
+   what the latent moves by when nothing but the sampling changes. The
+   shifted window gets the same drop, and ``effect(a) = ||z(s + a w) - z_a||``
+   is measured from one of the two replicates, so effect and floor carry the
+   same sampling noise: with no real shift the ratio ``effect(a) / median
+   floor`` sits at 1, and a shift of the floor's own size takes it to about
+   1.4. The ratio must be at least ``--min-effect`` at ``--train-advance``
+   (the smallest advance of the stage-2 training range). The median cosine
+   between ``z_a`` and ``z(s + a w)`` says how far the latent has turned; a
+   suggested advance range is printed as a hint.
 3. **Decoder vs GP** (only with ``--decoder-results``): the stage-3 decoder's
    validation imputation NLL from a ``train_decoder`` result (its
    ``log.jsonl``, ``dec.pt`` / ``last.pt``, or a json with the same keys)
@@ -263,12 +266,17 @@ def effect_part(enc, meta, records, args, device) -> dict:
             if len(f[0]) < cfg.min_tokens:
                 shifted[a].append(None)
             else:
+                # the shifted window gets the same drop as the replicates, so
+                # effect and floor carry the same sampling noise (like for like)
                 rng_k = np.random.default_rng([args.seed, i, 2, k])
-                shifted[a].append(subsample_frame(f, cfg.max_tokens, rng_k))
+                f = subsample_frame(f, cfg.max_tokens, rng_k)
+                n_keep_k = max(1, int(np.ceil(len(f[0]) * (1.0 - args.drop))))
+                shifted[a].append(subsample_frame(f, n_keep_k, rng_k))
     groups = np.array(groups)
-    z_ref = encode_windows(enc, spec, refs, args.batch_size, device)
+    z_full = encode_windows(enc, spec, refs, args.batch_size, device)
     z_a = encode_windows(enc, spec, drop_a, args.batch_size, device)
     z_b = encode_windows(enc, spec, drop_b, args.batch_size, device)
+    z_ref = z_a  # one dropped replicate is the reference the shifts are measured from
     floor = np.linalg.norm(z_a - z_b, axis=1) if len(chosen) else np.zeros(0)
     floor_med = _median(floor)
     counts = {g: int((groups == g).sum()) for g in set(groups.tolist())}
@@ -322,7 +330,7 @@ def effect_part(enc, meta, records, args, device) -> dict:
         f"  {len(chosen)} of {len(records)} objects with a usable reference window "
         f"({n_no_window} without); replicate floor (drop {args.drop:.0%}) median "
         f"{floor_med:.4f} mean {float(floor.mean()) if floor.size else float('nan'):.4f} "
-        f"| ref latent norm median {_median(np.linalg.norm(z_ref, axis=1)):.3f} | "
+        f"| ref latent norm median {_median(np.linalg.norm(z_full, axis=1)):.3f} | "
         f"{time.time() - t0:.0f}s"
     )
     head = [g for g in order if g in HEADLINE] or order[:3]

@@ -115,6 +115,18 @@ def superclass(record: Record) -> str:
     return str(record.meta.get("superclass_str", "?"))
 
 
+def fine_class(record: Record) -> str:
+    return str(record.meta.get("class_str", "?"))
+
+
+#: Fine classes kept out of the class probe (decision of 2026-09-26): they are
+#: anomaly classes (Blazhko modulation, O'Connell-effect eclipsing binaries),
+#: the kind of object the anomaly scores are meant to find, so a classifier
+#: must not be trained to name them. Their periods still count in every
+#: period metric and they stay in the training data.
+ANOMALY_CLASSES = ("RRab-Blazhko", "RRc-Blazhko", "EW/EB-OC")
+
+
 def load_data(args, splits: Sequence[str] = ("train", "validation")) -> Data:
     """Load and standardise the requested splits (see :class:`Data`)."""
     if args.data == "sim":
@@ -1240,10 +1252,17 @@ def probe_metrics(
     superclass mean, so class-level period differences do not count) and
     per superclass with at least ``min_train`` / ``min_val`` records
     (``r2_by_superclass``, with every superclass's validation count in
-    ``n_by_superclass``)."""
+    ``n_by_superclass``). Records of the :data:`ANOMALY_CLASSES` are left out
+    of the class probe (fit and score; ``n_class_excluded`` counts them) and
+    kept in every period metric."""
     y_tr, y_va = (np.array([r.label for r in rs]) for rs in (r_tr, r_va))
     p_tr, p_va = (np.log10([r.period for r in rs]) for rs in (r_tr, r_va))
-    out = linear_probe(z_tr, y_tr, z_va, y_va, n_classes)
+    k_tr, k_va = (
+        np.array([fine_class(r) not in ANOMALY_CLASSES for r in rs], dtype=bool)
+        for rs in (r_tr, r_va)
+    )
+    out = linear_probe(z_tr[k_tr], y_tr[k_tr], z_va[k_va], y_va[k_va], n_classes)
+    out["n_class_excluded"] = int((~k_tr).sum() + (~k_va).sum())
     out["r2"] = ridge_r2(z_tr, p_tr, z_va, p_va)
     g_tr, g_va = (np.array([superclass(r) for r in rs]) for rs in (r_tr, r_va))
     means = {g: float(p_tr[g_tr == g].mean()) for g in set(g_tr.tolist())}

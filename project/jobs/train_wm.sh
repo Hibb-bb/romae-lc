@@ -71,9 +71,11 @@ if [ -f "$OUT/DONE" ]; then
     exit 0
 fi
 if [ "$LINK" -lt "$MAX_LINKS" ]; then
-    queue --job-name="$SLURM_JOB_NAME" --dependency=afterany:"$SLURM_JOB_ID" \
+    # in the background: a full queue makes this retry for up to 20 min, and
+    # waiting for it can push a link past its 2 h limit
+    ( queue --job-name="$SLURM_JOB_NAME" --dependency=afterany:"$SLURM_JOB_ID" \
         --export=ALL,OUT="$OUT",LINK=$((LINK + 1)),MAX_LINKS="$MAX_LINKS",BUDGET="$BUDGET",THEN=,PIPELINE="$PIPELINE" \
-        "$SCRIPT" "$@" || true
+        "$SCRIPT" "$@" || true ) &
 fi
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 python -m project.train_wm --out "$OUT" \

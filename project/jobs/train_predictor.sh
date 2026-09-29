@@ -21,6 +21,10 @@
 #   sbatch project/jobs/train_predictor.sh project/runs/mae_w250/latents.pt
 #   OUT=project/runs/pred_w250_mse sbatch --job-name=pred-mse project/jobs/train_predictor.sh \
 #       project/runs/mae_w250/latents.pt --kind mse
+# The sequence predictor (--arch seq: the whole light curve as a sequence of
+# window latents, --batch-size objects per step, see --seq-* and --max-len):
+#   LATENTS=project/runs/maew_w250/latents_r4.pt OUT=project/runs/pred_maew_seq \
+#       sbatch --job-name=pred-seq project/jobs/train_predictor.sh --arch seq --batch-size 64
 # Extra arguments go to project.train_predictor and are remembered in the checkpoint.
 set -euo pipefail
 export HF_DATASETS_DISABLE_PROGRESS_BARS=1
@@ -57,9 +61,12 @@ if [ -f "$OUT/DONE" ]; then
     exit 0
 fi
 if [ "$LINK" -lt "$MAX_LINKS" ]; then
-    queue --job-name="$SLURM_JOB_NAME" --dependency=afterany:"$SLURM_JOB_ID" \
+    # in the background: a full queue makes this retry for up to 20 min, and
+    # waiting for it pushed a link past its 2 h limit (it then lost its
+    # successor and its last steps)
+    ( queue --job-name="$SLURM_JOB_NAME" --dependency=afterany:"$SLURM_JOB_ID" \
         --export=ALL,LATENTS="$LATENTS",OUT="$OUT",LINK=$((LINK + 1)),MAX_LINKS="$MAX_LINKS",BUDGET="$BUDGET",THEN=,PIPELINE="$PIPELINE" \
-        "$SCRIPT" "$@" || true
+        "$SCRIPT" "$@" || true ) &
 fi
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 python -m project.train_predictor --latents "$LATENTS" --out "$OUT" \

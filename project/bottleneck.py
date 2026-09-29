@@ -45,7 +45,7 @@ from romae_lc import RoMAE, Tokens
 from romae_lc.model import pool_tokens
 
 from project.common import flat_layout, fuse_frames
-from project.decoder import QueryDecoder, drop_tokens
+from project.decoder import QueryDecoder, drop_tokens, gaussian_var
 
 LOSS_ON = ("all", "hidden")
 
@@ -81,18 +81,38 @@ def fuse_tokens(frames: Sequence[Tokens]) -> Tokens:
 
 
 def masked_decoder_loss(
-    dec: QueryDecoder, z: torch.Tensor, tokens: Tokens, scored: torch.Tensor
+    dec: QueryDecoder,
+    z: torch.Tensor,
+    tokens: Tokens,
+    scored: torch.Tensor,
+    learned_var: bool | str = True,
 ):
     """:func:`project.decoder.decoder_loss` of the ``mse`` kind averaged over
     ``scored [B, N]`` instead of every real token; returns ``(loss, mu,
     logvar)``. The decoder sees only positions and errors of the query
-    tokens, never their magnitudes, so scoring visible points leaks nothing."""
+    tokens, never their magnitudes, so scoring visible points leaks nothing.
+
+    ``learned_var=False`` scores the points under the known error alone,
+    ``var = sigma^2``: with a learned extra variance the decoder can explain
+    a star's oscillation as scatter (a wide variance around the mean level)
+    instead of predicting it, which is what the first bottleneck runs did
+    (recon loss far below zero, period probe at the hand-feature baseline).
+    Under the known error only, the oscillation has to be predicted, which
+    needs the period and phase in the latent. ``learned_var="unit"`` is the
+    plain squared error (variance 1 everywhere, the loss of the masked
+    pretraining that is known to learn period): the errors then weight
+    nothing, they only reach the model as an input channel."""
     if dec.kind != "mse":
         raise ValueError("the bottleneck decoder is the mse kind")
     m = tokens.values[..., 0].float()
     mu, logvar = dec(z, tokens.positions, tokens.pad_mask, dec.log_sigma(tokens))
-    var = tokens.extras.float().square() + logvar.exp()
-    nll = 0.5 * ((m - mu).square() / var + var.log())
+    if learned_var == "unit":
+        var = torch.ones_like(m)
+    elif learned_var:
+        var = gaussian_var(tokens.extras, logvar)
+    else:
+        var = tokens.extras.float().square().clamp_min(1e-8)
+    nll = 0.5 * ((m - mu.float()).square() / var + var.log())
     scored = scored & ~tokens.pad_mask
     return (nll * scored).sum() / scored.sum().clamp(min=1), mu, logvar
 
@@ -132,6 +152,8 @@ class BottleneckAE(nn.Module):
         mask_ratio: float = 0.5,
         loss_on: str = "all",
         use_cls: bool = True,
+        denoise: bool = False,
+        learned_var: bool | str = True,
     ):
         super().__init__()
         if not use_cls:
@@ -141,6 +163,9 @@ class BottleneckAE(nn.Module):
         if loss_on not in LOSS_ON:
             raise ValueError(f"loss_on must be one of {LOSS_ON}, got {loss_on!r}")
         self.mask_ratio, self.loss_on = float(mask_ratio), loss_on
+        if learned_var not in (True, False, "unit"):
+            raise ValueError(f"learned_var must be True, False or 'unit', got {learned_var!r}")
+        self.denoise, self.learned_var = bool(denoise), learned_var
         self.encoder = RoMAE(
             pool="cls", encoder=encoder, n_channels=n_channels, n_axes=n_axes, rope=rope
         )
@@ -217,6 +242,8 @@ class BottleneckAE(nn.Module):
             decoder=dict(self.dec_cfg),
             mask_ratio=self.mask_ratio,
             loss_on=self.loss_on,
+            denoise=self.denoise,
+            learned_var=self.learned_var,
             err_stats=self.decoder.err_stats.tolist(),
         )
 
@@ -244,9 +271,22 @@ class BottleneckAE(nn.Module):
             raise ValueError("tokens carry no extras (per-point sigma)")
         visible = drop_tokens(tokens, self.mask_ratio, generator, keep_min=2)
         hidden = visible.pad_mask & ~tokens.pad_mask
+        if self.denoise and self.training:
+            # denoising: the encoder sees magnitudes redrawn from N(m, sigma),
+            # the decoder is still scored on the observed ones under sigma
+            values = visible.values.clone()
+            noise = torch.randn(
+                values.shape[:-1], device=values.device, generator=generator
+            )
+            values[..., 0] = values[..., 0] + visible.extras.to(values.dtype) * noise.to(
+                values.dtype
+            ) * (~visible.pad_mask).to(values.dtype)
+            visible = Tokens(values, visible.positions, visible.pad_mask, visible.extras)
         z = self.latent(visible)
         scored = hidden if self.loss_on == "hidden" else ~tokens.pad_mask
-        loss, mu, logvar = masked_decoder_loss(self.decoder, z, tokens, scored)
+        loss, mu, logvar = masked_decoder_loss(
+            self.decoder, z, tokens, scored, learned_var=self.learned_var
+        )
         return BottleneckOutput(loss, z, mu, logvar, scored, hidden)
 
     @classmethod

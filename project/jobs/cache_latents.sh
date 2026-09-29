@@ -32,6 +32,9 @@ echo "ckpt $CKPT, latents $LATENTS, then '${THEN}', args: ${*:2}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 python -m project.cache_latents --ckpt "$CKPT" --out "$LATENTS" --workers 8 "${@:2}"
 if [ -n "$THEN" ] && [ -f "$THEN" ]; then
-    echo "submitting $THEN $LATENTS"
-    sbatch --export=ALL,OUT=,LINK=1,THEN=,PIPELINE= "$THEN" "$LATENTS"
+    # THEN_OUT names the successor's output directory (its own default
+    # otherwise); THEN_PIPELINE is the successor's own PIPELINE (the stages
+    # to run after it, e.g. a wide autoencoder after the predictor)
+    echo "submitting $THEN $LATENTS (OUT=${THEN_OUT:-default}, pipeline after it '${THEN_PIPELINE:-}')"
+    sbatch --export=ALL,OUT="${THEN_OUT:-}",LINK=1,THEN=,PIPELINE="${THEN_PIPELINE:-}" "$THEN" "$LATENTS"
 fi

@@ -115,6 +115,47 @@ def small_model(records, spec, loss_on="all", mask_ratio=0.5, **dec) -> Bottlene
 # ------------------------------------------------------------------- module
 
 
+def test_denoise_resamples_the_encoder_input(records, spec, frames):
+    model = small_model(records, spec)
+    model.denoise = True
+    tok = frames[0]
+    g1, g2 = torch.Generator().manual_seed(0), torch.Generator().manual_seed(0)
+    a = model(tok, generator=g1)
+    model.denoise = False
+    b = model(tok, generator=g2)
+    assert torch.isfinite(a.loss) and torch.isfinite(b.loss)
+    assert not torch.allclose(a.z, b.z)  # same drop, resampled magnitudes
+    model.denoise = True
+    model.eval()
+    with torch.no_grad():
+        c = model(tok, generator=torch.Generator().manual_seed(0))
+    assert torch.allclose(c.z, b.z, atol=1e-5)  # no resampling in eval mode
+    assert model.bottleneck_hparams["denoise"] is True
+
+
+def test_known_variance_loss(records, spec, frames):
+    model = small_model(records, spec)
+    tok = frames[0]
+    g = torch.Generator().manual_seed(0)
+    a = model(tok, generator=g)
+    model.learned_var = False
+    b = model(tok, generator=torch.Generator().manual_seed(0))
+    assert torch.isfinite(b.loss) and not torch.isclose(a.loss, b.loss)
+    # known error only: the loss is the chi-square term plus log sigma^2,
+    # independent of the decoder's log-variance head
+    sig2 = tok.extras.float().square().clamp_min(1e-8)
+    m = tok.values[..., 0].float()
+    expect = (0.5 * ((m - b.mu.float()).square() / sig2 + sig2.log()) * b.scored).sum() / b.scored.sum()
+    assert torch.allclose(b.loss, expect, atol=1e-4)
+    assert model.bottleneck_hparams["learned_var"] is False
+    b.loss.backward()
+    model.learned_var = "unit"
+    u = model(tok, generator=torch.Generator().manual_seed(0))
+    expect_u = (0.5 * (m - u.mu.float()).square() * u.scored).sum() / u.scored.sum()
+    assert torch.allclose(u.loss, expect_u, atol=1e-4)  # plain squared error
+    assert model.bottleneck_hparams["learned_var"] == "unit"
+
+
 def test_forward_and_gradients(records, spec, frames):
     model = small_model(records, spec)
     tok = frames[0]

@@ -25,6 +25,14 @@ The file is one dict:
 
 - ``z`` float16 ``[N, D]``: the latents, rows grouped by split, then by
   object, then in window order;
+- ``z_alt`` float16 ``[K - 1, N, D]`` or ``None``: with ``--realisations
+  K``, ``K - 1`` noise realisations of every window (magnitudes redrawn
+  from the per-point errors and ``--real-drop`` of the points dropped,
+  :func:`realise`, seeded from the window): what the same star would have
+  given the encoder if observed again. The predictor trains on a random
+  realisation per row, so its predicted spread includes the spread that
+  measurement noise alone produces, and the replicate floor of every window
+  comes for free (``val_replicate_std`` next to ``val_sample_std``);
 - ``obj`` int32 ``[N]``: the record's position in ``data[split]``;
 - ``win`` int16 ``[N]``: the window's index in its object's grid;
 - ``start`` float32 ``[N]``: the window start in days (record time);
@@ -95,13 +103,36 @@ def object_windows(
     return starts, frames, n_tokens
 
 
+def realise(frame: tuple, drop: float, rng: np.random.Generator) -> tuple:
+    """One noise realisation of a ``(t, y, band, err)`` window: the
+    magnitudes redrawn from ``N(y, err)`` and a fraction ``drop`` of the
+    points dropped (at least 2 kept). What the encoder would have seen had
+    the same star been observed again with the same cadence and errors."""
+    t, y, band, err = frame
+    y = (y + rng.standard_normal(len(y)) * err).astype(np.float32)
+    n_keep = max(2, int(np.ceil(len(t) * (1.0 - drop))))
+    return subsample_frame((t, y, band, err), n_keep, rng)
+
+
 class WindowDataset(Dataset):
     """Every window of every object of every split as one flat index. An
     item is ``(split_i, obj_i, win)`` resolved lazily: the object's grid is
     cut once and kept while consecutive items address it (the sampler is
-    sequential, so a worker's batch mostly hits one or two objects)."""
+    sequential, so a worker's batch mostly hits one or two objects). With
+    ``n_real > 1`` every window is followed by ``n_real - 1`` noise
+    realisations of itself (:func:`realise`, seeded from the window), item
+    ``i`` being window ``i // n_real``, realisation ``i % n_real``."""
 
-    def __init__(self, splits: list[tuple[str, list[Record], list[int]]], cfg, stride, cap, seed):
+    def __init__(
+        self,
+        splits: list[tuple[str, list[Record], list[int]]],
+        cfg,
+        stride,
+        cap,
+        seed,
+        n_real: int = 1,
+        real_drop: float = 0.5,
+    ):
         self.splits, self.cfg, self.stride, self.cap, self.seed = (
             splits,
             cfg,
@@ -109,6 +140,7 @@ class WindowDataset(Dataset):
             cap,
             seed,
         )
+        self.n_real, self.real_drop = int(n_real), float(real_drop)
         self.counts = []  # windows per object, per split
         self.offsets = []  # first flat index of every object, per split
         total = 0
@@ -124,7 +156,7 @@ class WindowDataset(Dataset):
         self._key, self._cached = None, None
 
     def __len__(self) -> int:
-        return self.total
+        return self.total * self.n_real
 
     def locate(self, i: int) -> tuple[int, int, int]:
         """``(split_i, obj_i, win)`` of flat index ``i``."""
@@ -144,15 +176,22 @@ class WindowDataset(Dataset):
         return self._cached
 
     def __getitem__(self, i: int) -> dict:
-        s, o, w = self.locate(i)
+        widx, r = divmod(int(i), self.n_real)
+        s, o, w = self.locate(widx)
         starts, frames, n_tokens = self.windows(s, o)
+        frame = frames[w]
+        if r > 0:
+            index = self.splits[s][2][o]
+            frame = realise(frame, self.real_drop, np.random.default_rng([self.seed, index, w, r]))
         return dict(
+            widx=widx,  # the flat window index (the cache row)
+            real=r,
             split=s,
             obj=self.splits[s][2][o],  # the data[split] position, not the subset's
             win=w,
             start=float(starts[w]),
             n_tokens=int(n_tokens[w]),
-            frame=frames[w],
+            frame=frame,
         )
 
 
@@ -162,6 +201,8 @@ def make_collate(spec: TokenSpec):
     def collate(items: list[dict]) -> dict:
         return dict(
             tokens=spec.tokens([it["frame"] for it in items]),
+            widx=torch.tensor([it["widx"] for it in items], dtype=torch.int64),
+            real=torch.tensor([it["real"] for it in items], dtype=torch.int64),
             split=torch.tensor([it["split"] for it in items], dtype=torch.int64),
             obj=torch.tensor([it["obj"] for it in items], dtype=torch.int64),
             win=torch.tensor([it["win"] for it in items], dtype=torch.int64),
@@ -210,6 +251,15 @@ def main(argv=None):
         default=None,
         help="cap subsample seed (default: the checkpoint's data seed)",
     )
+    p.add_argument(
+        "--realisations",
+        type=int,
+        default=1,
+        help="latents per window: the window itself plus this many minus one "
+        "noise realisations of it (magnitudes redrawn from the errors, "
+        "--real-drop of the points dropped), stored as z_alt [K - 1, N, D]",
+    )
+    p.add_argument("--real-drop", type=float, default=0.5, help="drop per realisation")
     add_device_arg(p)
     args = p.parse_args(argv)
     t_start = time.time()
@@ -239,7 +289,10 @@ def main(argv=None):
         + ", ".join(f"{s} {len(r)} objects" for s, r, _ in splits)
         + f"; loaded in {time.time() - t_start:.0f}s"
     )
-    ds = WindowDataset(splits, cfg, args.stride, cap, seed)
+    if args.realisations < 1 or not 0 <= args.real_drop < 1:
+        p.error("--realisations must be >= 1 and --real-drop in [0, 1)")
+    K = args.realisations
+    ds = WindowDataset(splits, cfg, args.stride, cap, seed, K, args.real_drop)
     loader = DataLoader(
         ds,
         args.batch_size,
@@ -247,8 +300,9 @@ def main(argv=None):
         num_workers=args.workers,
         collate_fn=make_collate(spec),
     )
-    n = len(ds)
+    n = ds.total
     z = torch.empty(n, enc.dim, dtype=torch.float16)
+    z_alt = torch.empty(K - 1, n, enc.dim, dtype=torch.float16) if K > 1 else None
     cols = dict(
         split=torch.empty(n, dtype=torch.int64),
         obj=torch.empty(n, dtype=torch.int64),
@@ -260,13 +314,17 @@ def main(argv=None):
     t0, row = time.time(), 0
     with torch.no_grad():
         for i, batch in enumerate(loader):
-            b = batch["obj"].shape[0]
             with amp:
                 zb = enc.encode([batch["tokens"].to(dev)])[:, 0]
-            z[row : row + b] = zb.float().cpu().half()
+            zb = zb.float().cpu().half()
+            widx, real = batch["widx"], batch["real"]
+            base = real == 0
+            z[widx[base]] = zb[base]
             for k, v in cols.items():
-                v[row : row + b] = batch[k]
-            row += b
+                v[widx[base]] = batch[k][base]
+            if z_alt is not None and (~base).any():
+                z_alt[real[~base] - 1, widx[~base]] = zb[~base]
+            row += int(base.sum())
             if (i + 1) % 50 == 0:
                 print(f"  {row} / {n} windows, {time.time() - t0:.0f}s", flush=True)
     assert row == n
@@ -298,10 +356,13 @@ def main(argv=None):
         min_tokens=int(cfg.min_tokens),
         cap=int(cap),
         frames=asdict(cfg),
+        realisations=int(K),
+        real_drop=float(args.real_drop),
         created=dict(encoder_step=meta.step, args=vars(args), seed=seed),
     )
     state = dict(
         z=z,
+        z_alt=z_alt,
         obj=cols["obj"].to(torch.int32),
         win=cols["win"].clamp(max=32767).to(torch.int16),
         start=cols["start"],
@@ -323,7 +384,8 @@ def main(argv=None):
     dump_json(dict(info, counts=counts), out.with_suffix(".json"))
     print(
         f"saved {out}: {sum(counts['objects'].values())} objects, {n} windows "
-        f"({valid} with >= {cfg.min_tokens} points), {counts['gb']:.2f} GB, "
+        f"({valid} with >= {cfg.min_tokens} points), {K} realisation(s) each, "
+        f"{counts['gb']:.2f} GB, "
         f"{counts['seconds']:.0f}s"
     )
 
