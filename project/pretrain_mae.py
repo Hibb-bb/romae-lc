@@ -40,16 +40,20 @@ time-shuffle score; the hand-feature baseline probe once at the start.
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader
 
 from romae_lc import RoMAEForPreTraining
 
 from project.bottleneck import BottleneckAE, bottleneck_state, fuse_tokens
+from project.mae_data import MASK_MODES, MultiWindowDataset, make_mask
 from project.common import (
     FrameEncoder,
     JsonlLog,
@@ -129,6 +133,81 @@ def add_train_args(parser) -> None:
     g.add_argument("--dec-depth", type=int, default=2)
     g.add_argument("--dec-heads", type=int, default=3)
     g.add_argument(
+        "--mask-mode",
+        choices=MASK_MODES,
+        default="random",
+        help="what is hidden: random points, block = whole stretches of time "
+        "(the pattern must be carried across a gap, which needs the period), "
+        "mix = a stretch row with probability --mask-block-prob",
+    )
+    g.add_argument(
+        "--mask-blocks",
+        type=int,
+        nargs=2,
+        default=(1, 6),
+        metavar=("LO", "HI"),
+        help="stretches per window (half of a 250 d window in one stretch is a "
+        "125 d gap, in six about 20 d each)",
+    )
+    g.add_argument("--mask-block-prob", type=float, default=0.5)
+    g.add_argument("--mask-block-pos", choices=("random", "last"), default="random",
+                   help="where a hidden stretch sits: anywhere, or at the end of the input (a hidden last window)")  # fmt: skip
+    g.add_argument("--mask-block-share", type=float, default=0.5,
+                   help="blockplus: share of the hidden points that form the stretch (the rest are random points)")  # fmt: skip
+    g.add_argument(
+        "--loss-weight",
+        choices=("none", "err"),
+        default="none",
+        help="err = every hidden point's squared error divided by its sigma^2 (weights "
+        "capped at --loss-weight-cap times the window's median, mean 1 per window)",
+    )
+    g.add_argument("--loss-weight-cap", type=float, default=20.0)
+    g.add_argument(
+        "--phase-loss",
+        type=float,
+        default=0.0,
+        help="weight of the per-token PHASE objective: a head on every visible token's encoder output "
+        "predicts (cos, sin) of the point's phase from the window's start on the catalogue period "
+        "(the period is a training target only); 0 = off",
+    )
+    g.add_argument(
+        "--fold-loss",
+        type=float,
+        default=0.0,
+        help="weight of the phase-folded reconstruction objective: a phase decoder reads the CLS latent only "
+        "and predicts the window's observed points at their phase (window start, catalogue period) and "
+        "band, Gaussian likelihood under the known errors; the model is asked to phase-fold; 0 = off",
+    )
+    g.add_argument("--fold-harm", type=int, default=8, help="phase harmonics of the fold decoder")
+    g.add_argument("--spectral", action="store_true", help="the spectral layer (a learned periodogram over the tokens) in the encoder")
+    g.add_argument("--spectral-rel", type=float, default=5e-4, help="relative frequency step of its grid")
+    g.add_argument("--spectral-channels", type=int, default=8)
+    g.add_argument("--spectral-reader", type=int, default=32)
+    g.add_argument("--spectral-depth", type=int, default=3)
+    g.add_argument("--spectral-after", type=int, default=2, help="encoder block after which the layer runs")
+    g.add_argument("--spectral-p", type=float, nargs=2, default=(0.02, 500.0), metavar=("PMIN", "PMAX"), help="period range of the grid, days")
+    g.add_argument(
+        "--spectral-aux",
+        type=float,
+        default=0.0,
+        help="weight of the auxiliary cross-entropy of the layer's logits against the catalogue period's bin (target only); 0 = off",
+    )
+    g.add_argument(
+        "--abs-time",
+        action="store_true",
+        help="absolute time features in the tokens (NeRF-style sines and cosines of the time "
+        "since the window's start at every rung of the ladder), so the latent can hold the phase",
+    )
+    g.add_argument(
+        "--window-range",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("LO", "HI"),
+        help="train on windows of random length, log-uniform between LO and HI "
+        "days (the evaluations stay at --window); the ladder then reaches 2 HI",
+    )
+    g.add_argument(
         "--bottleneck",
         action="store_true",
         help="bottleneck autoencoder: a query decoder reads only the pooled "
@@ -183,6 +262,31 @@ def add_train_args(parser) -> None:
     add_device_arg(g)
 
 
+def abs_timescales(ladder) -> list[float]:
+    """Every distinct finite rung of the ladder (position units), sorted:
+    the timescales of the absolute time features (``--abs-time``)."""
+    vals = np.asarray(ladder.timescales, dtype=float).ravel()
+    return sorted({float(v) for v in vals if np.isfinite(v) and v > 0})
+
+
+def error_weights(values, pad, err_stats, cap: float = 20.0) -> torch.Tensor:
+    """``1 / sigma^2`` per token from the standardised log-sigma channel
+    (``values[..., 1]``, see :func:`project.common.err_channel`), capped at
+    ``cap`` times the window's median weight and scaled to mean 1 over the
+    real tokens of every window, so the loss keeps its scale and a few very
+    precise points cannot take it over. 0 on padding."""
+    if values.shape[-1] < 2 or err_stats is None:
+        raise ValueError("--loss-weight err needs the error channel (no --no-err-channel)")
+    mu, sd = err_stats
+    log_sigma = values[..., 1].float() * sd + mu
+    w = torch.exp(-2.0 * log_sigma).masked_fill(pad, 0.0)
+    real = (~pad).float()
+    med = torch.stack([row[m].median() if m.any() else row.new_tensor(1.0) for row, m in zip(w, ~pad)])
+    w = torch.minimum(w, cap * med[:, None])
+    w = w * real.sum(1, keepdim=True) / (w * real).sum(1, keepdim=True).clamp(min=1e-12)
+    return w * real
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -216,6 +320,8 @@ def main(argv=None):
         f"loaded in {time.time() - t_start:.0f}s"
     )
     cfg = frame_config(args)
+    if args.window_range and args.lam_max is None:
+        args.lam_max = 2.0 * float(args.window_range[1])  # the longest window must fit
     if ckpt is not None:
         ladder = Ladder.from_dict(ckpt["ladder"])
         spec = TokenSpec.from_dict(ckpt["spec"])
@@ -249,6 +355,20 @@ def main(argv=None):
         prefetch=args.prefetch,
         pin_memory=args.pin_memory,
     )
+    if args.window_range:
+        ds = MultiWindowDataset(train, cfg, args.window_range, seed=args.seed)
+        loader = DataLoader(
+            ds,
+            args.batch_size,
+            shuffle=True,
+            drop_last=len(ds) > args.batch_size,
+            num_workers=args.workers,
+            collate_fn=spec.collate(),
+            persistent_workers=args.persistent_workers and args.workers > 0,
+            prefetch_factor=args.prefetch if args.workers > 0 else None,
+            pin_memory=args.pin_memory,
+        )
+        print(f"training windows of {args.window_range[0]:g} to {args.window_range[1]:g} d (log-uniform)")
     train_kept = [train[i] for i in loader.dataset.indices]
     val_sub = subset(val, args.val_objects, args.seed)
     val_loader = frame_loader(val_sub, cfg, spec, args.batch_size, seed=args.seed)
@@ -280,6 +400,7 @@ def main(argv=None):
             loss_on=args.bottleneck_loss,
             denoise=args.denoise,
             learned_var={"learned": True, "known": False, "unit": "unit"}[args.bottleneck_var],
+            abs_timescales=abs_timescales(ladder) if args.abs_time else None,
         )
     else:
         model = RoMAEForPreTraining(
@@ -290,6 +411,10 @@ def main(argv=None):
             n_channels=spec.n_channels,
             n_axes=2,
             rope=rope_layouts(args, ladder),
+            abs_timescales=abs_timescales(ladder) if args.abs_time else None,
+            spectral=dict(time_scale=ladder.time_scale, p_min=args.spectral_p[0], p_max=args.spectral_p[1], rel=args.spectral_rel,
+                          channels=args.spectral_channels, reader=args.spectral_reader, depth=args.spectral_depth,
+                          after_layer=args.spectral_after) if args.spectral else None,  # fmt: skip
         )
     model = model.to(dev)
     encoder = FrameEncoder(PooledEncoder(model))
@@ -299,22 +424,104 @@ def main(argv=None):
     )
     state_fn = bottleneck_state if isinstance(model, BottleneckAE) else mae_state
 
-    def forward(frames):
+    if args.mask_mode != "random" and (args.bottleneck or isinstance(model, BottleneckAE)):
+        parser.error("--mask-mode block / mix is for the plain masked autoencoder")
+
+    aux = (args.phase_loss > 0 or args.fold_loss > 0 or args.spectral_aux > 0) and not args.bottleneck
+    if args.spectral_aux > 0 and not args.spectral:
+        parser.error("--spectral-aux needs --spectral")
+    if aux and spec.err_stats is None:
+        parser.error("--phase-loss / --fold-loss need the error channel")
+    phase_head = nn.Linear(model.embed_dim, 2).to(dev) if args.phase_loss > 0 and not args.bottleneck else None
+    fold_dec = None
+    if args.fold_loss > 0 and not args.bottleneck:
+        from project.phase_decoder import PhaseDecoder
+
+        fold_dec = PhaseDecoder(model.embed_dim, model.embed_dim, args.dec_width, args.dec_heads, args.dec_depth, args.fold_harm,
+                                len(spec.tokenize["band_wavelengths"]), latent_drop=0.0).to(dev)  # fmt: skip
+    aux_modules = [m for m in (phase_head, fold_dec) if m is not None]
+    train_periods = torch.tensor([float(r.period or float("nan")) for r in train], dtype=torch.float64)
+    aux_stats = {"phase": [], "fold": [], "spectral": []}
+
+    def aux_losses(out, values, positions, pad, periods_rows):
+        """The per-token phase loss on the encoder's visible-token outputs
+        and the fold loss on the CLS, for rows with a period."""
+        from project.phase_decoder import band_ids, band_table
+
+        from project.decoder import gaussian_var
+
+        ts = spec.tokenize["time_scale"]
+        period = periods_rows.to(dev)
+        ok = torch.isfinite(period) & (period > 0)
+        total = values.new_zeros(())
+        if phase_head is not None:
+            tok, pos, pd = out.enc_tokens[:, 1:], out.enc_positions[:, 0, 1:], out.enc_pad[:, 1:]
+            phi = torch.remainder((pos.double() - 1.0) * ts / period.clamp_min(1e-6)[:, None], 1.0).float()
+            target = torch.stack([torch.cos(2 * math.pi * phi), torch.sin(2 * math.pi * phi)], -1)
+            pred = phase_head(tok.float())
+            pred = pred / pred.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            m = (~pd) & ok[:, None]
+            lp = ((pred - target) ** 2).sum(-1)
+            lp = (lp * m).sum() / m.sum().clamp(min=1)
+            aux_stats["phase"].append(float(lp))
+            total = total + args.phase_loss * lp
+        if fold_dec is not None:
+            z = out.enc_tokens[:, 0].float()
+            phi = torch.remainder((positions[:, 0].double() - 1.0) * ts / period.clamp_min(1e-6)[:, None], 1.0).float()
+            band = band_ids(positions[:, 1], band_table(spec))
+            mu_s, sd_s = spec.err_stats
+            sigma = torch.exp(values[..., 1].float() * sd_s + mu_s)
+            mu, logvar = fold_dec(z, phi, band, pad, None)
+            var = gaussian_var(sigma, logvar)
+            y = values[..., 0].float()
+            nll = 0.5 * ((y - mu.float()).square() / var + var.log())
+            m = (~pad) & ok[:, None]
+            lf = (nll * m).sum() / m.sum().clamp(min=1)
+            aux_stats["fold"].append(float(lf))
+            total = total + args.fold_loss * lf
+        if args.spectral_aux > 0:
+            from romae_lc.spectral import spectral_aux_loss
+
+            ls_ = spectral_aux_loss(model.spectral, period)
+            aux_stats["spectral"].append(float(ls_))
+            total = total + args.spectral_aux * ls_
+        return total
+
+    def forward(frames, mode=None, periods_rows=None):
         """The reconstruction loss of one fused window batch; the bottleneck
-        model takes the Tokens with the per-point errors."""
+        model takes the Tokens with the per-point errors. ``mode`` is the
+        mask mode (default: the run's). With ``periods_rows`` (the catalogue
+        period of every fused row) the auxiliary phase and fold losses are
+        added."""
         if isinstance(model, BottleneckAE):
             return model(fuse_tokens(frames)).loss
-        return model(*fuse_frames(frames)).loss
+        values, positions, pad = fuse_frames(frames)
+        mode = args.mask_mode if mode is None else mode
+        mask = None
+        if mode != "random":
+            mask = make_mask(
+                positions[:, 0], pad, args.mask_ratio, mode, args.mask_blocks, args.mask_block_prob,
+                position=args.mask_block_pos, block_share=args.mask_block_share,
+            )
+        weight = error_weights(values, pad, spec.err_stats, args.loss_weight_cap) if args.loss_weight == "err" else None
+        out = model(values, positions, pad, mask, weight)
+        loss = out.loss
+        if aux and periods_rows is not None:
+            loss = loss + aux_losses(out, values, positions, pad, periods_rows)
+        return loss
 
     print(
         f"params: encoder {sizes['params_encoder'] / 1e6:.2f}M, "
         f"total {sizes['params_total'] / 1e6:.2f}M"
     )
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    opt = torch.optim.AdamW(list(model.parameters()) + [p for m in aux_modules for p in m.parameters()], lr=args.lr, weight_decay=args.wd)
     sched = LambdaLR(opt, cosine_schedule(args.steps, args.warmup))
     step, epoch, elapsed, last_metrics = 0, 0, 0.0, None
     if ckpt is not None:
         model.load_state_dict(ckpt["state_dict"])
+        for name, m in (("phase_head", phase_head), ("fold_dec", fold_dec)):
+            if m is not None and name in ckpt.get("aux", {}):
+                m.load_state_dict(ckpt["aux"][name])
         opt.load_state_dict(ckpt["opt"])
         sched.load_state_dict(ckpt["sched"])
         step, epoch, elapsed = ckpt["step"], ckpt["epoch"], ckpt["elapsed"]
@@ -339,7 +546,8 @@ def main(argv=None):
 
     def save(path, metrics, with_opt=True):
         state = state_fn(model, spec, cfg, ladder, data.classes, args, step, metrics)
-        state.update(epoch=epoch, elapsed=elapsed, wandb_id=tracker.id)
+        state.update(epoch=epoch, elapsed=elapsed, wandb_id=tracker.id,
+                     aux={n: m.state_dict() for n, m in (("phase_head", phase_head), ("fold_dec", fold_dec)) if m is not None})  # fmt: skip
         if with_opt:
             state.update(opt=opt.state_dict(), sched=sched.state_dict())
         save_atomic(state, path)
@@ -348,15 +556,21 @@ def main(argv=None):
     def evaluate(train_stats: dict) -> dict:
         t0 = time.time()
         model.eval()
-        total, n = 0.0, 0
+        total, total_b, n = 0.0, 0.0, 0
+        plain = not isinstance(model, BottleneckAE)
         for batch in val_loader:
             frames = [f.to(dev) for f in batch["frames"]]
             with amp:
-                loss = forward(frames)
+                # random points hidden: the same task in every run, so the
+                # number compares across runs; stretches hidden: the harder task
+                loss = forward(frames, "random")
+                loss_b = forward(frames, "block") if plain else loss
             rows = len(frames) * frames[0].values.shape[0]
             total += loss.item() * rows
+            total_b += loss_b.item() * rows
             n += rows
         v_loss = total / max(n, 1)
+        v_loss_block = total_b / max(n, 1) if plain else float("nan")
         pr = probe(
             encoder,
             probe_tr,
@@ -384,6 +598,7 @@ def main(argv=None):
             elapsed=elapsed,
             **train_stats,
             val_loss=v_loss,
+            val_loss_block=v_loss_block,
             probe_acc=pr["acc"],
             probe_train_acc=pr["train_acc"],
             probe_macro_f1=pr["macro_f1"],
@@ -397,7 +612,7 @@ def main(argv=None):
             eval_seconds=time.time() - t0,
         )
         print(
-            f"  eval @ {step}: val recon {v_loss:.4f} | {describe_probe(pr)} | "
+            f"  eval @ {step}: val recon {v_loss:.4f} (stretches hidden {v_loss_block:.4f}) | {describe_probe(pr)} | "
             f"shuffle {sh:.3f} | {time.time() - t0:.0f}s",
             flush=True,
         )
@@ -405,6 +620,7 @@ def main(argv=None):
         tracker.log(
             {
                 "val/loss": v_loss,
+                "val/loss_block": v_loss_block,
                 "val/probe_acc": pr["acc"],
                 "val/probe_train_acc": pr["train_acc"],
                 "val/probe_macro_f1": pr["macro_f1"],
@@ -447,11 +663,12 @@ def main(argv=None):
         for batch in loader:
             timer.got_batch()
             frames = [f.to(dev) for f in batch["frames"]]
+            periods_rows = train_periods[batch["index"]].repeat(len(frames)) if aux else None
             with amp:
-                loss_t = forward(frames)
+                loss_t = forward(frames, periods_rows=periods_rows)
             opt.zero_grad(set_to_none=True)
             loss_t.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
+            torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [p for m in aux_modules for p in m.parameters()], args.clip)
             opt.step()
             sched.step()
             timer.done_step()
@@ -496,7 +713,10 @@ def main(argv=None):
                 loss = total / max(n_acc, 1)
                 total, n_acc = 0.0, 0
                 elapsed, t_run = elapsed + time.time() - t_run, time.time()
-                last_metrics = evaluate(dict(loss=loss))
+                extra = {k: float(np.mean(v)) for k, v in aux_stats.items() if v}
+                for v in aux_stats.values():
+                    v.clear()
+                last_metrics = evaluate(dict(loss=loss, **extra))
                 t_run = time.time()
                 timer.reset()
             budget = (

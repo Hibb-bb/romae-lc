@@ -1,6 +1,6 @@
 """Latent world model for light curves with energy-based inference.
 
-An extension of ``romae_lc`` following ``lc-world-model-design.md``: stage 1
+An extension of ``romae_lc`` following ``docs/lc-world-model-design.md``: stage 1
 trains the package's :class:`~romae_lc.LeWorldModel` on ZTF windows with the
 per-point error as a second token channel (:mod:`project.train_wm`); stage 2
 fits the residual of the deterministic predictor (:mod:`project.residual`);

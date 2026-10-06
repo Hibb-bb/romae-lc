@@ -95,6 +95,13 @@ def add_data_args(parser: argparse.ArgumentParser) -> None:
     )
     g.add_argument("--max-rows", type=int, default=None, help="cap rows per split")
     g.add_argument("--min-points", type=int, default=8, help="drop shorter records")
+    g.add_argument(
+        "--norm-days",
+        type=float,
+        default=None,
+        help="normalise every star with the median and scatter of its FIRST this many days only "
+        "(per band), so nothing later leaks into the statistics; default: the whole light curve",
+    )
     g.add_argument("--n-sim", type=int, default=256, help="--data sim: stars")
     g.add_argument("--seed", type=int, default=0)
 
@@ -140,7 +147,8 @@ def load_data(args, splits: Sequence[str] = ("train", "validation")) -> Data:
             "test": order[n_val : 2 * n_val],
             "train": order[2 * n_val :],
         }
-        out = {s: [normalize(records[i]) for i in parts[s]] for s in splits}
+        nd = getattr(args, "norm_days", None)
+        out = {s: [normalize(records[i], ref_days=nd) for i in parts[s]] for s in splits}
         wl = {i: s.wavelength_nm for i, s in enumerate(DEFAULT_SURVEYS)}
         return Data(out, CLASSES, wl)
     classes = class_vocabulary(args.data)
@@ -159,11 +167,11 @@ def load_data(args, splits: Sequence[str] = ("train", "validation")) -> Data:
         )
         if keep:
             recs = [r for r in recs if classes[r.label] in keep]
-        out[split] = [normalize(r) for r in recs]
+        out[split] = [normalize(r, ref_days=getattr(args, "norm_days", None)) for r in recs]
     return Data(out, classes, wavelengths_for(PC_BANDS))
 
 
-DATA_KEYS = ("data", "classes", "max_rows", "min_points", "n_sim", "seed")
+DATA_KEYS = ("data", "classes", "max_rows", "min_points", "n_sim", "seed", "norm_days")
 
 
 def data_args_from(saved: dict, overrides=None) -> argparse.Namespace:
@@ -787,8 +795,10 @@ def use_fused_encode(model: LeWorldModel, enabled: bool = True) -> LeWorldModel:
 
 
 PRESETS = {
-    "light": dict(width=192, heads=3, depth=6),
-    "wide": dict(width=384, heads=6, depth=6),
+    "light": dict(width=192, heads=3, depth=6),  # 378 rungs
+    "wide": dict(width=384, heads=6, depth=6),  # 756 rungs
+    "xwide": dict(width=512, heads=8, depth=6),  # 1344 rungs
+    "xxwide": dict(width=768, heads=12, depth=6),  # 2016 rungs
 }
 
 
@@ -803,7 +813,7 @@ def add_model_args(parser) -> None:
         choices=tuple(PRESETS),
         default="light",
         help="encoder preset: light = 192 wide, 3 heads, 6 deep (378 rungs in a "
-        "dense ladder); wide = 384 wide, 6 heads, 6 deep (756 rungs); --width, "
+        "dense ladder); wide = 384 wide, 6 heads, 6 deep (756 rungs); xwide = 512 wide, 8 heads (1344 rungs); xxwide = 768 wide, 12 heads (2016 rungs); --width, "
         "--heads and --depth override it",
     )
     g.add_argument("--width", type=int, default=None, help="encoder width")

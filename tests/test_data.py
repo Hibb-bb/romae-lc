@@ -348,3 +348,23 @@ def test_load_pc_reads_arrow_columns(tmp_path):
     assert [r.period for r in fine] == pytest.approx([0.4, 0.6])
     with pytest.raises(ValueError, match="none of"):
         load_pc(path, "train", bands=("TESS",))
+
+
+def test_normalize_past_only_reference():
+    rng = np.random.default_rng(0)
+    t = np.sort(rng.uniform(0, 3000, 400)).astype(np.float32)
+    y = (np.sin(t) + np.where(t > 1500, 5.0, 0.0)).astype(np.float32)  # a jump after day 1500
+    r = Record(t, y, np.full_like(y, 0.1), np.zeros(400, dtype=np.int64), 0, 1.0)
+    whole = normalize(r)
+    past = normalize(r, ref_days=1000.0)
+    early = t <= 1000
+    # the past-only statistics centre the early part, not the whole curve
+    assert abs(np.median(past.y[early])) < 0.05 and abs(np.median(whole.y[early])) > 0.5
+    assert np.isclose(1.4826 * np.median(np.abs(past.y[early] - np.median(past.y[early]))), 1.0, atol=0.05)
+    # later points are transformed with the same early statistics, so the jump stays visible
+    assert np.median(past.y[t > 1500]) > 3.0
+    # too few early points: the reference grows to the first ref_min points in time
+    r2 = Record(t, y, np.full_like(y, 0.1), np.zeros(400, dtype=np.int64), 0, 1.0)
+    tiny = normalize(r2, ref_days=1.0, ref_min=8)
+    first8 = np.argsort(t)[:8]
+    assert abs(np.median(tiny.y[first8])) < 1e-5

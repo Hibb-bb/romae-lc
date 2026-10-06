@@ -27,6 +27,7 @@ import torch.nn.functional as F
 
 from . import rope as rope_lib
 from .rope import BlockRope, Rotation
+from .spectral import SpectralLayer
 from .transformer import Transformer, TransformerConfig, attention_mask, config
 
 
@@ -119,6 +120,8 @@ class RoMAEBase(nn.Module):
         p_rope: float = 0.75,
         use_cls: bool = True,
         rope_timescales=None,
+        abs_timescales=None,
+        spectral: dict | None = None,
     ):
         super().__init__()
         self.cfg = config(encoder)
@@ -153,7 +156,25 @@ class RoMAEBase(nn.Module):
                     f"rope layout uses {block.n_axes} axes, n_axes={n_axes}"
                 )
         self.projection = nn.Linear(n_channels, self.cfg.d_model)
+        # Absolute time features (NeRF-style): sines and cosines of the time
+        # since the window's start (position units, the CLS sits at 0) at
+        # every timescale in ``abs_timescales``, projected and added to the
+        # token embedding. The rotary blocks only ever see time differences,
+        # so without this the token content is translation invariant and the
+        # pooled latent has no way to hold the phase of the window.
+        self.abs_proj = None
+        if abs_timescales is not None:
+            ts = torch.as_tensor([float(v) for v in abs_timescales], dtype=torch.float32)
+            if ts.numel() == 0 or not torch.isfinite(ts).all() or (ts <= 0).any():
+                raise ValueError("abs_timescales must be positive finite values")
+            self.register_buffer("abs_timescales", ts)
+            self.abs_proj = nn.Linear(2 * ts.numel(), self.cfg.d_model, bias=False)
         self.transformer = Transformer(self.cfg)
+        # the spectral layer (a learned periodogram over the tokens, see
+        # romae_lc.spectral) between encoder blocks, its summary on the CLS
+        self.spectral = SpectralLayer(self.cfg.d_model, **spectral) if spectral else None
+        if self.spectral is not None and not (0 <= self.spectral.after_layer <= self.cfg.depth):
+            raise ValueError(f"spectral after_layer {self.spectral.after_layer} must be within 0..{self.cfg.depth}")
         self.cls = nn.Parameter(torch.zeros(self.cfg.d_model)) if use_cls else None
         self.apply(_init_weights)
         if self.cls is not None:
@@ -190,7 +211,37 @@ class RoMAEBase(nn.Module):
             n_axes=self.n_axes,
             rope=self.rope_layout,
             use_cls=self.use_cls,
+            abs_timescales=None if self.abs_proj is None else self.abs_timescales.tolist(),
+            spectral=None if self.spectral is None else self.spectral.hparams,
         )
+
+    def run_transformer(self, x, positions, pad_mask, values=None):
+        """The encoder blocks on ``x [B, L, d_model]``, with the spectral
+        layer (when present) after block ``after_layer``; ``values [B, N,
+        C]`` are the raw token values (no CLS row) it also reads."""
+        rot, mask = self.rotations(positions), attention_mask(pad_mask)
+        if self.spectral is None:
+            return self.transformer(x, rot, mask)
+        rots = list(rot) if isinstance(rot, (list, tuple)) else [rot] * len(self.transformer.layers)
+        k = self.spectral.after_layer
+        for layer, r in zip(self.transformer.layers[:k], rots[:k]):
+            x = layer(x, r, mask)
+        x = self.spectral(x, positions, pad_mask, has_cls=self.use_cls, values=values)
+        for layer, r in zip(self.transformer.layers[k:], rots[k:]):
+            x = layer(x, r, mask)
+        return x
+
+    def embed(self, values: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """Token embeddings ``[B, N, d_model]`` of ``values [B, N, C]``: the
+        value projection plus, with ``abs_timescales``, the absolute time
+        features of ``positions [B, n_axes, N]`` (time axis 0, whose origin
+        1.0 is the window's start)."""
+        x = self.projection(values)
+        if self.abs_proj is not None:
+            ang = (positions[:, 0].float() - 1.0)[..., None] / self.abs_timescales
+            feats = torch.cat([torch.sin(ang), torch.cos(ang)], -1)
+            x = x + self.abs_proj(feats.to(x.dtype))
+        return x
 
     def rotations(self, positions: torch.Tensor) -> Rotation | list[Rotation]:
         """The rotary tables for ``positions [B, n_axes, N]``: one
@@ -219,14 +270,14 @@ class RoMAEBase(nn.Module):
         CLS token a batch with no tokens at all (``N == 0``) raises
         ``ValueError``."""
         x, positions, pad_mask = self.add_cls(
-            self.projection(values), positions, pad_mask
+            self.embed(values, positions), positions, pad_mask
         )
         if x.shape[1] == 0:
             raise ValueError(
                 "empty token batch: with use_cls=False the encoder needs at least "
                 "one token in some row (an all-empty frame window; see FrameConfig)"
             )
-        x = self.transformer(x, self.rotations(positions), attention_mask(pad_mask))
+        x = self.run_transformer(x, positions, pad_mask, values)
         return x, pad_mask
 
 
@@ -327,6 +378,12 @@ class MAEOutput:
     pred: torch.Tensor
     target: torch.Tensor
     mask: torch.Tensor
+    #: the encoder's outputs ``[B, 1 + V, d_model]`` (CLS first) of the visible
+    #: tokens, their positions ``[B, n_axes, 1 + V]`` and padding ``[B, 1 + V]``,
+    #: for auxiliary heads on the encoder (per-token phase, the fold decoder)
+    enc_tokens: "torch.Tensor | None" = None
+    enc_positions: "torch.Tensor | None" = None
+    enc_pad: "torch.Tensor | None" = None
 
 
 def decoder_layout(enc_layout, enc_head_dim: int, dec_head_dim: int) -> list[dict]:
@@ -408,9 +465,13 @@ def _mae_forward(
     positions,
     pad_mask=None,
     mask=None,
+    weight=None,
 ) -> MAEOutput:
     """Mask, encode the visible tokens with ``encoder``, decode the masked
-    ones with the modules of ``parts`` (see :func:`_mae_head`)."""
+    ones with the modules of ``parts`` (see :func:`_mae_head`). ``weight
+    [B, N]`` (optional) weights every token's squared error in the loss
+    (e.g. ``1 / sigma^2``); the loss is then the weighted mean over the
+    real masked tokens."""
     b, n, _ = values.shape
     if pad_mask is None:
         pad_mask = torch.zeros(b, n, dtype=torch.bool, device=values.device)
@@ -425,11 +486,13 @@ def _mae_forward(
     if target.shape[1] == 0:
         raise ValueError("mask selects no tokens; nothing to reconstruct")
     m_pos, m_pad = split(pos_t, mask).transpose(1, 2), split(pad_mask, mask)
-    x = encoder.projection(split(values, ~mask))
     v_pos, v_pad = split(pos_t, ~mask).transpose(1, 2), split(pad_mask, ~mask)
+    x = encoder.embed(split(values, ~mask), v_pos)
 
+    v_values = split(values, ~mask)
     x, v_pos, v_pad = encoder.add_cls(x, v_pos, v_pad)
-    x = encoder.transformer(x, encoder.rotations(v_pos), attention_mask(v_pad))
+    x = encoder.run_transformer(x, v_pos, v_pad, v_values)
+    enc_tokens = x
     x = parts.encoder_to_decoder(x)
 
     k = target.shape[1]
@@ -440,9 +503,11 @@ def _mae_forward(
     pred = parts.head(x[:, -k:])
 
     real = (~m_pad).to(pred.dtype)[..., None]
-    loss = (F.mse_loss(pred.float(), target.float(), reduction="none") * real).sum()
-    loss = loss / (real.sum() * target_channels).clamp(min=1)
-    return MAEOutput(loss=loss, pred=pred, target=target, mask=mask)
+    if weight is not None:
+        real = real * split(weight.to(pred.dtype)[..., None], mask)
+    loss = (F.mse_loss(pred.float(), target.float(), reduction="none") * real.float()).sum()
+    loss = loss / (real.float().sum() * target_channels).clamp(min=1e-8)
+    return MAEOutput(loss=loss, pred=pred, target=target, mask=mask, enc_tokens=enc_tokens, enc_positions=v_pos, enc_pad=v_pad)
 
 
 class RoMAEForPreTraining(RoMAEBase):
@@ -491,7 +556,7 @@ class RoMAEForPreTraining(RoMAEBase):
             self.rope_layout, self.cfg.head_dim, self.dec_cfg.head_dim
         )
 
-    def forward(self, values, positions, pad_mask=None, mask=None) -> MAEOutput:
+    def forward(self, values, positions, pad_mask=None, mask=None, weight=None) -> MAEOutput:
         """Mask, encode the visible tokens, decode the masked ones.
 
         Args:
@@ -501,6 +566,8 @@ class RoMAEForPreTraining(RoMAEBase):
             mask: Optional bool ``[B, N]`` token mask with the same number of
                 True entries per row, at least one (see :func:`gen_mask`);
                 sampled from ``mask_ratio`` when omitted.
+            weight: Optional ``[B, N]`` per-token loss weights (see
+                :func:`_mae_forward`).
         """
         return _mae_forward(
             self,
@@ -511,13 +578,18 @@ class RoMAEForPreTraining(RoMAEBase):
             positions,
             pad_mask,
             mask,
+            weight,
         )
 
     def backbone(self, pool: str = "cls") -> RoMAE:
         """A :class:`RoMAE` encoder initialised from the pretrained weights."""
         model = RoMAE(pool=pool, **self.hparams)
         model.projection.load_state_dict(self.projection.state_dict())
+        if self.abs_proj is not None:
+            model.abs_proj.load_state_dict(self.abs_proj.state_dict())
         model.transformer.load_state_dict(self.transformer.state_dict())
+        if self.spectral is not None:
+            model.spectral.load_state_dict(self.spectral.state_dict())
         if self.cls is not None:
             model.cls.data.copy_(self.cls.data)
         return model

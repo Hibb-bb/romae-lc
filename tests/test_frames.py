@@ -61,7 +61,7 @@ def window_start(record: Record, t: np.ndarray, y: np.ndarray) -> float:
 
 def test_frame_config_validation():
     for bad in (
-        dict(n_frames=1),
+        dict(n_frames=0),
         dict(min_tokens=0),
         dict(advance=(0, 1)),
         dict(advance=(2, 1)),

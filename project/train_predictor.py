@@ -2,7 +2,7 @@
 
 The stage-1 autoencoder (``pretrain_mae.py``, ``mae.pt``) learns period and
 shape; training the encoder jointly with a next-latent loss erased them
-(``SESSION-2026-09-25.md``). So the encoder is frozen, its latents are cached
+(``docs/SESSION-2026-09-25.md``). So the encoder is frozen, its latents are cached
 once by :mod:`project.cache_latents` (``latents.pt``: one ``[D]`` row per
 window of a grid with ``stride`` window lengths between starts) and this
 script trains only the transition on them, the recipe of the molecular

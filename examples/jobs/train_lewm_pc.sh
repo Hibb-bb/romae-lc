@@ -9,8 +9,8 @@
 #SBATCH --mem=96g
 #SBATCH --time=02:00:00
 #SBATCH --chdir=/projects/bfrf/hibb/romae-lc
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=examples/logs/%x-%j.out
+#SBATCH --error=examples/logs/%x-%j.err
 # LeWorldModel on a PC_matches sub-dataset. Any extra arguments go to the
 # training script, e.g.
 #   sbatch jobs/train_lewm_pc.sh --data /projects/bfrf/data/PC_matches/ZTFxPC --epochs 20

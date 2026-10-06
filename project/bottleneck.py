@@ -154,6 +154,7 @@ class BottleneckAE(nn.Module):
         use_cls: bool = True,
         denoise: bool = False,
         learned_var: bool | str = True,
+        abs_timescales=None,
     ):
         super().__init__()
         if not use_cls:
@@ -167,8 +168,9 @@ class BottleneckAE(nn.Module):
             raise ValueError(f"learned_var must be True, False or 'unit', got {learned_var!r}")
         self.denoise, self.learned_var = bool(denoise), learned_var
         self.encoder = RoMAE(
-            pool="cls", encoder=encoder, n_channels=n_channels, n_axes=n_axes, rope=rope
-        )
+            pool="cls", encoder=encoder, n_channels=n_channels, n_axes=n_axes, rope=rope,
+            abs_timescales=abs_timescales,
+        )  # fmt: skip
         self.dec_cfg = dict(d_model=192, nhead=3, depth=2, attention="softmax")
         self.dec_cfg.update(decoder or {})
         d_model, nhead = self.dec_cfg["d_model"], self.dec_cfg["nhead"]

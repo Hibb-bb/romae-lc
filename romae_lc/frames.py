@@ -91,8 +91,8 @@ class FrameConfig:
     with_err: bool = False
 
     def __post_init__(self):
-        if self.n_frames < 2:
-            raise ValueError(f"n_frames must be >= 2, got {self.n_frames}")
+        if self.n_frames < 1:
+            raise ValueError(f"n_frames must be >= 1, got {self.n_frames}")
         if self.window <= 0:
             raise ValueError(f"window must be > 0, got {self.window}")
         if self.min_tokens < 1:

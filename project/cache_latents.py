@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import argparse
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -233,6 +233,13 @@ def main(argv=None):
         help="window-start spacing in window units (the window length comes "
         "from the checkpoint)",
     )
+    p.add_argument(
+        "--window",
+        type=float,
+        default=None,
+        help="window length in days (default: the checkpoint's); an encoder "
+        "trained on windows of many lengths is cached once per length",
+    )
     p.add_argument("--splits", nargs="+", default=["train", "validation"])
     p.add_argument("--data", default=None, help="override the checkpoint's data")
     p.add_argument("--max-rows", type=int, default=None)
@@ -269,6 +276,8 @@ def main(argv=None):
 
     enc, meta = load_encoder(args.ckpt, dev)
     cfg, spec = meta.cfg, meta.spec
+    if args.window:
+        cfg = replace(cfg, window=float(args.window))
     cap = cfg.max_tokens if args.cap is None else args.cap
     # Only the data source may be overridden: --seed is the cap / subset seed
     # and must not re-simulate or re-split the checkpoint's data (gate.py does

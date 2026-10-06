@@ -1,6 +1,6 @@
 # Latent world model for light curves with energy-based inference
 
-An extension of `romae_lc` that implements `../lc-world-model-design.md` on
+An extension of `romae_lc` that implements `../docs/lc-world-model-design.md` on
 the ZTF light curves of PC_matches (`/projects/bfrf/data/PC_matches/ZTFxPC`).
 Every script is a module run from the repository root:
 
@@ -16,6 +16,73 @@ latents (`train_predictor.py`; `train_wm.py` is the LeWorldModel variant),
 **stage 3** the decoder on the same frozen latents (`train_decoder.py`).
 The design doc's "stage 1 = joint encoder + predictor" and "stage 2 =
 residual" are superseded (see its revision note and the decisions below).
+
+## How to run the training (start here)
+
+Everything is a Python module run from the repository root. The data flag
+`--data sim` uses the toy simulator in `romae_lc.data.simulate` (no files
+needed): stars of five kinds (sinusoid, RR Lyrae, eclipsing, double-mode,
+damped random walk) with bands g, r, i, periods from 0.2 to 30 days, a
+1000 day baseline with yearly seasons, and known period and phase. The
+number of stars is `--n-sim`; the same seed gives the same stars in every
+later stage, so the checkpoint remembers the data flags and the probes
+rebuild the same split. The simulated baseline is 1000 days, so each
+training sample is one window (`--n-frames 1`); on ZTF (baselines of
+2000 to 3000 days) the default of 8 windows per sample is used.
+
+```bash
+# 0. environment (once)
+uv sync --all-extras              # or: pip install -e . matplotlib datasets
+source .venv/bin/activate
+
+# 1. a two-minute smoke test on the CPU: does everything run?
+python -m project.pretrain_mae --data sim --n-sim 256 --size light --window 250 --n-frames 1 \
+    --min-tokens 16 --max-tokens 256 --steps 100 --batch-size 16 --eval-every 50 \
+    --ckpt-every 50 --probe-train 64 --probe-val 32 --shuffle-objects 16 \
+    --workers 0 --device cpu --out project/runs/sim_smoke
+
+# 2. the real run on one GPU (about 1 h for 20k steps on an H100 / GH200)
+python -m project.pretrain_mae --data sim --n-sim 20000 --size light --window 250 --n-frames 1 \
+    --min-tokens 16 --max-tokens 256 --steps 20000 --batch-size 64 --workers 8 \
+    --eval-every 2500 --ckpt-every 500 --out project/runs/sim_mae
+#    the best encoder on ZTF adds the spectral layer and its auxiliary loss:
+#    --size wide --spectral --spectral-aux 0.5
+
+# 3. encode every window of every star once (the frozen latents)
+python -m project.cache_latents --ckpt project/runs/sim_mae/mae.pt --out project/runs/sim_mae/latents.pt --workers 8
+
+# 4. what the latent knows: the period (hit rate within 1 % and 10 %) ...
+python -m project.period_probe --latents project/runs/sim_mae/latents.pt --out project/results/period_sim --n-ls 50 --no-fold
+#    ... and the phase (where in the cycle the window starts)
+python -m project.phase_probe --latents project/runs/sim_mae/latents.pt --out project/results/phase_sim
+```
+
+How to read the phase probe: it predicts the phase of each window's start
+from the latent and reports the median error in cycles and the share of
+windows within 0.05 and 0.1 cycles. Chance is a median error of 0.25
+cycles (shares 0.1 and 0.2); the shuffled control in the same output must
+sit at chance. On ZTF every encoder we tried sat at chance (the latent
+holds the period but not the phase); the open question for the simulator
+is whether a simpler, denser dataset lets the phase in.
+
+Two more runs that ask the same question in other ways:
+
+```bash
+# the phase bottleneck: the encoder trains THROUGH a decoder that gets the
+# phase coordinate (period given), so the latent must hold the phase to
+# reconstruct; --init starts from the stage-1 weights
+python -m project.pretrain_phase --data sim --n-sim 20000 --size light --window 250 --n-frames 1 \
+    --min-tokens 16 --max-tokens 256 --steps 20000 --batch-size 64 --workers 8 \
+    --init project/runs/sim_mae/mae.pt --out project/runs/sim_phase_bn
+# the phase decoder ladder on the frozen latents (ceiling = oracle period
+# and phase; ctx = 3 past windows as context): see jobs/phase_decoder.sh
+```
+
+Every script has `--help`. The tests (`python -m pytest project/tests -q`,
+CPU, about 15 minutes) run this whole chain on 48 simulated stars. On a
+Slurm cluster the scripts in `project/jobs/` wrap the same commands
+(2 h links that resubmit themselves); `jobs/submit_queue.sh` feeds a list
+of `sbatch` lines one at a time when the queue allows one job per user.
 
 ## Decisions (2026-09-24)
 
@@ -98,9 +165,67 @@ above zero during the overlap phase; the shuffle score well under 0.79. ECL
 and RR may stay low at 250 d windows (700 cycles need thousands of rungs),
 which is where a fold inside the model comes back on the table.
 
+## Decisions (2026-10-01): past-only normalisation
+
+Every star was standardised per band with the median and scatter of its
+WHOLE light curve, so a forecast's target window had already shaped the
+units it was scored in (a mild leak, equal for every method). Decision: the
+statistics come from the first ``--norm-days`` days of each star only (1000
+d: half the points of a typical star; a band with fewer than 8 points there
+uses its first 8 in time), applied to every point (`romae_lc.data.normalize(ref_days=...)`).
+The flag is a data argument, so a checkpoint remembers it and every later
+stage loads the data the same way. The light encoder is retrained with it
+(`project/runs/mae_norm`) and compared with `mae_w250` on the period probe;
+the forecast scripts then pick the normalisation up from the checkpoint.
+
+## Decisions (2026-09-29): the decoder read the error, not the latent
+
+The first end-to-end brightness forecast (`forecast.py`, 1000 validation
+stars, `project/results/forecast_maew`) was worse than a constant (skill
+-0.42 one window ahead; a fold on the catalogue period gets 0.69). The
+decoder on the future window's *own* latent was as bad (skill -0.41), so the
+fault sits before the predictor. Cause, found with the imputation test on 40
+validation stars (root mean squared error on hidden points; constant 1.84):
+
+| decoder input                                  | RMSE |
+|------------------------------------------------|------|
+| real per-point errors (as trained)             | 1.33 |
+| the same errors shuffled among the points      | 1.91 |
+| one constant error for every point             | 1.79 |
+| real errors, the latent replaced by an average | 1.53 |
+
+The stage-3 `QueryDecoder` took the query point's own log sigma as an input
+feature. In magnitudes the error tracks the brightness (fainter points have
+larger errors), so the decoder learned to read the brightness off the error
+and used the latent for the level only. A future point's error is not known
+before it is observed, so this was also a leak in every forecast number.
+Decisions:
+
+- `QueryDecoder(sigma_input=False)` is the default of `train_decoder.py`
+  (`--sigma-input` restores the old behaviour); the error stays in the loss
+  variance only. Old checkpoints keep `sigma_input=True` in their hparams.
+  The stage-1 MAE never had this leak (hidden tokens are a mask token plus
+  position; the loss is plain MSE on the flux).
+- Development runs use the light encoder (`mae_w250`, width 192): its
+  period hit rate is 0.66 against the wide encoder's 0.71 and its decoder
+  scored the same, at a third of the cost.
+- Tested next (2026-09-30): the lookback decoder (`lookback.py`, trained
+  on the forecast task with the frozen token features of the last three
+  windows) reaches skill 0.09 against a constant (0.07 without the latent),
+  while a fold on a Lomb-Scargle period of the past reaches 0.44 and a fold
+  on the catalogue period 0.69; attention over rotary positions does not
+  learn to fold across hundreds of cycles. The phase probe
+  (`phase_probe.py`, `project/results/phase_mae` and `phase_maew`) finds the
+  phase of the window's start NOT in the latent: exactly chance for both
+  encoders (median error 0.25 cycles, shuffled control the same). So the
+  phase must come from the data: a fold on a period from the past (the
+  model's rough period sharpened by the fine search), with the latent
+  supplying shape, amplitude and level. The error-weighted stage-1 loss
+  (`--loss-weight err`) gave no gain (hit 0.58 vs 0.61).
+
 ## Decisions (2026-09-26): freeze the autoencoder
 
-The runs of 2026-09-25 (`SESSION-2026-09-25.md`, section 4) settled the
+The runs of 2026-09-25 (`../docs/SESSION-2026-09-25.md`, section 4) settled the
 question. Masked pretraining alone learns period: `mae_w250` reaches a
 within-superclass log-period R2 of 0.53 (ROT 0.58, RR 0.69, ECL 0.81) and a
 macro F1 of 0.50 against a hand-feature baseline of 0.27 / 0.33. The joint
@@ -187,7 +312,22 @@ below the RBF GP's.
 | `tracking.py` | all | Weights & Biases wrapper (`--wandb`), GPU stats, data-wait / compute step timer |
 | `bench.py` | 2 | loader throughput benchmark of `train_wm`: seconds per step, data-wait fraction, GPU utilisation per configuration |
 | `jobs/` | | Slurm scripts on `ghx4-interactive`: `pretrain_mae.sh` (stage 1), `train_wm.sh`, `train_predictor.sh` and `train_decoder.sh` (stages 2 and 3) are self-resubmitting 2 h chains (`THEN=script` runs one stage after a chain, `PIPELINE=a.sh:b.sh` several, each chain script popping the first and handing its successor its checkpoint as the first argument: `pretrain_mae.sh` hands `$OUT/mae.pt`, which `train_wm.sh` turns into `--init-backbone` (OUT then defaults to `wm_w<W>_mae`) and `gate.sh`, `cache_latents.sh` and `train_decoder.sh` take positionally; `train_wm.sh` hands `$OUT/wm.pt`, `train_predictor.sh` `$OUT/pred.pt`); `cache_latents.sh` (1 h, `THEN=` gets the latents path) and `gate.sh` (30 min, `THEN=` runs only on a pass) are single jobs. That QOS runs one job per user and accepts at most two submitted jobs, so a chain retries a refused resubmission every 30 s for 20 min (`queue` in the chain scripts) before it gives up with a log line; keep at most one other job queued next to a chain. `train_wm_w60.sh` is the window-60 wrapper, `smoke_wandb.sh` the short tracked run plus the benchmark, `pipeline.sh` runs M4 to M7 from a `train_wm.py` checkpoint |
-| `tests/` | | CPU tests on the toy simulator (`test_project.py`, `test_predictor.py`, `test_gate.py`, `test_bottleneck.py`, `test_encoder_loading.py`) |
+| `mae_data.py` | 1 | the masking of `pretrain_mae` (random, block, mix, blockplus = a hidden block at the end of the window) and the loss weights |
+| `fold.py` | evals | the phase-fold test: adjusted R2 of a 3-harmonic wave on a period, the GPU grid version and `refine_period` (the fine search near a rough period) |
+| `period_probe.py` | evals | period from the frozen latents: ridge, MLP, bin classifier, joint (logit + offset per bin), per-window joint; hit rates within 1 / 10 %, alias rate, Lomb-Scargle reference, failure mining, the fold test; `predictions.npz` (index, p_model, p_top) feeds the eval scripts |
+| `phase_probe.py` | evals | does the latent know the phase of the window's start? ridge and MLP against a shuffled control |
+| `plot_period_examples.py` | evals | the folded-light-curve and scatter figures of the period artifact |
+| `forecast.py` | 2 -> 3 | the end-to-end brightness forecast of a real future window (model, persistence, constant, GP, Lomb-Scargle fold, catalogue fold) with time and phase-folded figures |
+| `lookback.py` | 3b | the lookback decoder: decodes a future window from the token features of the last 3 windows plus the target's latent |
+| `phase_decoder.py` | 3c | the phase decoder ladder: the period is the coordinate (phase = time mod period), rotary over phase, folded past windows as context; evaluation with oracle / refined / Lomb-Scargle / model periods |
+| `pretrain_phase.py` | 1 (negative) | the phase bottleneck: stage 1 trained through the phase decoder; did not put the phase into the latent on ZTF |
+| `period_head.py`, `token_head.py` | evals (negative, kept) | a period head on a fixed Lomb-Scargle spectrum (rejected: not a raw-curve network) and a per-token read-out of the period |
+| `anomaly.py` | M2 | the anomaly test on the frozen pipeline: injected events scored by the predictor's density, its mean prediction and two no-model yardsticks |
+| `eval/ls_benchmark.py` | evals | the model-seeded search against Lomb-Scargle (ours on the GPU and the collaborator's astropy search) at equal budgets of trial frequencies; crossing budget, per-class tables, heat maps |
+| `eval/period_report.py` | evals | the all-star period report: hits within 20 / 10 / 1 / 0.1 / 0.01 %, hit rate against the true period, the predicted / true ratio against the period, fold demos, `better_than_catalogue.csv` |
+| `eval/period_sensitivity.py` | evals | the smallest period change the latent can tell apart (shifted-template windows) |
+| `eval/runtime.py` | evals | wall-clock per star of the model path (tokens, encoder, read-out, fine search) against Lomb-Scargle |
+| `tests/` | | CPU tests on the toy simulator (`test_project.py`, `test_predictor.py`, `test_gate.py`, `test_bottleneck.py`, `test_encoder_loading.py`, and one test per later script) |
 
 Outputs go to `project/runs/<run>/` (checkpoints, `log.jsonl`, `ladder.json`,
 `args.json`, `latents.pt`, `gate.json`) and `project/results/`; both are
@@ -229,6 +369,72 @@ KIND=mse  sbatch --job-name=dec-mse  project/jobs/train_decoder.sh project/runs/
 KIND=flow sbatch --job-name=dec-flow project/jobs/train_decoder.sh project/runs/mae_w250/mae.pt --baselines
 # the gate again with its third part (decoder vs GP) once a decoder result exists
 sbatch project/jobs/gate.sh project/runs/mae_w250/mae.pt --decoder-results project/runs/mae_w250/dec_mse/log.jsonl
+# The whole chain, inference only: brightness forecast of a real future window (forecast.py, 2026-09-29).
+# The sequence predictor draws latents for the window 1 or 2 window lengths ahead, the mse decoder turns
+# them into curves at the observed times; scored (mixture NLL, RMSE, skill) next to 'nothing changes',
+# a constant, a GP on the last window, a fold on the Lomb-Scargle period of the past and a fold on the
+# catalogue period. Figures: examples.png (time) and examples_folded.png (phase, on the catalogue period
+# and on the model's refined period from a period_probe fold_r2.npz; --periods-latents rebuilds the
+# object order for an npz written before 'index' was saved).
+sbatch project/jobs/forecast.sh project/runs/pred_maew_seq2/pred.pt project/runs/maew_w250/dec_mse/best.pt --out project/results/forecast_maew --model-periods project/results/period_maew_refine2/fold_r2.npz --periods-latents project/runs/maew_w250/latents_r4.pt --n-objects 1000
+# Stage 3b (2026-09-30): the lookback decoder (lookback.py), trained on the forecast task itself: it decodes a
+# window one or two window lengths ahead from the frozen token features of the last 3 windows (period and phase
+# from the past) plus the target's latent (true latent in training, the predictor's draw at inference; a share
+# of samples trains without it, so the same model also gives the "past only" forecast). The query's error is
+# never an input. forecast.sh takes its dec.pt in place of the plain decoder and adds the 'no_latent' column.
+OUT=project/runs/mae_w250/lookback sbatch project/jobs/train_lookback.sh project/runs/mae_w250/mae.pt
+# Stage 1 with every hidden point's squared error divided by its sigma^2 (--loss-weight err; weights capped at
+# 20x the window's median and scaled to mean 1 per window). Ablation on the light encoder, 15k steps:
+sbatch --job-name=enc-errw project/jobs/encoder_ablation.sh errw      # -> project/results/period_enc_errw
+# Absolute time in the tokens (2026-09-30, user's choice "NeRF"): --abs-time adds sines and cosines of the time
+# since the window's start at every rung of the ladder to the token embedding (RoMAEBase.embed), so the pooled
+# latent can hold the phase; the rotary blocks stay. 'abs' = plain MAE with it, 'absbn' = with the bottleneck
+# objective (the pooled latent alone reconstructs, which is what forces the phase in). Each is followed by the
+# period probe and the phase probe (project/results/phase_enc_<name>; chance = 0.25 cycles median error).
+sbatch --job-name=enc-abs project/jobs/encoder_ablation.sh abs absbn
+# The phase probe on its own (does the latent know where in the cycle the window starts?):
+sbatch project/jobs/phase_probe.sh project/runs/mae_w250/latents.pt --out project/results/phase_mae
+# Result (2026-09-30): absolute time features change nothing. Plain MAE + abs: hit 0.55 (control 0.61), phase at
+# chance; bottleneck + abs: hit 0.35 (old bottleneck 0.36), phase at chance (project/results/phase_enc_abs*).
+# The phase decoder ladder (phase_decoder.py, 2026-09-30): the period is GIVEN as the coordinate (phase = time
+# modulo period), the latent supplies shape, amplitude and level. Variants: ceiling (no context, oracle period
+# and phase: the latent alone), ctx (3 past windows folded on the same period, phase from the window's start),
+# each with the observed points or the clean Fourier template as the target; the final evaluation runs the
+# period ladder oracle / fine-searched on the past / Lomb-Scargle on the past / model read-out alone.
+CKPT=project/runs/mae_w250/mae.pt MODEL_PERIODS=project/results/period_mae20/predictions.npz sbatch --job-name=phase-dec1 project/jobs/phase_decoder.sh ceiling ctx
+CKPT=project/runs/mae_w250/mae.pt MODEL_PERIODS=project/results/period_mae20/predictions.npz sbatch --job-name=phase-dec2 project/jobs/phase_decoder.sh ceilingt ctxt
+# Results (2026-10-01): the ceiling works, skill 0.73 with the latent alone against 0.43 without it, so the latent holds
+# shape, amplitude and level and only the placement in time was missing. The first context decoder ignored its context
+# (no relative phase in the attention, and a band-id bug); v2 rotates queries and keys by the phase (rungs = harmonics
+# of one cycle) and reads band ids from the wavelength axis. The v1 runs are kept as phase_*_v1.
+# The PERIOD HEAD (period_head.py, 2026-10-01): a fine period from the raw window in one pass. Fixed batched
+# Lomb-Scargle spectrum on a 0.05%-step log grid (0.02-500 d, ~20k bins) + the power at 2f and f/2, then a 1-D conv
+# net modulated by the latent gives a logit and a sub-bin offset per bin; trained on the catalogue period as the
+# TARGET (cross-entropy softened over neighbouring bins + offset error). The plain spectrum peak is the baseline.
+# Writes period_head.pt and predictions.npz (index, p_model, p_ls, p_top) that phase_decoder --model-periods and the
+# benchmark below read.
+sbatch project/jobs/period_head.sh project/runs/mae_w250/mae.pt                # -> project/runs/mae_w250/period_head
+# Evaluation scripts live in project/eval/. The search-efficiency benchmark (collaborators' request): the model's
+# prior against Lomb-Scargle on one axis, trial frequencies per star, with the crossing budget, per-class tables and
+# heat maps of the hit rate over points per window x windows and cadence x baseline.
+sbatch project/jobs/ls_benchmark.sh project/runs/mae_w250/mae.pt project/results/period_mae20/predictions.npz --out project/results/ls_benchmark --head project/runs/mae_w250/period_head/predictions.npz
+# The all-star period report (2026-10-06): the period probe twice on the same latents (SiLU and ReLU read-out
+# MLPs, --mlp-act), then project.eval.period_report on EVERY validation star: hits within 20/10/1/0.1/0.01 % (strict
+# and alias-tolerant, per class) for the read-out alone, after the fine search, after the candidate search (top-k bins,
+# double, half; the fold picks), our GPU Lomb-Scargle at 200k/500k trials and the collaborator's astropy multiband
+# search at 100k; hit rate against the true period (hit_vs_period.png), predicted/true ratio against the period
+# (scatter_bend.png, the long-period bend), fold demos with the fitted wave, and better_than_catalogue.csv.
+sbatch project/jobs/period_report.sh project/runs/maew_spec/latents100k.pt project/results/period_maew_spec_silu project/results/period_maew_spec_relu project/results/period_report_spec
+# Runtime per star (project.eval.runtime): the model path step by step (windows + tokens on CPU, encoder forward per
+# star and batched on GPU, pooling + read-out MLP, fine search) against our GPU Lomb-Scargle and the collaborator's
+# astropy search (CPU) at the benchmark's budgets; tables.md, runtime.png.
+sbatch project/jobs/runtime.sh project/runs/maew_spec/mae.pt project/results/period_maew_spec_silu/predictions.npz --out project/results/runtime_spec
+# Stage 1 with the PHASE BOTTLENECK (pretrain_phase.py, 2026-10-01): the encoder is trained end to end through the
+# phase decoder with no context, whose queries are the window's own points at their phase counted from the window's
+# START (catalogue period in the coordinate only). The only route to the reconstruction is a latent that holds the
+# phase offset next to the shape. Saves a normal stage-1 mae.pt (+ phase_decoder.pt); the job then caches, runs the
+# period probe (must keep ~0.6) and the phase probe (must leave chance). Light encoder, 15k steps:
+NAME=phase_bn sbatch project/jobs/pretrain_phase.sh
 ```
 
 `train_predictor.sh` expects a `latents.pt` as its first argument, so it
@@ -477,7 +683,7 @@ ran) and the `verdict` printed last (`GATE PASSED` or `GATE FAILED: part N
    when present); passes when the decoder's NLL beats the RBF GP; a result
    without the GP baseline (a run without `--baselines`) fails with a note.
 
-The reference numbers of `SESSION-2026-09-25.md` say what to expect: the
+The reference numbers of `../docs/SESSION-2026-09-25.md` say what to expect: the
 `mae_w250` latents (within 0.53 vs 0.27, macro F1 0.50 vs 0.33) pass part
 1, every jointly trained `wm.pt` fails it.
 

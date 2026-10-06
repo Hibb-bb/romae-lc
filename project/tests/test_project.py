@@ -858,6 +858,19 @@ def test_dense_backbone_and_flat_layout(records, spec):
     assert len(flat[0]["timescales"]) == 3 and flat[0]["p"] == 0.75
     dec = QueryDecoder(24, flat, spec.err_stats, "mse", d_model=36, nhead=3, depth=1)
     assert dec.rope.blocks[0].per_head is False
+    # the query's own error is an input only when asked for (the old, leaky default)
+    torch.manual_seed(0)
+    z, pos = torch.randn(2, 24), torch.rand(2, len(flat), 7) * 3
+    pad = torch.zeros(2, 7, dtype=torch.bool)
+    ls_a, ls_b = torch.randn(2, 7), torch.randn(2, 7)
+    mu_a, _ = dec(z, pos, pad, ls_a)
+    mu_b, _ = dec(z, pos, pad, ls_b)
+    assert not torch.allclose(mu_a, mu_b)
+    clean = QueryDecoder(24, flat, spec.err_stats, "mse", d_model=36, nhead=3, depth=1, sigma_input=False)
+    mu_a, _ = clean(z, pos, pad, ls_a)
+    mu_b, _ = clean(z, pos, pad, ls_b)
+    assert torch.allclose(mu_a, mu_b) and clean.hparams["sigma_input"] is False
+    assert QueryDecoder(**clean.hparams).sigma_input is False
     shared = build_backbone(
         args, dense_ladder(records, rope_geometry(argparse.Namespace(**dict(vars(args), depth=1))), 30.0, "comb", "log", 0.75, 50.0, 8, 0, None, None), 2
     )  # fmt: skip

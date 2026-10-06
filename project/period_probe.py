@@ -81,8 +81,8 @@ from project.common import (
     superclass,
 )
 
-FEATURE_SETS = ("hand", "mean", "meanmax", "seq_last", "seq_mean")
-REGRESSORS = ("ridge", "mlp", "bins")
+FEATURE_SETS = ("hand", "mean", "meanmax", "multi", "seq_last", "seq_mean")
+REGRESSORS = ("ridge", "mlp", "bins", "joint", "winjoint")
 LS_METHODS = ("ls_window", "ls_full", "ls_top5")
 
 # Fixed colours per headline superclass (colour-blind safe, never cycled);
@@ -106,6 +106,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--out", required=True, help="output directory")
     p.add_argument("--pred", default=None, help="pred.pt of a sequence predictor")
     p.add_argument(
+        "--extra-latents",
+        nargs="*",
+        default=None,
+        help="caches of the same encoder at other window lengths; the feature "
+        "set 'multi' joins the mean latent of every length",
+    )
+    p.add_argument(
         "--ckpt", default=None, help="the encoder checkpoint (default: the cache's)"
     )
     g = p.add_argument_group("data (default: the checkpoint's)")
@@ -115,6 +122,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     g = p.add_argument_group("regressors")
     g.add_argument("--mlp-steps", type=int, default=3000)
     g.add_argument("--mlp-hidden", type=int, default=256)
+    g.add_argument("--mlp-act", choices=tuple(MLP_ACT), default="silu", help="hidden activation of every MLP read-out")
     g.add_argument("--batch-size", type=int, default=1024)
     g.add_argument("--bins", type=int, default=240, help="log-period bins")
     g.add_argument("--alpha", type=float, default=0.1, help="ridge penalty")
@@ -234,6 +242,34 @@ def object_table(cache: dict, split: str, records, bands, min_tokens: int) -> di
     )
 
 
+# ------------------------------------------------------- many window lengths
+
+
+def multi_features(paths, tables: dict) -> None:
+    """Add the feature set ``multi`` to every table: the mean latent of the
+    main cache joined with the mean latent of every cache in ``paths`` (the
+    same encoder at other window lengths). A star without a valid window at
+    some length gets zeros there, and one extra column per length says
+    whether the star had a window of that length."""
+    for tab in tables.values():
+        tab["features"]["multi"] = tab["features"]["mean"]
+    for path in paths:
+        extra = torch.load(path, map_location="cpu", weights_only=False)
+        mt = int(extra["meta"]["min_tokens"])
+        for split, tab in tables.items():
+            pooled = pool_latents(extra, split, mt)
+            idx = extra["objects"][split]["index"].numpy()[pooled["keep"]]
+            where = {int(i): j for j, i in enumerate(idx)}
+            d = pooled["mean"].shape[1]
+            rows = np.zeros((len(tab["index"]), d + 1), dtype=np.float32)
+            for r, i in enumerate(tab["index"]):
+                j = where.get(int(i))
+                if j is not None:
+                    rows[r, :d], rows[r, d] = pooled["mean"][j], 1.0
+            tab["features"]["multi"] = np.concatenate([tab["features"]["multi"], rows], 1)
+        print(f"  joined {path} (window {float(extra['meta']['window']):g} d)")
+
+
 # --------------------------------------------------------- sequence features
 
 
@@ -307,16 +343,24 @@ def fit_ridge(x_tr, y_tr, x_va, alpha: float) -> np.ndarray:
     return y_tr.mean() + x_va @ w
 
 
+MLP_ACT = {"silu": nn.SiLU, "relu": nn.ReLU, "gelu": nn.GELU}
+_MLP_ACT = ["silu"]  # set by --mlp-act; a module-level switch so every regressor builds the same way
+
+
 class Mlp(nn.Module):
-    """Two hidden layers of ``hidden`` with SiLU."""
+    """Two hidden layers of ``hidden`` with the activation of ``--mlp-act``
+    (SiLU by default; ReLU makes the network piecewise linear, so it
+    extrapolates along straight lines beyond the training range). The
+    output layer is always linear."""
 
     def __init__(self, d_in: int, d_out: int, hidden: int):
         super().__init__()
+        act = MLP_ACT[_MLP_ACT[0]]
         self.net = nn.Sequential(
             nn.Linear(d_in, hidden),
-            nn.SiLU(),
+            act(),
             nn.Linear(hidden, hidden),
-            nn.SiLU(),
+            act(),
             nn.Linear(hidden, d_out),
         )
 
@@ -362,10 +406,11 @@ def fit_mlp(x_tr, y_tr, x_va, steps, batch, hidden, device, seed) -> np.ndarray:
 
 
 @torch.no_grad()
-def fit_bins(x_tr, y_tr, x_va, n_bins, steps, batch, hidden, device, seed):
+def fit_bins(x_tr, y_tr, x_va, n_bins, steps, batch, hidden, device, seed, k: int = 5):
     """The bin classifier: ``n_bins`` equal log-period bins over the training
-    range. Returns ``(best, second)``: the centres of the best and the second
-    best bins of every validation object."""
+    range. Returns ``(best, second, top)``: the centres of the best and the
+    second best bins of every validation object (plus the offset model's
+    shift), and the ``k`` best as ``[n, k]``."""
     x_tr, x_va = _standardize(x_tr, x_va)
     y_tr = np.asarray(y_tr, dtype=np.float64)
     lo, hi = y_tr.min(), y_tr.max()
@@ -388,8 +433,97 @@ def fit_bins(x_tr, y_tr, x_va, n_bins, steps, batch, hidden, device, seed):
     xv = torch.as_tensor(x_va, dtype=torch.float32, device=device)
     logits = model(xv).cpu()
     shift = fine(xv)[:, 0].clamp(-0.5, 0.5).cpu().numpy().astype(np.float64) * width
-    top = logits.topk(2, dim=1).indices.numpy()
-    return centres[top[:, 0]] + shift, centres[top[:, 1]] + shift
+    top = logits.topk(min(k, n_bins), dim=1).indices.numpy()
+    return centres[top[:, 0]] + shift, centres[top[:, 1]] + shift, centres[top] + shift[:, None]
+
+
+def _joint_train(x_tr, coord_tr, n_bins, steps, batch, hidden, device, seed):
+    """One head with a logit and an offset per bin: cross-entropy on the
+    bin plus the squared offset error at the true bin. ``coord_tr`` is the
+    continuous bin coordinate of the target."""
+    torch.manual_seed(seed)
+    x = torch.as_tensor(x_tr, dtype=torch.float32, device=device)
+    c = torch.as_tensor(coord_tr, dtype=torch.float32, device=device)
+    b = c.round().long().clamp(0, n_bins - 1)
+    off = c - b.float()
+    model = Mlp(x.shape[1], 2 * n_bins, hidden).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    n = x.shape[0]
+    with torch.enable_grad():
+        for _ in range(steps):
+            idx = torch.randint(0, n, (min(batch, n),), generator=gen).to(device)
+            out = model(x[idx])
+            logits, offsets = out[:, :n_bins], out[:, n_bins:]
+            loss = F.cross_entropy(logits, b[idx]) + F.mse_loss(offsets.gather(1, b[idx, None])[:, 0], off[idx])
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+    return model.eval()
+
+
+@torch.no_grad()
+def _joint_predict(model, x, n_bins, device, groups=None, k=5):
+    """Bin coordinate per row (``groups`` None) or per group: the group's
+    log-probabilities summed over its rows, the offset averaged at the
+    chosen bin. ``_joint_predict.top`` keeps the ``k`` best coordinates
+    per row (with their offsets) of the last call, best first."""
+    x = torch.as_tensor(x, dtype=torch.float32, device=device)
+    outs = torch.cat([model(x[i : i + 65536]) for i in range(0, len(x), 65536)])
+    lp, off = F.log_softmax(outs[:, :n_bins], 1), outs[:, n_bins:].clamp(-0.5, 0.5)
+    if groups is None:
+        best = lp.argmax(1)
+        topk = lp.topk(min(k, n_bins), dim=1).indices
+        _joint_predict.top = (topk.float() + off.gather(1, topk)).cpu().numpy().astype(np.float64)
+        return (best.float() + off.gather(1, best[:, None])[:, 0]).cpu().numpy().astype(np.float64)
+    coords = np.full(len(groups), np.nan)
+    for g, rows in enumerate(groups):
+        if len(rows) == 0:
+            continue
+        r = torch.as_tensor(rows, device=device)
+        best = int(lp[r].sum(0).argmax())
+        coords[g] = best + float(off[r, best].mean())
+    return coords
+
+
+def fit_joint(x_tr, y_tr, x_va, n_bins, steps, batch, hidden, device, seed):
+    """The joint read-out on pooled features: one head gives the bin
+    distribution and the offset inside every bin; the chosen bin carries
+    its own offset. Returns predictions in log10 period."""
+    x_tr, x_va = _standardize(x_tr, x_va)
+    y_tr = np.asarray(y_tr, dtype=np.float64)
+    lo, hi = y_tr.min(), y_tr.max()
+    width = (hi - lo) / n_bins if hi > lo else 1e-3
+    model = _joint_train(x_tr, (y_tr - lo) / width - 0.5, n_bins, steps, batch, hidden, device, seed)
+    pred = lo + (_joint_predict(model, x_va, n_bins, device) + 0.5) * width
+    fit_joint.top = lo + (_joint_predict.top + 0.5) * width  # [n, k] log10 periods, best first
+    return pred
+
+
+def fit_winjoint(z_all, rows_tr, y_tr, rows_va, n_bins, steps, batch, hidden, device, seed, max_rows=400_000):
+    """The joint read-out trained per WINDOW (every valid window of a
+    training object, the object's period as its target) and read out per
+    object by summing the windows' log-probabilities; the pooled latent is
+    never formed. ``rows_*`` are the cache rows of every object's valid
+    windows."""
+    rng = np.random.default_rng(seed)
+    r_tr = np.concatenate(rows_tr)
+    t_tr = np.concatenate([np.full(len(r), y, dtype=np.float64) for r, y in zip(rows_tr, y_tr)])
+    if len(r_tr) > max_rows:
+        sel = rng.choice(len(r_tr), max_rows, replace=False)
+        r_tr, t_tr = r_tr[sel], t_tr[sel]
+    r_va = np.concatenate(rows_va)
+    groups, start = [], 0
+    for r in rows_va:
+        groups.append(np.arange(start, start + len(r)))
+        start += len(r)
+    x_tr = z_all[torch.as_tensor(r_tr)].float().numpy()
+    x_va = z_all[torch.as_tensor(r_va)].float().numpy()
+    x_tr, x_va = _standardize(x_tr, x_va)
+    lo, hi = t_tr.min(), t_tr.max()
+    width = (hi - lo) / n_bins if hi > lo else 1e-3
+    model = _joint_train(x_tr, (t_tr - lo) / width - 0.5, n_bins, steps, batch, hidden, device, seed)
+    return lo + (_joint_predict(model, x_va, n_bins, device, groups) + 0.5) * width
 
 
 # --------------------------------------------------------------------- scoring
@@ -407,6 +541,12 @@ def recovery(p_pred, p_true):
     return ratio, hit1, hit10, alias
 
 
+def hit_within(p_pred, p_true, tol: float) -> np.ndarray:
+    """Hits within ``tol`` (relative) of the true period."""
+    ratio = np.asarray(p_pred, dtype=np.float64) / np.asarray(p_true, dtype=np.float64)
+    return np.abs(np.where(np.isfinite(ratio), ratio, np.inf) - 1) < tol
+
+
 def _r2(resid, y) -> float:
     ss = float(((y - y.mean()) ** 2).sum())
     return float(1.0 - (resid**2).sum() / ss) if ss > 0 else float("nan")
@@ -421,6 +561,7 @@ def score(y_pred, y_true, groups, class_means, order, min_n: int = 10) -> dict:
     y_pred = np.where(np.isfinite(y_pred), y_pred, y_true.mean())
     r = y_pred - y_true
     _, h1, h10, alias = recovery(10.0**y_pred, 10.0**y_true)
+    h20 = hit_within(10.0**y_pred, 10.0**y_true, 0.20)
     glob = float(np.mean(list(class_means.values()))) if class_means else 0.0
     c = y_true - np.array([class_means.get(g, glob) for g in groups])
 
@@ -431,6 +572,7 @@ def score(y_pred, y_true, groups, class_means, order, min_n: int = 10) -> dict:
             med_abs=float(np.median(np.abs(r[m]))),
             rec1=float(h1[m].mean()),
             rec10=float(h10[m].mean()),
+            rec20=float(h20[m].mean()),
             alias=float(alias[m].mean()),
         )
 
@@ -678,7 +820,7 @@ def md_table(rows: list[dict], cols: list[tuple[str, str]]) -> str:
 
 
 def write_tables(path: Path, res: dict, order: list) -> None:
-    cols = [("name", "method"), ("n", "n"), ("rec1", "rec 1%"), ("rec10", "rec 10%"),
+    cols = [("name", "method"), ("n", "n"), ("rec1", "rec 1%"), ("rec10", "rec 10%"), ("rec20", "rec 20%"),
             ("alias", "alias"), ("med_abs", "median abs residual (dex)"), ("r2", "R2"), ("r2_within", "R2 within")]  # fmt: skip
     lines = ["# Period probe\n"]
     lines.append(
@@ -867,6 +1009,7 @@ def plot_ratio_hist(path, ratios: dict):
 
 
 def run(args: argparse.Namespace) -> dict:
+    _MLP_ACT[0] = args.mlp_act
     seed_all(args.seed)
     dev = get_device(args)
     out = Path(args.out)
@@ -891,6 +1034,8 @@ def run(args: argparse.Namespace) -> dict:
         f"{len(va['records'])} validation objects with a valid window "
         f"({tr['n_dropped'] + va['n_dropped']} dropped); loaded in {time.time() - t0:.0f}s"
     )
+    if args.extra_latents:
+        multi_features(args.extra_latents, tables)
     if args.pred:
         seq_features(args.pred, cache, tables, window, dev)
     else:
@@ -902,6 +1047,7 @@ def run(args: argparse.Namespace) -> dict:
 
     # --- regressors
     models, preds = {}, {}
+    tops = {}  # the k best bins of every bin read-out, for candidate searches
     for feat in FEATURE_SETS:
         if feat not in tr["features"]:
             continue
@@ -913,8 +1059,17 @@ def run(args: argparse.Namespace) -> dict:
                 y_pred = fit_ridge(x_tr, tr["logp"], x_va, args.alpha)
             elif reg == "mlp":
                 y_pred = fit_mlp(x_tr, tr["logp"], x_va, args.mlp_steps, args.batch_size, args.mlp_hidden, dev, args.seed)
+            elif reg == "joint":
+                y_pred = fit_joint(x_tr, tr["logp"], x_va, args.bins, args.mlp_steps, args.batch_size, args.mlp_hidden, dev, args.seed)
+                tops[f"{feat}/{reg}"] = fit_joint.top
+            elif reg == "winjoint":
+                if feat != "mean":
+                    continue  # the per-window read-out reads the cache rows, one feature set
+                y_pred = fit_winjoint(cache["z"], tr["rows"], tr["logp"], va["rows"], args.bins, args.mlp_steps * 2, args.batch_size,
+                                      args.mlp_hidden, dev, args.seed)  # fmt: skip
             else:
-                y_pred, second = fit_bins(x_tr, tr["logp"], x_va, args.bins, args.mlp_steps, args.batch_size, args.mlp_hidden, dev, args.seed)
+                y_pred, second, top_k = fit_bins(x_tr, tr["logp"], x_va, args.bins, args.mlp_steps, args.batch_size, args.mlp_hidden, dev, args.seed)
+                tops[f"{feat}/{reg}"] = top_k
                 _, _, h10_1, _ = recovery(10.0**y_pred, va["period"])
                 _, _, h10_2, _ = recovery(10.0**second, va["period"])
                 extra = dict(
@@ -999,7 +1154,7 @@ def run(args: argparse.Namespace) -> dict:
                 f"fold for {a['as_good']:.1%} of the stars; period within 0.1 % for "
                 f"{pr['within 0.1 %']:.1%}, within 0.01 % for {pr['within 0.01 %']:.1%} | {ref['seconds']:.0f}s"
             )
-        np.savez_compressed(out / "fold_r2.npz", p_model=p_model, p_catalogue=va["period"], **r2, **extra)
+        np.savez_compressed(out / "fold_r2.npz", index=va["index"], p_model=p_model, p_catalogue=va["period"], **r2, **extra)
         fold.plot_fold(out / "fold_r2.png", r2, va["superclass"], order, _colour, f"phase-fold test, {best}")
         a = fold_res["tables"]["superclass"][0]
         print(
@@ -1040,6 +1195,11 @@ def run(args: argparse.Namespace) -> dict:
     dump_json(res, out / "results.json")
     write_tables(out / "tables.md", res, order)
     write_worst(out / "worst.csv", va, preds[best], args.worst)
+    np.savez_compressed(  # per-star periods of the best read-out, for later questions
+        out / "predictions.npz", index=va["index"], p_model=10.0 ** preds[best], p_catalogue=va["period"],
+        superclass=va["superclass"], n_windows=va["n_valid"], points=va["points"], best=best,
+        **({"p_top": 10.0 ** tops[best]} if best in tops else {}),  # [n, k] candidate periods, best first
+    )  # fmt: skip
 
     # --- figures
     plot_pred_vs_true(out / "pred_vs_true_model.png", va["logp"], preds[best], va["superclass"], order, f"best model: {best}")

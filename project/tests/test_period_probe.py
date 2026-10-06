@@ -133,8 +133,10 @@ def test_period_probe_end_to_end(latents, tmp_path):
     assert res["n_train"] > 0 and res["n_val"] > 0
     # only the cache features without --pred
     assert set(res["models"]) == {
-        f"{f}/{r}" for f in ("hand", "mean", "meanmax") for r in ("ridge", "mlp", "bins")
-    }
+        f"{f}/{r}" for f in ("hand", "mean", "meanmax") for r in ("ridge", "mlp", "bins", "joint")
+    } | {"mean/winjoint"}
+    for name in ("mean/joint", "mean/winjoint"):
+        assert np.isfinite(res["models"][name]["rec10"]) and 0.0 <= res["models"][name]["rec10"] <= 1.0
     assert res["best"] in res["models"] and not res["best"].startswith("hand/")
     assert res["models"]["meanmax/ridge"]["dim"] == 48
     for name, s in list(res["models"].items()) + list(res["ls"].items()):

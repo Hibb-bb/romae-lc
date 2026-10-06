@@ -44,11 +44,20 @@ class QueryDecoder(nn.Module):
         nhead: int = 3,
         depth: int = 3,
         s_dim: int = 64,
+        sigma_input: bool = True,
     ):
         super().__init__()
         if kind not in ("flow", "mse"):
             raise ValueError(f"kind must be flow|mse, got {kind!r}")
         self.kind, self.z_dim, self.s_dim = kind, z_dim, s_dim
+        #: whether the query's own log sigma is an input feature. A future
+        #: point's error is not known before it is observed, and in
+        #: magnitudes the error tracks the brightness (fainter points have
+        #: larger errors), so with it the decoder reads the brightness off
+        #: the error instead of the latent (found 2026-09-29: with the
+        #: errors shuffled the decoder was worse than a constant). New
+        #: decoders keep it out; the error stays in the loss variance only.
+        self.sigma_input = bool(sigma_input)
         self.rope_layout = [dict(b) for b in rope_layout]
         self.cfg = config(dict(d_model=d_model, nhead=nhead, depth=depth))
         dims = sum(b["dim"] for b in rope_layout)
@@ -88,6 +97,7 @@ class QueryDecoder(nn.Module):
             nhead=self.cfg.nhead,
             depth=self.cfg.depth,
             s_dim=self.s_dim,
+            sigma_input=self.sigma_input,
         )
 
     def log_sigma(self, tokens: Tokens) -> torch.Tensor:
@@ -104,6 +114,8 @@ class QueryDecoder(nn.Module):
         Returns the velocity ``[B, N]`` (flow) or ``(mu, logvar)`` each
         ``[B, N]`` (mse)."""
         b = z.shape[0]
+        if not self.sigma_input:
+            log_sigma = torch.zeros_like(log_sigma)
         feats = (
             log_sigma[..., None] if x_s is None else torch.stack([x_s, log_sigma], -1)
         )

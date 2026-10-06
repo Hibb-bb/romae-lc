@@ -178,9 +178,13 @@ class Attention(nn.Module):
                 k = k * key_ok[:, :, None, None]
                 v = v * key_ok[:, :, None, None]
             qr, kr = (rot(q), rot(k)) if rot is not None else (q, k)
-            kv = torch.einsum("blhd,blhe->bhde", kr, v)
-            num = torch.einsum("blhd,bhde->blhe", qr, kv)
-            den = torch.einsum("blhd,bhd->blh", q, k.sum(1)).clamp(min=1e-6)
+            # plain matmuls with the token axis as the inner dimension: the
+            # einsum forms produced an outer-product bmm in the backward
+            # pass, which torch routes to a triton kernel that cannot build
+            # on a machine without Python development headers (2026-10-01)
+            kv = kr.permute(0, 2, 3, 1) @ v.permute(0, 2, 1, 3)  # [b, h, d, e]
+            num = (qr.permute(0, 2, 1, 3) @ kv).permute(0, 2, 1, 3)  # [b, l, h, e]
+            den = (q * k.sum(1, keepdim=True)).sum(-1).clamp(min=1e-6)  # [b, l, h]
             return num / den[..., None]
 
 

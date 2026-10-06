@@ -9,8 +9,8 @@
 #SBATCH --mem=128g
 #SBATCH --time=03:00:00
 #SBATCH --chdir=/projects/bfrf/hibb/romae-lc
-#SBATCH --output=logs/%x-%j.out
-#SBATCH --error=logs/%x-%j.err
+#SBATCH --output=examples/logs/%x-%j.out
+#SBATCH --error=examples/logs/%x-%j.err
 # Period / cadence census of /projects/bfrf/data/PC_matches (CPU work; the GPU
 # is only requested because the ghx4 partition allocates by GPU).
 set -euo pipefail

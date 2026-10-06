@@ -476,7 +476,7 @@ def load_pc(
     return records
 
 
-def normalize(record: Record, mode: str = "band", eps: float = 1e-6) -> Record:
+def normalize(record: Record, mode: str = "band", eps: float = 1e-6, ref_days: float | None = None, ref_min: int = 8) -> Record:
     """Robust standardisation ``(y - median) / (1.4826 * MAD)``.
 
     A group whose MAD is at most ``eps`` (more than half of its fluxes
@@ -485,11 +485,21 @@ def normalize(record: Record, mode: str = "band", eps: float = 1e-6) -> Record:
     unit scale, so it is centred but ``err`` keeps its flux units instead of
     being inflated.
 
+    With ``ref_days`` the median and the scale of a group come from its
+    points in the first ``ref_days`` days of the record only (at least
+    ``ref_min`` of them, else the reference grows to the first ``ref_min``
+    points in time), and are applied to every point: nothing observed later
+    leaks into the statistics, so a forecast of a later window is scored
+    in units fixed before it. Without ``ref_days`` the whole group sets them.
+
     Args:
         record: Input record (not modified).
         mode: ``"band"`` standardises each band separately, ``"object"``
             all points together.
         eps: Smallest scale accepted before falling back.
+        ref_days: Length of the reference segment from the record's first
+            epoch, in days; ``None`` = the whole record.
+        ref_min: Fewest reference points per group.
 
     Returns:
         A new record; ``err`` is divided by the same scale.
@@ -497,15 +507,28 @@ def normalize(record: Record, mode: str = "band", eps: float = 1e-6) -> Record:
     if mode not in ("band", "object"):
         raise ValueError(f"mode must be 'band' or 'object', got {mode!r}")
     y, err = record.y.astype(np.float32), record.err.astype(np.float32)
+    t = np.asarray(record.t, dtype=np.float64)
+    t0 = float(t.min()) if t.size else 0.0
     for b in record.bands if mode == "band" else [None]:
         g = slice(None) if b is None else record.band == b
-        med = np.median(y[g])
-        scale = 1.4826 * float(np.median(np.abs(y[g] - med)))
+        yg = y[g]
+        if ref_days is not None and yg.size:
+            tg = t[g]
+            ref = tg <= t0 + ref_days
+            if ref.sum() < min(ref_min, yg.size):
+                order = np.argsort(tg, kind="stable")[: min(ref_min, yg.size)]
+                ref = np.zeros(yg.size, dtype=bool)
+                ref[order] = True
+            yr = yg[ref]
+        else:
+            yr = yg
+        med = np.median(yr)
+        scale = 1.4826 * float(np.median(np.abs(yr - med)))
         if scale <= eps:
-            scale = float(y[g].std())
+            scale = float(yr.std())
         if scale <= eps:
             scale = 1.0
-        y[g] = (y[g] - med) / scale
+        y[g] = (yg - med) / scale
         err[g] = err[g] / scale
     return replace(record, y=y, err=err)
 

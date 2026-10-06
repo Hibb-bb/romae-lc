@@ -8,7 +8,7 @@
 > log-period R2 0.53), the joint objective erased it in 50k steps (0.50 to
 > 0.24, ROT 0.42 to -0.21) while its prediction loss kept improving, because a
 > static per-object latent is the easiest solution of a prediction loss with
-> gradients into the encoder (`project/SESSION-2026-09-25.md`). The stages are
+> gradients into the encoder (`docs/SESSION-2026-09-25.md`). The stages are
 > now: 1 the autoencoder (`project/pretrain_mae.py`, frozen afterwards); 2 a
 > conditional flow-matching predictor on cached frozen latents, anchored at the
 > last latent (`project/train_predictor.py`; its log density replaces the

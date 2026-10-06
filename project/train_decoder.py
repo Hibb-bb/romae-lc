@@ -237,6 +237,8 @@ def add_args(p):
     p.add_argument("--width", type=int, default=192)
     p.add_argument("--heads", type=int, default=3)
     p.add_argument("--encoder-drop", type=float, default=0.25)
+    p.add_argument("--sigma-input", action="store_true",
+                   help="feed the query point's own error to the decoder (the old, leaky default)")
     p.add_argument("--steps", type=int, default=20_000)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-4)
@@ -319,6 +321,7 @@ def main(argv=None):
         args.width,
         args.heads,
         args.depth,
+        sigma_input=args.sigma_input,
     ).to(dev)
     print(
         f"decoder {args.kind}: {n_params(dec) / 1e6:.2f}M params; "

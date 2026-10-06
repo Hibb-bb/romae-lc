@@ -11,6 +11,14 @@ uv run pytest         # CPU test suite, under a minute
 uv run black .        # formatting (line length 88)
 ```
 
+## The ZTF period and world-model work
+
+The research code on top of the library lives in `project/` (its own
+[README](project/README.md) starts with how to run the training, on the toy
+simulator or on ZTF), the notes and design documents in `docs/`, and the
+Slurm scripts in `project/jobs/`. The library examples below are the
+original ones of the package.
+
 ## Quickstart
 
 Tokenize a list of light curves (any epoch order, any number of points per band) and embed them:
