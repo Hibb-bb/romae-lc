@@ -137,13 +137,21 @@ def fig_cost_one(SW, B, key, label):
     ax.plot(x, y, color=C["ls"], lw=1.4, alpha=0.9, marker="o", ms=3, ls=LS_DASH)
     labels.append((x[-1], y[-1], "Lomb-Scargle", C["ls"]))
     tops = sorted({v["top"] for v in SW["settings"].values()})
+    widths = sorted({v["rel"] for v in SW["settings"].values()})
+    markers = dict(zip(widths, ["o", "s", "^", "D", "v", "P"]))
     for name, k in (("model + fine search", tops[0]), ("model candidates + search", tops[-1])):
         c = STY[name][0]
         items = sorted((v for v in SW["settings"].values() if v["top"] == k), key=lambda v: v["trials_median"])
         x = [v["trials_median"] for v in items]
         y = [v[key] for v in items]
-        ax.plot(x, y, color=c, lw=1.5, alpha=0.9, marker="o", ms=3.5)
+        ax.plot(x, y, color=c, lw=1.5, alpha=0.9)
+        for v, xi, yi in zip(items, x, y):
+            ax.plot([xi], [yi], marker=markers[v["rel"]], ms=6, color=c, ls="none", markeredgecolor=SURF, markeredgewidth=0.6)
         labels.append((x[-1], y[-1], name, c))
+    from matplotlib.lines import Line2D
+    handles = [Line2D([], [], marker=markers[w], ms=6, color=INK2, ls="none", label=f"search width {w:.0%} of the period") for w in widths]
+    handles.append(Line2D([], [], marker="o", ms=3, color=C["ls"], ls=LS_DASH, label="Lomb-Scargle grid size"))
+    ax.legend(handles=handles, fontsize=7, frameon=False, loc="center right", labelcolor=INK2, title="what each dot is", title_fontsize=7)
     for group in ([l for l in labels if l[3] == C["ls"]], [l for l in labels if l[3] != C["ls"]]):
         placed = []
         for xe, ye, text, col in sorted(group, key=lambda l: l[1]):
@@ -158,7 +166,7 @@ def fig_cost_one(SW, B, key, label):
     ax.set_xlim(lo * 0.7, hi * 12)
     ax.set_xlabel("trial frequencies per star", fontsize=8, color=INK2)
     ax.set_ylabel("share of 1,000 stars", fontsize=8, color=INK2)
-    ax.set_title(f"Hit rate {label} against the search budget (the model's points: search width 1, 3, 10, 30 % of its period)", fontsize=8.5, color=INK, loc="left")
+    ax.set_title(f"Hit rate {label} against the search budget", fontsize=9.5, color=INK, loc="left")
     return save(fig, f"cost_{key}.png")
 
 
@@ -304,6 +312,9 @@ def main():
          "median gap between observations (days)", "baseline (days)", "hit rate within 0.01 %")
 
     cross = B["crossing"]["[alias-tolerant 0.01%] astropy, multiband to match model_refined"]
+    top1 = sorted((v for v in SW["settings"].values() if v["top"] == min(x["top"] for x in SW["settings"].values())), key=lambda v: v["rel"])
+    top5 = sorted((v for v in SW["settings"].values() if v["top"] == max(x["top"] for x in SW["settings"].values())), key=lambda v: v["rel"])
+    width_items = "".join(f"<li>width {v1['rel']:.0%} of the period: about {v1['trials_median']:,.0f} trials per star for the fine search, {v5['trials_median']:,.0f} with the candidates</li>" for v1, v5 in zip(top1, top5))
     page = f"""{HEAD}<main>
   <div class="text">
     <h1>Period from the model, star by star</h1>
@@ -342,7 +353,9 @@ def main():
   <section>
     <div class="text">
       <h2>Cost: hit rate against the search budget</h2>
-      <p>1,000 validation stars. Lomb-Scargle gets a growing grid of trial frequencies; the model's budget grows with the width of its fine search (1, 3, 10 and 30 % of its period). Within 0.01 % Lomb-Scargle never reaches the model; with the double and the half accepted it needs {cross:,.0f} trials to match the model's {BM['model_refined']['trials_median']:,.0f}.</p>
+      <p>1,000 validation stars. The x axis is the number of trial periods evaluated per star, the common currency of both methods. For Lomb-Scargle it is the size of its frequency grid. For the model it is set by the width of the fine search around its guess: the grid is spaced by the star's baseline, so a wider window costs more trials. Each marker shape is one width:</p>
+      <ul>{width_items}</ul>
+      <p>Within 0.01 % Lomb-Scargle never reaches the model; with the double and the half accepted it needs {cross:,.0f} trials to match the model's {BM['model_refined']['trials_median']:,.0f}.</p>
     </div>
     {img(f_cost[0], "Hit rate within 10 percent against trial frequencies per star for Lomb-Scargle and for the model's search")}
     {img(f_cost[1], "Hit rate within 1 percent against trial frequencies per star for Lomb-Scargle and for the model's search")}
