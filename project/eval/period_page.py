@@ -28,7 +28,10 @@ from project.plot_period_examples import CLASS_COLOUR, CLASS_NAME, INK, INK2, OT
 HEAD = '<title>ZTF Period Figures</title>\n<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@500;700&family=Public+Sans:wght@400;600&display=swap">\n<style>\n/* layout: one reading column for text, figures break out wider on a light paper panel */\n:root {\n  --bg: #f3f5f8; --fg: #14202e; --muted: #526173; --rule: #d5dbe3;\n  --accent: #2a78d6; --panel: #ffffff; --paper: #fcfcfb;\n  --display: "Figtree", "Segoe UI", system-ui, sans-serif;\n  --body: "Public Sans", "Segoe UI", system-ui, sans-serif;\n}\n@media (prefers-color-scheme: dark) {\n  :root:not([data-theme="light"]) { --bg: #0f151c; --fg: #e8edf3; --muted: #9aa8b8; --rule: #2a3542; --accent: #6aa7ee; --panel: #171f29; --paper: #fcfcfb; color-scheme: dark }\n}\n:root[data-theme="dark"] { --bg: #0f151c; --fg: #e8edf3; --muted: #9aa8b8; --rule: #2a3542; --accent: #6aa7ee; --panel: #171f29; --paper: #fcfcfb; color-scheme: dark }\nbody { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 16px; line-height: 1.6; padding-inline: 20px; padding-block: 36px 64px; }\nmain { max-width: 1080px; margin-inline: auto; display: flex; flex-direction: column; gap: 40px; }\n.text { max-width: 66ch; display: flex; flex-direction: column; gap: 12px; }\nh1 { font-family: var(--display); font-weight: 700; font-size: clamp(1.7rem, 4vw, 2.3rem); line-height: 1.15; margin: 0; text-wrap: balance; }\nh2 { font-family: var(--display); font-weight: 700; font-size: 1.3rem; line-height: 1.25; margin: 0; text-wrap: balance; }\np { margin: 0; }\n.lede { color: var(--muted); font-size: 1.05rem; }\nsection { display: flex; flex-direction: column; gap: 16px; }\nfigure { margin: 0; background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 8px; overflow-x: auto; }\nfigure img { display: block; width: 100%; min-width: 0; height: auto; }\nul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; }\n.tablewrap { overflow-x: auto; }\ntable { border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 0.95rem; }\nth, td { text-align: left; padding: 7px 18px 7px 0; border-bottom: 1px solid var(--rule); }\nth { font-family: var(--display); font-weight: 500; color: var(--muted); font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; }\ntd.n { text-align: right; padding-right: 24px; }\ncode { font-size: 0.92em; background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }\n.note { border-left: 3px solid var(--accent); padding-left: 14px; color: var(--muted); }\n</style>\n'
 ENC_TAB = '<h2>The encoders behind these numbers</h2>\n      <p>Period hit rate of the bin read-out on the pooled latent, 5,346 validation stars, 240 bins.</p>\n    </div>\n    <div class="tablewrap"><table>\n      <tr><th>encoder</th><th>steps</th><th>within 1%</th><th>within 10%</th><th>within 20%</th></tr>\n      <tr><td>light, plain</td><td class=n>50,000</td><td class=n>0.36</td><td class=n>0.66</td><td class=n></td></tr>\n      <tr><td>wide, plain</td><td class=n>110,000</td><td class=n>0.58</td><td class=n>0.71</td><td class=n>0.80</td></tr>\n      <tr><td>light, spectral layer</td><td class=n>50,000</td><td class=n>0.35</td><td class=n>0.76</td><td class=n>0.85</td></tr>\n      <tr><td>wide, spectral layer</td><td class=n>54,000</td><td class=n>0.69</td><td class=n>0.77</td><td class=n>0.85</td></tr>\n      <tr><td>wide, spectral layer</td><td class=n>100,000</td><td class=n>0.70</td><td class=n>0.77</td><td class=n>0.84</td></tr>\n    </table></div>\n    <div class="text">\n      <p>The spectral layer sums each window\'s learned token features with the phasor at every point\'s own time over 20,000 trial frequencies, and hands a summary of that spectrum to the latent. It is the one encoder-side change that moved the period after about fifteen others did not.</p>\n    </div>\n  </section>\n'
 FIGS = Path("project/results/period_page/figs")
-C = dict(model="#2a78d6", refined="#1baf7a", cands="#0b0b0b", ls="#eb6834")
+C = dict(model="#6baed6", refined="#2171b5", cands="#08306b", ls="#e6550d", ls_alias="#fd8d3c")
+LS_DASH, LS_DOT = (0, (5, 2.5)), (0, (1.2, 1.6))
+STY = {"model alone": (C["model"], "-"), "model + fine search": (C["refined"], "-"), "model candidates + search": (C["cands"], "-"),
+       "Lomb-Scargle": (C["ls"], LS_DASH), "Lomb-Scargle, double and half accepted": (C["ls_alias"], LS_DOT)}
 TOLS = (0.2, 0.1, 0.01, 0.001, 0.0001)
 TOL_LABEL = ["20 %", "10 %", "1 %", "0.1 %", "0.01 %"]
 CLS = {"ECL": "eclipsing", "RR": "RR Lyrae", "ROT": "rotation", "CEP": "Cepheid", "DSCT": "δ Scuti", "LPV": "long-period"}
@@ -87,18 +90,16 @@ def fig_scatter_two(p_true, preds: dict, sup):
 
 def fig_bars_by_class(M, ls, groups, counts, key, label):
     """Grouped bars: the hit rate per class for every method at one tolerance."""
-    methods = [("model alone", "model", C["model"]), ("model + fine search", "model_refined", C["refined"]), ("model candidates + search", "model_cands", C["cands"]),
-               ("Lomb-Scargle", ls, C["ls"])]
+    methods = [("model alone", "model", C["model"], None), ("model + fine search", "model_refined", C["refined"], None), ("model candidates + search", "model_cands", C["cands"], None),
+               ("Lomb-Scargle", ls, C["ls"], "//"), ("Lomb-Scargle, double and half accepted", ls, C["ls_alias"], "..")]
     fig, ax = plt.subplots(figsize=(9.2, 3.8), dpi=150)
     fig.patch.set_facecolor(SURFACE)
     style(ax)
     x = np.arange(len(groups))
-    w = 0.8 / (len(methods) + 1)
-    for i, (name, m, col) in enumerate(methods):
-        ax.bar(x + (i - len(methods) / 2) * w + w / 2, [M[m]["by_superclass"][g][key] for g in groups], w, color=col, label=name)
-    i = len(methods)
-    ax.bar(x + (i - len(methods) / 2) * w + w / 2, [M[ls]["by_superclass"][g][key.replace("within_", "alias_")] for g in groups], w, color=C["ls"], alpha=0.45,
-           hatch="///", edgecolor=SURFACE, label="Lomb-Scargle, double and half accepted")
+    w = 0.8 / len(methods)
+    for i, (name, m, col, hatch) in enumerate(methods):
+        k = key if "accepted" not in name else key.replace("within_", "alias_")
+        ax.bar(x + (i - len(methods) / 2) * w + w / 2, [M[m]["by_superclass"][g][k] for g in groups], w, color=col, hatch=hatch, edgecolor=SURFACE if hatch else col, lw=0.5, label=name)
     ax.set_xticks(x)
     ax.set_xticklabels([f"{CLS[g]}\n({counts[g]})" for g in groups], fontsize=7.5)
     ax.set_ylim(0, 1.0)
@@ -120,7 +121,6 @@ def fig_hit_vs_period_one(p_true, sup, series, tol, label):
 def fig_cost_one(SW, B, key, label):
     """Hit rate against trial frequencies at one tolerance: Lomb-Scargle muted, the model's search in blue."""
     SURF, GRID = SURFACE, "#e4e3df"
-    LS, MODEL = "#b9a99a", ["#1d6fd1", "#0b4fa0", "#062f63"]
     fig, ax = plt.subplots(figsize=(7.6, 4.2), dpi=150)
     fig.patch.set_facecolor(SURF)
     ax.set_facecolor(SURF)
@@ -131,20 +131,20 @@ def fig_cost_one(SW, B, key, label):
     ax.grid(True, color=GRID, lw=0.5, alpha=0.7)
     ax.tick_params(colors=INK2, labelsize=7.5)
     labels = []
-    for tag, name, ls_ in (("mb", "Lomb-Scargle, multiband", "-"), ("1b", "Lomb-Scargle, best band", (0, (3, 2)))):
-        ms = sorted((m for m in B["methods"] if m.startswith(f"astropy_{tag}@")), key=lambda m: int(m.split("@")[1]))
-        x = [B["methods"][m]["trials_median"] for m in ms]
-        y = [B["methods"][m][key] for m in ms]
-        ax.plot(x, y, color=LS, lw=1.2, alpha=0.8, marker="o", ms=3, ls=ls_)
-        labels.append((x[-1], y[-1], name, INK2))
+    ms = sorted((m for m in B["methods"] if m.startswith("astropy_mb@")), key=lambda m: int(m.split("@")[1]))
+    x = [B["methods"][m]["trials_median"] for m in ms]
+    y = [B["methods"][m][key] for m in ms]
+    ax.plot(x, y, color=C["ls"], lw=1.4, alpha=0.9, marker="o", ms=3, ls=LS_DASH)
+    labels.append((x[-1], y[-1], "Lomb-Scargle", C["ls"]))
     tops = sorted({v["top"] for v in SW["settings"].values()})
-    for c, k in zip(MODEL, tops):
+    for name, k in (("model + fine search", tops[0]), ("model candidates + search", tops[-1])):
+        c = STY[name][0]
         items = sorted((v for v in SW["settings"].values() if v["top"] == k), key=lambda v: v["trials_median"])
         x = [v["trials_median"] for v in items]
         y = [v[key] for v in items]
-        ax.plot(x, y, color=c, lw=1.4, alpha=0.85, marker="o", ms=3.5)
-        labels.append((x[-1], y[-1], f"model, top {k} seed{'s' if k > 1 else ''}", c))
-    for group in ([l for l in labels if l[3] == INK2], [l for l in labels if l[3] != INK2]):
+        ax.plot(x, y, color=c, lw=1.5, alpha=0.9, marker="o", ms=3.5)
+        labels.append((x[-1], y[-1], name, c))
+    for group in ([l for l in labels if l[3] == C["ls"]], [l for l in labels if l[3] != C["ls"]]):
         placed = []
         for xe, ye, text, col in sorted(group, key=lambda l: l[1]):
             y_lab = ye if not placed else max(ye, placed[-1] + 0.05)
@@ -158,7 +158,7 @@ def fig_cost_one(SW, B, key, label):
     ax.set_xlim(lo * 0.7, hi * 12)
     ax.set_xlabel("trial frequencies per star", fontsize=8, color=INK2)
     ax.set_ylabel("share of 1,000 stars", fontsize=8, color=INK2)
-    ax.set_title(f"Hit rate {label} against the search budget (the model's points: search width 1, 3, 10, 30 % of its period)", fontsize=9, color=INK, loc="left")
+    ax.set_title(f"Hit rate {label} against the search budget (the model's points: search width 1, 3, 10, 30 % of its period)", fontsize=8.5, color=INK, loc="left")
     return save(fig, f"cost_{key}.png")
 
 
@@ -167,11 +167,11 @@ def fig_runtime(T, budgets):
     fig, ax = plt.subplots(figsize=(7.6, 4.0), dpi=150)
     fig.patch.set_facecolor(SURFACE)
     style(ax)
-    for tag, name, ls_ in (("mb", "Lomb-Scargle, multiband (CPU)", "-"), ("1b", "Lomb-Scargle, best band (CPU)", (0, (4, 2)))):
-        ax.plot(budgets, [1e3 * S[f"astropy_{tag}@{b}"]["median"] for b in budgets], color=C["ls"], ls=ls_, marker="o", ms=4, lw=1.5, label=name)
-    one, batched = 1e3 * T["model_total"]["median"], 1e3 * T["model_total_batched_per_star"]
-    ax.axhline(one, color=C["model"], lw=1.4, label=f"model, whole path, one star at a time ({one:.0f} ms)")
-    ax.axhline(batched, color=C["model"], lw=1.4, ls=(0, (4, 2)), label=f"model, whole path, encoder batched over stars ({batched:.0f} ms)")
+    ax.plot(budgets, [1e3 * S[f"astropy_mb@{b}"]["median"] for b in budgets], color=C["ls"], ls=LS_DASH, marker="o", ms=4, lw=1.5, label="Lomb-Scargle (CPU)")
+    one = 1e3 * (S["encode"]["median"] + S["read"]["median"] + S["search"]["median"])
+    batched = 1e3 * T["model_total_batched_per_star"]
+    ax.axhline(one, color=C["model"], lw=1.6, label=f"model, one star at a time ({one:.0f} ms)")
+    ax.axhline(batched, color=C["cands"], lw=1.6, label=f"model, batched over stars ({batched:.0f} ms)")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xticks(budgets)
@@ -210,7 +210,7 @@ def main():
     ap.add_argument("--runtime", required=True)
     ap.add_argument("--sweep", required=True)
     ap.add_argument("--ckpt", default="project/runs/maew_spec/mae.pt", help="for the data arguments (the fold demos read the light curves)")
-    ap.add_argument("--variants", nargs="*", default=[], help="name=runtime folder pairs with a batch sweep for the batched table")
+    ap.add_argument("--ls-extra", default=None, help="ls_allstars folder: Lomb-Scargle at more budgets on every star, for the first table")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     FIGS.mkdir(parents=True, exist_ok=True)
@@ -241,9 +241,14 @@ def main():
     def hits_row(name, m):
         v = M[m]
         return f"<tr><td>{name}</td>" + "".join(f"<td class=n>{v[f'within_{t:g}']:.3f}</td>" for t in TOLS) + f"<td class=n>{v['alias_0.0001']:.3f}</td><td class=n>{v['trials_median']:,.0f}</td></tr>"
+    if a.ls_extra and (Path(a.ls_extra) / "results.json").is_file():
+        X = json.load(open(Path(a.ls_extra) / "results.json"))
+        if X["n_stars"] == n:
+            M.update(X["methods"])
+    ls_all = sorted((m for m in M if m.startswith("astropy_mb@")), key=lambda m: int(m.split("@")[1]))
     table1 = ["<tr><th>method</th><th>within 20 %</th><th>10 %</th><th>1 %</th><th>0.1 %</th><th>0.01 %</th><th>0.01 %, double and half accepted</th><th>trials per star</th></tr>",
-              hits_row("model alone", "model"), hits_row("model + fine search", "model_refined"), hits_row("model candidates + search", "model_cands"),
-              hits_row(f"Lomb-Scargle, multiband, {ls_budget:,} trials", ls)]
+              hits_row("model alone", "model"), hits_row("model + fine search", "model_refined"), hits_row("model candidates + search", "model_cands")]
+    table1 += [hits_row(f"Lomb-Scargle, {int(m.split('@')[1]):,} trials", m) for m in ls_all]
     f_sc = fig_scatter_two(p_true, {"model alone": pm, "model + fine search": pr}, sup)
 
     # ---- 2. folds: as good as the catalogue (typical hit per class), and cleaner than it
@@ -273,55 +278,22 @@ def main():
                                 "Stars where the model's period folds the light curve more cleanly than the catalogue value")
     F = R["fold"]
     bt = R["better"]
-    table3 = ["<tr><th>ZTF id</th><th>class</th><th>ratio to the catalogue</th><th>catalogue P (d)</th><th>model P (d)</th><th>fold R2 catalogue</th><th>catalogue sharpened</th><th>model</th><th>points</th></tr>"]
-    for r in diff[:30]:
-        table3.append(f"<tr><td><code>{r['ztf_id']}</code></td><td>{r['class']}</td><td>{r['kind'].replace('different', 'other')}</td><td class=n>{float(r['p_catalogue_d']):.6f}</td><td class=n>{float(r['p_best_d']):.6f}</td>"
-                      f"<td class=n>{float(r['r2_catalogue']):.2f}</td><td class=n>{float(r['r2_catalogue_sharp']):.2f}</td><td class=n>{float(r['r2_best']):.2f}</td><td class=n>{r['n_points']}</td></tr>")
 
     # ---- 3. cost: hit rate against trials, one figure per threshold; the trials table; runtime
     f_cost = [fig_cost_one(SW, B, key, label) for key, _, label in thresholds]
-    rows_ = ["<tr><th>search</th><th>trials per star</th><th>within 10 %</th><th>within 1 %</th><th>within 0.01 %</th><th>0.01 %, double and half accepted</th></tr>"]
-    for name, v in sorted(SW["settings"].items(), key=lambda kv: (kv[1]["top"], kv[1]["rel"])):
-        rows_.append(f"<tr><td>model, top {v['top']} seed{'s' if v['top'] > 1 else ''}, width {v['rel']:.0%}</td><td class=n>{v['trials_median']:,.0f}</td><td class=n>{v['within_0.1']:.2f}</td><td class=n>{v['within_0.01']:.2f}</td><td class=n>{v['within_0.0001']:.2f}</td><td class=n>{v['alias_tolerant_0.0001']:.2f}</td></tr>")
     bench_budgets = sorted({int(m.split("@")[1]) for m in BM if m.startswith("astropy_mb@")})
-    for b in bench_budgets:
-        if b >= 20000:
-            v = BM[f"astropy_mb@{b}"]
-            rows_.append(f"<tr><td>Lomb-Scargle, multiband, {b:,}</td><td class=n>{v['trials_median']:,.0f}</td><td class=n>{v['within_0.1']:.2f}</td><td class=n>{v['within_0.01']:.2f}</td><td class=n>{v['within_0.0001']:.2f}</td><td class=n>{v['alias_tolerant_0.0001']:.2f}</td></tr>")
-    sweep_table = '<div class="tablewrap"><table>' + "".join(rows_) + "</table></div>"
     rt_budgets = sorted({int(k.split("@")[1]) for k in S if k.startswith("astropy_mb@") and S[k]["n"]})
     f_rt = fig_runtime(T, rt_budgets)
-    def trow(name, key):
-        v = S[key]
-        return f"<tr><td>{name}</td><td class=n>{1e3 * v['median']:.1f}</td><td class=n>{1e3 * v['p16']:.1f} to {1e3 * v['p84']:.1f}</td></tr>"
-    table5 = ["<tr><th>step</th><th>median ms per star</th><th>16 to 84 % range</th></tr>",
-              trow("model: windows and tokens (CPU)", "cut"), trow("model: encoder forward, one star per batch (GPU)", "encode"), trow("model: pooling and read-out", "read"),
-              trow("model: fine search within 10 % (GPU)", "search"),
-              f"<tr><td><strong>model: the whole path, one star at a time</strong></td><td class=n><strong>{1e3 * T['model_total']['median']:.1f}</strong></td><td class=n>{1e3 * T['model_total']['p16']:.1f} to {1e3 * T['model_total']['p84']:.1f}</td></tr>",
-              f"<tr><td><strong>model: the whole path, encoder batched over stars</strong></td><td class=n><strong>{1e3 * T['model_total_batched_per_star']:.1f}</strong></td><td class=n></td></tr>"]
-    for b in rt_budgets:
-        table5 += [trow(f"Lomb-Scargle, best band, {b:,} trials (CPU)", f"astropy_1b@{b}"), trow(f"Lomb-Scargle, multiband, {b:,} trials (CPU)", f"astropy_mb@{b}")]
-    variants = []
-    for item in a.variants:
-        name, path = item.split("=", 1)
-        if (Path(path) / "results.json").is_file():
-            variants.append((name, json.load(open(Path(path) / "results.json"))))
-    batched_html = ""
-    if variants:
-        vr = ["<tr><th>encoder variant</th><th>best batch (windows)</th><th>GPU ms per star</th><th>end to end ms per star</th><th>stars per second</th><th>peak GPU memory GB</th><th>latent change vs bf16</th><th>own period peak within 1 %</th></tr>"]
-        for name, V in variants:
-            bb = V["best_batch"]
-            b = V["batch_sweep"].get(str(bb), V["batch_sweep"].get(bb))
-            acc = V.get("accuracy", {})
-            chg = acc.get("latent_rel_change_median")
-            vr.append(f"<tr><td>{name}</td><td class=n>{bb:,}</td><td class=n>{1e3 * b['gpu_s_per_star']:.1f}</td><td class=n>{1e3 * b['e2e_s_per_star']:.1f}</td><td class=n>{b['stars_per_s']:,.0f}</td><td class=n>{b['peak_mem_gb']:.0f}</td>"
-                      f"<td class=n>{'' if chg is None else f'{100 * chg:.1f} %'}</td><td class=n>{acc.get('spectral_peak_within_1pct', float('nan')):.3f}</td></tr>")
-        batched_html = '<div class="text"><p>Batched over many stars, as a survey run would be, in bf16 and with the transformer\'s linear layers quantised (torchao). The last two columns compare each variant with bf16 on the same windows.</p><div class="tablewrap"><table>' + "".join(vr) + "</table></div></div>"
+    one_ms = 1e3 * (S["encode"]["median"] + S["read"]["median"] + S["search"]["median"])
+    table5 = ["<tr><th>method</th><th>milliseconds per star</th></tr>",
+              f"<tr><td>model, encoder + read-out + fine search, batched over stars (GPU)</td><td class=n>{1e3 * T['model_total_batched_per_star']:.0f}</td></tr>",
+              f"<tr><td>model, the same one star at a time (GPU)</td><td class=n>{one_ms:.0f}</td></tr>"]
+    table5 += [f"<tr><td>Lomb-Scargle, {b:,} trials (CPU)</td><td class=n>{1e3 * S[f'astropy_mb@{b}']['median']:.0f}</td></tr>" for b in rt_budgets]
 
     # ---- 4. analysis: bars by class, hit rate against the period per threshold, heat maps
     f_bars = [fig_bars_by_class(M, ls, groups, counts, key, label) for key, _, label in thresholds]
-    series = {"model alone": (pm, C["model"], "-", False), "model + fine search": (pr, C["refined"], "-", False), "model candidates + search": (pc, C["cands"], "-", False),
-              f"Lomb-Scargle {ls_budget:,} trials": (pl, C["ls"], "-", False), f"Lomb-Scargle {ls_budget:,} trials, double and half accepted": (pl, C["ls"], (0, (4, 2)), True)}
+    series = {"model alone": (pm, *STY["model alone"], False), "model + fine search": (pr, *STY["model + fine search"], False), "model candidates + search": (pc, *STY["model candidates + search"], False),
+              f"Lomb-Scargle, {ls_budget:,} trials": (pl, *STY["Lomb-Scargle"], False), "Lomb-Scargle, double and half accepted": (pl, *STY["Lomb-Scargle, double and half accepted"], True)}
     f_hvp = [fig_hit_vs_period_one(p_true, sup, series, tol, label) for _, tol, label in thresholds]
     bls = f"p_astropy_mb@{max(bench_budgets)}"
     hit = {"model + fine search": np.abs(bd["p_model_refined"] / bd["p_true"] - 1) < 1e-4, f"Lomb-Scargle, {max(bench_budgets):,} trials": np.abs(bd[bls] / bd["p_true"] - 1) < 1e-4}
@@ -364,25 +336,22 @@ def main():
     {img(f_better, "Phase-folded light curves of stars where the model period folds more cleanly than the catalogue value: other periods first, then the same period made sharper")}
     <div class="text">
       <p class="note">A cleaner fold is evidence, not proof: on night-only sampling a period one cycle per day away folds almost as well, and the half period of a symmetric eclipsing binary folds like the full one.</p>
-      <div class="tablewrap"><table>{''.join(table3)}</table></div>
     </div>
   </section>
 
   <section>
     <div class="text">
       <h2>Cost: hit rate against the search budget</h2>
-      <p>1,000 validation stars. Lomb-Scargle gets a growing grid of trial frequencies. The model's budget grows with the width of its fine search (1, 3, 10, 30 % of its period) and the number of seed bins it sharpens (1, 3, 5). Within 0.01 % Lomb-Scargle never reaches the model; with the double and the half accepted it needs {cross:,.0f} trials to match the model's {BM['model_refined']['trials_median']:,.0f}.</p>
+      <p>1,000 validation stars. Lomb-Scargle gets a growing grid of trial frequencies; the model's budget grows with the width of its fine search (1, 3, 10 and 30 % of its period). Within 0.01 % Lomb-Scargle never reaches the model; with the double and the half accepted it needs {cross:,.0f} trials to match the model's {BM['model_refined']['trials_median']:,.0f}.</p>
     </div>
     {img(f_cost[0], "Hit rate within 10 percent against trial frequencies per star for Lomb-Scargle and for the model's search")}
     {img(f_cost[1], "Hit rate within 1 percent against trial frequencies per star for Lomb-Scargle and for the model's search")}
     {img(f_cost[2], "Hit rate within 0.01 percent against trial frequencies per star for Lomb-Scargle and for the model's search")}
-    <div class="text">{sweep_table}</div>
     <div class="text">
-      <p>Wall-clock per star on {T['n_stars']} stars (median {T['points']['median']:.0f} points, {T['windows']['median']:.0f} windows), one {html.escape(T['gpu'] or 'GPU')} and {T['cpu_threads']} CPU threads; Lomb-Scargle runs on the CPU.</p>
+      <p>Wall-clock per star, median over {T['n_stars']} stars (about {T['points']['median']:.0f} points and {T['windows']['median']:.0f} windows each), on one {html.escape(T['gpu'] or 'GPU')}; Lomb-Scargle runs on the CPU. Data loading and tokenising are not counted.</p>
       <div class="tablewrap"><table>{''.join(table5)}</table></div>
     </div>
-    {img(f_rt, "Milliseconds per star against trial frequencies for Lomb-Scargle, with the model path as horizontal lines")}
-    {batched_html}
+    {img(f_rt, "Milliseconds per star against trial frequencies for Lomb-Scargle, with the model as horizontal lines")}
   </section>
 
   <section>
