@@ -134,6 +134,7 @@ def main():
     ap.add_argument("--bench", required=True)
     ap.add_argument("--runtime", required=True)
     ap.add_argument("--sweep", default=None, help="budget_sweep folder: the model over its own budget on the benchmark figure")
+    ap.add_argument("--variants", nargs="*", default=[], help="name=runtime folder pairs with a batch sweep (bf16, quantised, graphs) for the batched table and plot")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     FIGS.mkdir(parents=True, exist_ok=True)
@@ -242,9 +243,41 @@ def main():
               f"<tr><td><strong>model: the whole path, encoder batched over stars</strong></td><td class=n><strong>{1e3 * T['model_total_batched_per_star']:.1f}</strong></td><td class=n></td></tr>"]
     for b in rt_budgets:
         table5 += [trow(f"Lomb-Scargle, best band, {b:,} trials (CPU)", f"astropy_1b@{b}"), trow(f"Lomb-Scargle, multiband, {b:,} trials (CPU)", f"astropy_mb@{b}")]
-    bmax = max(rt_budgets)
+    bmax = int(cross) if int(cross) in rt_budgets else max(rt_budgets)
 
     enc_tab = ENC_TAB
+    variants = []
+    for item in a.variants:
+        name, path = item.split("=", 1)
+        if (Path(path) / "results.json").is_file():
+            variants.append((name, json.load(open(Path(path) / "results.json"))))
+    batched_html = ""
+    if variants:
+        rows_ = ["<tr><th>encoder variant</th><th>best batch (windows)</th><th>GPU ms per star</th><th>end to end ms per star</th><th>stars per second</th><th>peak GPU memory GB</th><th>latent change vs bf16</th><th>own period peak within 1 %</th></tr>"]
+        for name, V in variants:
+            bb = V["best_batch"]
+            b = V["batch_sweep"].get(str(bb), V["batch_sweep"].get(bb))
+            acc = V.get("accuracy", {})
+            chg = acc.get("latent_rel_change_median")
+            rows_.append(f"<tr><td>{name}</td><td class=n>{bb:,}</td><td class=n>{1e3 * b['gpu_s_per_star']:.1f}</td><td class=n>{1e3 * b['e2e_s_per_star']:.1f}</td><td class=n>{b['stars_per_s']:,.0f}</td><td class=n>{b['peak_mem_gb']:.0f}</td>"
+                         f"<td class=n>{'' if chg is None else f'{100 * chg:.1f} %'}</td><td class=n>{acc.get('spectral_peak_within_1pct', float('nan')):.3f}</td></tr>")
+        fig, ax = plt.subplots(figsize=(8.4, 4.0), dpi=150)
+        fig.patch.set_facecolor(SURFACE)
+        style(ax)
+        cols = ["#2a78d6", "#1baf7a", "#0b0b0b", "#eb6834", "#b07cd6", "#52514e"]
+        for (name, V), col in zip(variants, cols):
+            pts = sorted((int(k), v) for k, v in V["batch_sweep"].items() if "gpu_s_per_star" in v)
+            ax.plot([k for k, _ in pts], [1e3 * v["gpu_s_per_star"] for _, v in pts], color=col, marker="o", ms=4, lw=1.5, label=name)
+        ax.set_xscale("log", base=2)
+        ax.set_xlabel("windows per batch", fontsize=8, color=INK2)
+        ax.set_ylabel("GPU milliseconds per star", fontsize=8, color=INK2)
+        ax.set_ylim(0, None)
+        ax.set_title("Batched encoder throughput against the batch size", fontsize=9.5, color=INK, loc="left")
+        ax.legend(fontsize=7, frameon=False, labelcolor=INK2)
+        save(fig, "batched_vs_batch.png")
+        batched_html = ('<div class="text"><p>Batched over many stars, as a survey run would be: the encoder at every batch size, in bf16 and with the transformer\'s linear layers quantised (torchao). '
+                        'The accuracy columns compare each variant with bf16 on the same windows: the median relative change of the window latents, and how often the spectral layer\'s own peak period is within 1 % of the catalogue (bf16 is the reference).</p>'
+                        '<div class="tablewrap"><table>' + "".join(rows_) + "</table></div></div>" + img(FIGS / "batched_vs_batch.png", "Line plot of GPU milliseconds per star against the batch size for the bf16 encoder and its quantised variants"))
 
     page = f"""{head}<main>
   <div class="text">
@@ -271,7 +304,8 @@ def main():
       <ul>
         <li>The fine search costs nothing in reach and buys all the precision: within 10 % the hit rate hardly moves, within 0.01 % it goes from {pct(M['model']['within_0.0001'])} to {pct(M['model_refined']['within_0.0001'])}.</li>
         <li>Lomb-Scargle finds the half period of nearly every eclipsing binary. Strictly it is within 1 % for {pct(M[ls]['by_superclass']['ECL']['within_0.01'])} of them; with the half accepted, {pct(M[ls]['by_superclass']['ECL']['alias_0.01'])}. The model finds the true period of {pct(M['model_refined']['by_superclass']['ECL']['within_0.01'])}.</li>
-        <li>Lomb-Scargle is better on RR Lyrae at 0.01 % only when its half and double count, and better on delta Scuti and long-period stars outright: the model has seen few of those.</li>
+        <li>The candidate search (the read-out's best bins and the double and half of the refined period, each sharpened, the fold deciding with a margin) lifts the strict hit rate within 0.01 % from {pct(M['model_refined']['within_0.0001'])} to {pct(M['model_cands']['within_0.0001'])} at {M['model_cands']['trials_median']:,.0f} trials per star.</li>
+        <li>On RR Lyrae the model leads at every tolerance ({M['model_refined']['by_superclass']['RR']['within_0.0001']:.2f} against {M[ls]['by_superclass']['RR']['within_0.0001']:.2f} within 0.01 %). Lomb-Scargle is better on delta Scuti and long-period stars outright: the model has seen few of those in training.</li>
       </ul>
       {relu_note}
     </div>
@@ -350,11 +384,12 @@ def main():
     </div>
     <div class="tablewrap"><table>{''.join(table5)}</table></div>
     {img(f_rt, "Line plot of milliseconds per star against the number of trial frequencies for Lomb-Scargle, with the model path as horizontal lines")}
+    {batched_html}
     <div class="text">
       <ul>
-        <li>One star at a time, the model path takes {1e3 * T['model_total']['median']:.0f} ms, almost all of it the encoder forward over the star's windows.</li>
+        <li>One star at a time, the model path takes {1e3 * T['model_total']['median']:.0f} ms, almost all of it the encoder forward over the star's windows: launch overhead on a batch of 40 windows, not arithmetic.</li>
         <li>Batched over many stars, as a survey run would be, the encoder costs {1e3 * T['encode_batched_per_star']:.1f} ms per star and the whole path about {1e3 * T['model_total_batched_per_star']:.0f} ms.</li>
-        <li>Lomb-Scargle at {bmax:,} trials, the budget it needs to match the model with aliases accepted, takes {S[f'astropy_mb@{bmax}']['median']:.1f} s per star with the multiband model and {1e3 * S[f'astropy_1b@{bmax}']['median']:.0f} ms on the best band.</li>
+        <li>Lomb-Scargle at {bmax:,} trials, the budget it needs to match the model with the double and half accepted, takes {1e3 * S[f'astropy_mb@{bmax}']['median']:.0f} ms per star with the multiband model and {1e3 * S[f'astropy_1b@{bmax}']['median']:.0f} ms on the best band, on the CPU.</li>
       </ul>
     </div>
   </section>

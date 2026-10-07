@@ -137,19 +137,28 @@ def plot_budget(path, sweep: dict, bench: dict, title: str = "Hit rate against t
             ax.spines[s].set_color(GRID)
         ax.grid(True, color=GRID, lw=0.5, alpha=0.7)
         ax.tick_params(colors=INK2, labelsize=7.5)
+        labels = []  # (x_end, y_end, text, colour): placed after the lines, pushed apart where they would overlap
         for name, ms in ls_methods.items():
             if not ms:
                 continue
             x = [bench["methods"][m]["trials_median"] for m in ms]
             yv = [bench["methods"][m][key] for m in ms]
             ax.plot(x, yv, color=LS, lw=1.2, alpha=0.8, marker="o", ms=3, ls="-" if name == "multiband" else (0, (3, 2)))
-            ax.annotate(f"Lomb-Scargle, {name}", (x[-1], yv[-1]), xytext=(4, 0), textcoords="offset points", fontsize=6.5, color=INK2, va="center")
+            labels.append((x[-1], yv[-1], f"Lomb-Scargle, {name}", INK2))
         for c, k in zip(MODEL, tops):
             items = sorted((v for v in sweep["settings"].values() if v["top"] == k), key=lambda v: v["trials_median"])
             x = [v["trials_median"] for v in items]
             yv = [v[key] for v in items]
             ax.plot(x, yv, color=c, lw=1.4, alpha=0.85, marker="o", ms=3.5)
-            ax.annotate(f"model, top {k} seed{'s' if k > 1 else ''}", (x[-1], yv[-1]), xytext=(4, 0), textcoords="offset points", fontsize=6.5, color=c, va="center")
+            labels.append((x[-1], yv[-1], f"model, top {k} seed{'s' if k > 1 else ''}", c))
+        gap = 0.05
+        for group in ({l for l in labels if l[3] == INK2}, {l for l in labels if l[3] != INK2}):  # the two families end at different x
+            placed = []
+            for xe, ye, text, col in sorted(group, key=lambda l: l[1]):
+                y_lab = ye if not placed else max(ye, placed[-1] + gap)
+                placed.append(y_lab)
+                ax.annotate(text, (xe, ye), xytext=(xe * 1.12, y_lab), textcoords="data", fontsize=6.5, color=col, va="center",
+                            arrowprops=dict(arrowstyle="-", color=col, lw=0.5, alpha=0.6) if abs(y_lab - ye) > 1e-3 else None)
         ax.set_xscale("log")
         ax.set_ylim(0, 1.0)
         ax.set_title(f"hit rate {lab}", fontsize=9, color=INK, loc="left")
@@ -157,7 +166,7 @@ def plot_budget(path, sweep: dict, bench: dict, title: str = "Hit rate against t
     axes[0].set_ylabel("share of the stars", fontsize=8, color=INK2)
     lo = min(v["trials_median"] for v in sweep["settings"].values())
     hi = max(bench["methods"][m]["trials_median"] for ms in ls_methods.values() for m in ms)
-    axes[0].set_xlim(lo * 0.7, hi * 6)
+    axes[0].set_xlim(lo * 0.7, hi * 12)
     fig.suptitle(title + "  (the model's points: search width 1, 3, 10, 30 % of its period)", fontsize=9.5, color=INK, x=0.01, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(path, facecolor=SURF)
