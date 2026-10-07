@@ -114,7 +114,8 @@ def parse_args(argv=None):
     p.add_argument("--astropy-budgets", type=int, nargs="*", default=[50000, 200000, 500000], help="none to skip")
     p.add_argument("--astropy-objects", type=int, default=100, help="stars for the astropy timings (CPU, slow)")
     p.add_argument("--batch-windows", type=int, default=512)
-    p.add_argument("--compile", default="none", choices=["none", "default", "max-autotune-no-cudagraphs", "reduce-overhead"], help="torch.compile the encoder's backbone")
+    p.add_argument("--compile", default="none", choices=["none", "default", "max-autotune-no-cudagraphs", "reduce-overhead", "cudagraphs"],
+                   help="torch.compile the encoder's backbone; 'cudagraphs' is the graph-only backend that needs no C compiler (inductor does)")
     p.add_argument("--dynamic", action="store_true", help="compile with dynamic shapes")
     p.add_argument("--static-pad", action="store_true", help="pad every batch to max_tokens positions and a multiple of --batch-multiple rows")
     p.add_argument("--batch-multiple", type=int, default=16)
@@ -142,7 +143,9 @@ def run(args):
     cfg, spec = meta.cfg, meta.spec
     if args.quant != "none":
         quantize_encoder(enc, args.quant)
-    if args.compile != "none":
+    if args.compile == "cudagraphs":
+        enc.backbone = torch.compile(enc.backbone, backend="cudagraphs", dynamic=args.dynamic)
+    elif args.compile != "none":
         enc.backbone = torch.compile(enc.backbone, mode=args.compile, dynamic=args.dynamic)
     prep = (lambda tok: pad_tokens(tok, cfg.max_tokens, args.batch_multiple)) if args.static_pad else (lambda tok: tok)
     over = argparse.Namespace(data=args.data, max_rows=args.max_rows, n_sim=args.n_sim)

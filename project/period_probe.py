@@ -1008,6 +1008,19 @@ def plot_ratio_hist(path, ratios: dict):
 # ---------------------------------------------------------------------- driver
 
 
+def _top_candidates(tops: dict, models: dict, best: str) -> dict:
+    """``p_top`` for predictions.npz: the best read-out's candidate bins, or,
+    when it has none (winjoint), those of the best read-out that has some
+    (the sweep and the candidate search need seeds)."""
+    if best in tops:
+        return {"p_top": 10.0 ** tops[best], "p_top_from": best}
+    have = [k for k in tops if k in models]
+    if not have:
+        return {}
+    src = max(have, key=lambda k: (models[k]["rec10"], -models[k]["med_abs"]))
+    return {"p_top": 10.0 ** tops[src], "p_top_from": src}
+
+
 def run(args: argparse.Namespace) -> dict:
     _MLP_ACT[0] = args.mlp_act
     seed_all(args.seed)
@@ -1198,7 +1211,7 @@ def run(args: argparse.Namespace) -> dict:
     np.savez_compressed(  # per-star periods of the best read-out, for later questions
         out / "predictions.npz", index=va["index"], p_model=10.0 ** preds[best], p_catalogue=va["period"],
         superclass=va["superclass"], n_windows=va["n_valid"], points=va["points"], best=best,
-        **({"p_top": 10.0 ** tops[best]} if best in tops else {}),  # [n, k] candidate periods, best first
+        **_top_candidates(tops, models, best),  # [n, k] candidate periods, best first
     )  # fmt: skip
 
     # --- figures

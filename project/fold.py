@@ -126,13 +126,18 @@ def fold_r2_grid(t, y, err, band, periods, harmonics: int = 3, device="cpu",
 
 
 def refine_period(t, y, err, band, p0: float, rel: float = 0.1, oversample: float = 5.0,
-                  harmonics: int = 3, device="cpu", max_trials: int = 200_000):  # fmt: skip
+                  harmonics: int = 3, device="cpu", max_trials: int = 200_000, polish: int = 10):  # fmt: skip
     """A fine search near a rough period ``p0``: every period within ``rel``
     of it, on a grid fine enough for the star's baseline, and the one whose
     fold has the best R2. This is how astronomers sharpen a rough period.
     The range is narrow on purpose, so the search cannot jump to half or
     twice the period: which of those is right stays the rough guess's call.
-    Returns ``(period, r2, n_trials)``."""
+    ``polish`` then splits the coarse step around the best trial into that
+    many sub-steps on each side (a coarse step of 1 / (oversample x
+    baseline) still smears a 6-harmonic fold over a 2700 d baseline, and a
+    search at the half period, whose grid is twice as fine in the full
+    period's terms, would win on that alone). Returns ``(period, r2,
+    n_trials)``."""
     t = np.asarray(t, dtype=np.float64)
     if not np.isfinite(p0) or p0 <= 0 or t.size < 4:
         return float("nan"), float("nan"), 0
@@ -147,7 +152,17 @@ def refine_period(t, y, err, band, p0: float, rel: float = 0.1, oversample: floa
     if not np.isfinite(r2).any():
         return float("nan"), float("nan"), n
     j = int(np.nanargmax(r2))
-    return float(1.0 / freqs[j]), float(r2[j]), n
+    best_f, best_r2 = float(freqs[j]), float(r2[j])
+    if polish > 0 and n > 1:
+        lo, hi = freqs[max(j - 1, 0)], freqs[min(j + 1, n - 1)]
+        fine = np.linspace(lo, hi, 2 * polish + 1)
+        r2f = fold_r2_grid(t, y, err, band, 1.0 / fine, harmonics, device)
+        n += fine.size
+        if np.isfinite(r2f).any():
+            k = int(np.nanargmax(r2f))
+            if r2f[k] > best_r2:
+                best_f, best_r2 = float(fine[k]), float(r2f[k])
+    return 1.0 / best_f, best_r2, n
 
 
 def refine_all(records, p_model, rel=0.1, oversample=5.0, harmonics=3, device="cpu", log=print):
