@@ -7,7 +7,13 @@ scores the whole validation split, whole light curves:
 * ``model_refined``: a fine search within ``--refine-rel`` of it, the fold
   (adjusted R2 of a 3-harmonic wave) picks;
 * ``model_cands``: the same search around every candidate (the read-out's
-  top-k bins, the double and the half of its period), the fold picks;
+  top-k bins, the double and the half of its period); every candidate's wave
+  gets the harmonics that reach the same highest frequency (``--harmonics``
+  at the refined period, half as many at the half, twice at the double), so
+  the fold R2 compares periods on equal terms; the refined period is the
+  reference and a candidate replaces it only when its fold beats it by more
+  than ``--cand-margin`` (an alias of a right period folds as well, never
+  better, so the model's own guess stands unless the data say otherwise);
 * ``ls_full@B``: our GPU Lomb-Scargle at B trial frequencies;
 * ``astropy_mb@B``: the collaborator's multiband astropy search at B trials;
 * ``--compare name=predictions.npz``: other read-outs, scored alone (used
@@ -17,7 +23,12 @@ Hits within 20, 10, 1, 0.1 and 0.01 % (strict and alias-tolerant), overall
 and per superclass; hit rate against the true period (line plot); predicted
 against true period with the binned median ratio (the "bend"); phase-fold
 demos with the fitted wave; and ``better_than_catalogue.csv``: the stars
-whose best model period folds clearly better than the catalogue's.
+whose best model period folds clearly better than the catalogue's. The
+reference there is the catalogue period SHARPENED by the same fine search
+within 0.2 % of it (a catalogue value that is off in the fifth digit folds
+badly over a 2700 d baseline; sharpening it is the fair comparison), and
+the verdict says whether the model's period is the catalogue's made sharp
+(``catalogue imprecise``) or a different period (``different period``).
 """
 
 from __future__ import annotations
@@ -65,6 +76,14 @@ def hit_table(p_hat, p_true) -> dict:
     return out
 
 
+def h_of(p: float, p_ref: float, base: int) -> int:
+    """Harmonics for a wave on period ``p`` that reach the same highest
+    frequency as ``base`` harmonics on ``p_ref``."""
+    if not (np.isfinite(p) and p > 0 and np.isfinite(p_ref) and p_ref > 0):
+        return base
+    return int(np.clip(round(base * p / p_ref), 2, 2 * base))
+
+
 def alias_kind(ratio: float) -> str:
     if abs(ratio - 1.0) < 0.01:
         return "same period, sharper"
@@ -81,7 +100,7 @@ def alias_kind(ratio: float) -> str:
 # -------------------------------------------------------------------- figures
 
 
-def fold_panel(ax, r, period: float, title: str, r2: float, template: bool = True, harmonics: int = 3):
+def fold_panel(ax, r, period: float, title: str, r2: float, template: bool = True, harmonics: int = 6):
     """One phase-folded panel: the points of every band, twice over, and the
     fitted wave of ``harmonics`` harmonics (the fold's own model) on top."""
     style(ax)
@@ -112,8 +131,8 @@ def fold_figure(path, rows, heading: str):
     fig, axes = plt.subplots(len(rows), 3, figsize=(10.5, 2.4 * len(rows)), dpi=150, squeeze=False)
     fig.patch.set_facecolor(SURFACE)
     for ax_row, (r, label, cols) in zip(axes, rows):
-        for ax, (p, title, r2) in zip(ax_row, cols):
-            fold_panel(ax, r, p, title, r2)
+        for ax, (p, title, r2, h) in zip(ax_row, cols):
+            fold_panel(ax, r, p, title, r2, harmonics=h)
         ax_row[0].set_ylabel(f"{label}\n\nbrightness", fontsize=7.5, color=INK)
     for ax in axes[-1]:
         ax.set_xlabel("phase (shown twice)", fontsize=8, color=INK2)
@@ -140,7 +159,7 @@ def plot_hit_vs_period(path, p_true, series: dict, sup, title: str):
     count of stars per bin as faint bars behind."""
     edges = P_EDGES
     mid = np.sqrt(edges[:-1] * edges[1:])
-    fig, ax = plt.subplots(figsize=(9.2, 4.4), dpi=150)
+    fig, ax = plt.subplots(figsize=(9.2, 5.6), dpi=150)
     fig.patch.set_facecolor(SURFACE)
     style(ax)
     ax2 = ax.twinx()
@@ -160,7 +179,7 @@ def plot_hit_vs_period(path, p_true, series: dict, sup, title: str):
     ax.set_ylim(0, 1.02)
     ax.set_xlabel("catalogue period (days), log-spaced bins; bins with fewer than 15 stars are left out", fontsize=8, color=INK2)
     ax.set_ylabel("hit rate", fontsize=8, color=INK2)
-    ax.legend(fontsize=7, frameon=False, loc="upper left", ncol=2, labelcolor=INK2)
+    ax.legend(fontsize=7, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, labelcolor=INK2)
     ax.set_title(title, fontsize=9.5, color=INK, loc="left")
     fig.tight_layout()
     fig.savefig(path, facecolor=SURFACE)
@@ -248,10 +267,12 @@ def parse_args(argv=None):
     p.add_argument("--astropy-budget", type=int, default=100000, help="the collaborator's multiband search; 0 to skip")
     p.add_argument("--refine-rel", type=float, default=0.1, help="fine-search range around the read-out's period")
     p.add_argument("--cand-rel", type=float, default=0.03, help="fine-search range around every candidate")
+    p.add_argument("--cand-margin", type=float, default=0.02, help="R2 gain over the refined period a candidate needs to replace it")
+    p.add_argument("--cat-rel", type=float, default=0.002, help="fine-search range around the catalogue period (the sharpened reference)")
     p.add_argument("--gain", type=float, default=0.1, help="fold R2 gain over the catalogue period to call a period better")
     p.add_argument("--min-r2", type=float, default=0.5, help="fold R2 the better period must reach")
     p.add_argument("--p-min", type=float, default=None, help="default: the shortest training period")
-    p.add_argument("--harmonics", type=int, default=3)
+    p.add_argument("--harmonics", type=int, default=6, help="harmonics of the fold's wave at the reference period (3 cannot fit two sharp eclipses, so P/2 won)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--data", default=None)
     p.add_argument("--max-rows", type=int, default=None)
@@ -290,7 +311,8 @@ def run(args):
     periods = {m: np.full(n, np.nan) for m in methods}
     trials = {m: np.zeros(n) for m in methods}
     seconds = {m: 0.0 for m in methods}
-    r2 = {k: np.full(n, np.nan) for k in ("catalogue", "model", "model_refined", "model_cands")}
+    r2 = {k: np.full(n, np.nan) for k in ("catalogue", "catalogue_sharp", "model", "model_refined", "model_cands")}
+    p_cat_sharp, trials_cat = np.full(n, np.nan), np.zeros(n)
     p_true, sup, fine, ids = np.zeros(n), np.empty(n, dtype=object), np.empty(n, dtype=object), np.empty(n, dtype=object)
     n_points, span = np.zeros(n, dtype=int), np.zeros(n)
     print(f"{n} validation stars; p_min {p_min:.4g} d; methods {methods}; {dev}", flush=True)
@@ -302,21 +324,30 @@ def run(args):
         pm = rough.get(i, np.nan)
         periods["model"][j] = pm
         r2["catalogue"][j] = fold.fold_r2(t, y, err, band, p_true[j], args.harmonics)
-        r2["model"][j] = fold.fold_r2(t, y, err, band, pm, args.harmonics)
+        p_cat_sharp[j], r2["catalogue_sharp"][j], trials_cat[j] = fold.refine_period(t, y, err, band, p_true[j], args.cat_rel, harmonics=args.harmonics, device=dev)
+        r2["model"][j] = fold.fold_r2(t, y, err, band, pm, h_of(pm, p_true[j], args.harmonics))
         t0 = time.time()
         periods["model_refined"][j], r2["model_refined"][j], trials["model_refined"][j] = fold.refine_period(t, y, err, band, pm, args.refine_rel, harmonics=args.harmonics, device=dev)
         seconds["model_refined"] += time.time() - t0
         t0 = time.time()
+        p_ref = periods["model_refined"][j] if np.isfinite(periods["model_refined"][j]) else pm
         seeds = [s for s in tops.get(i, [pm]) if np.isfinite(s) and s > 0]
-        seeds += [2.0 * pm, 0.5 * pm]
-        best_p, best_r2, nt = periods["model_refined"][j], r2["model_refined"][j], 0
+        seeds += [2.0 * p_ref, 0.5 * p_ref]
+        found, nt = [(periods["model_refined"][j], r2["model_refined"][j])], 0
         for s in seeds:
-            if not (np.isfinite(s) and s > 0):
-                continue
-            p, q, k = fold.refine_period(t, y, err, band, float(s), args.cand_rel, harmonics=args.harmonics, device=dev)
+            if not (np.isfinite(s) and s > 0) or abs(s / p_ref - 1.0) < args.cand_rel:
+                continue  # the refined period itself is already in
+            p, q, k = fold.refine_period(t, y, err, band, float(s), args.cand_rel, harmonics=h_of(float(s), p_ref, args.harmonics), device=dev)
             nt += int(k)
-            if np.isfinite(q) and (not np.isfinite(best_r2) or q > best_r2):
-                best_p, best_r2 = float(p), float(q)
+            if np.isfinite(q):
+                found.append((float(p), float(q)))
+        found = [f for f in found if np.isfinite(f[1])]
+        if found:
+            ref_p, ref_r2 = found[0]  # the refined period is the reference ...
+            better_ = [f for f in found[1:] if f[1] > ref_r2 + args.cand_margin]  # ... a candidate must beat it clearly
+            best_p, best_r2 = max(better_, key=lambda f: f[1]) if better_ else (ref_p, ref_r2)
+        else:
+            best_p, best_r2 = float("nan"), float("nan")
         periods["model_cands"][j], r2["model_cands"][j], trials["model_cands"][j] = best_p, best_r2, trials["model_refined"][j] + nt
         seconds["model_cands"] += time.time() - t0
         for b in args.ls_budgets:
@@ -347,25 +378,36 @@ def run(args):
     res["fold"]["as_good_refined"] = float(np.mean(r2["model_refined"] >= r2["catalogue"] - 0.05))
     res["fold"]["as_good_cands"] = float(np.mean(r2["model_cands"] >= r2["catalogue"] - 0.05))
 
-    # --- the better-than-catalogue list
+    # --- the better-than-catalogue list: the model's best period against the
+    # catalogue period as given AND sharpened by the same fine search
     ratio = periods["model_cands"] / p_true
     gain = r2["model_cands"] - r2["catalogue"]
+    gain_sharp = r2["model_cands"] - r2["catalogue_sharp"]
     better = np.flatnonzero(np.isfinite(gain) & (gain > args.gain) & (r2["model_cands"] > args.min_r2))
     better = better[np.argsort(-gain[better])]
-    worse = int(np.sum(np.isfinite(gain) & (gain < -args.gain)))
+    worse = int(np.sum(np.isfinite(gain_sharp) & (gain_sharp < -args.gain)))
     kinds = np.array([alias_kind(float(x)) if np.isfinite(x) else "?" for x in ratio])
+    verdict = np.where(gain_sharp > args.gain, "different period", "catalogue imprecise")
+    verdict = np.where(kinds == "same period, sharper", "catalogue imprecise", verdict)
     with open(out / "better_than_catalogue.csv", "w", newline="") as f:
         wtr = csv.writer(f)
-        wtr.writerow(["ztf_id", "val_index", "class", "superclass", "p_catalogue_d", "p_model_d", "p_best_d", "best_over_catalogue", "kind",
-                      "r2_catalogue", "r2_best", "gain", "n_points", "baseline_d"])  # fmt: skip
+        wtr.writerow(["ztf_id", "val_index", "class", "superclass", "verdict", "kind", "p_catalogue_d", "p_catalogue_sharp_d", "p_model_d", "p_best_d",
+                      "best_over_catalogue", "r2_catalogue", "r2_catalogue_sharp", "r2_best", "gain", "gain_over_sharp", "n_points", "baseline_d"])  # fmt: skip
         for j in better:
-            wtr.writerow([ids[j], idx[j], fine[j], sup[j], f"{p_true[j]:.6f}", f"{periods['model'][j]:.6f}", f"{periods['model_cands'][j]:.6f}",
-                          f"{ratio[j]:.5f}", kinds[j], f"{r2['catalogue'][j]:.3f}", f"{r2['model_cands'][j]:.3f}", f"{gain[j]:.3f}", n_points[j], f"{span[j]:.0f}"])  # fmt: skip
-    res["better"] = dict(n=int(len(better)), worse=worse, gain=args.gain, min_r2=args.min_r2,
+            wtr.writerow([ids[j], idx[j], fine[j], sup[j], verdict[j], kinds[j], f"{p_true[j]:.6f}", f"{p_cat_sharp[j]:.6f}", f"{periods['model'][j]:.6f}",
+                          f"{periods['model_cands'][j]:.6f}", f"{ratio[j]:.5f}", f"{r2['catalogue'][j]:.3f}", f"{r2['catalogue_sharp'][j]:.3f}",
+                          f"{r2['model_cands'][j]:.3f}", f"{gain[j]:.3f}", f"{gain_sharp[j]:.3f}", n_points[j], f"{span[j]:.0f}"])  # fmt: skip
+    diff = better[verdict[better] == "different period"]
+    res["better"] = dict(n=int(len(better)), n_different=int(len(diff)), n_catalogue_imprecise=int(len(better) - len(diff)), worse_than_sharp=worse,
+                         gain=args.gain, min_r2=args.min_r2, cat_rel=args.cat_rel,
                          by_kind={k: int(np.sum(kinds[better] == k)) for k in np.unique(kinds[better])},
-                         by_superclass={g: int(np.sum(sup[better] == g)) for g in groups})  # fmt: skip
+                         by_kind_different={k: int(np.sum(kinds[diff] == k)) for k in np.unique(kinds[diff])},
+                         by_superclass={g: int(np.sum(sup[better] == g)) for g in groups},
+                         by_superclass_different={g: int(np.sum(sup[diff] == g)) for g in groups},
+                         catalogue_sharpening=dict(trials_median=float(np.median(trials_cat)),
+                                                   improved_by_gain=int(np.sum(r2["catalogue_sharp"] - r2["catalogue"] > args.gain))))  # fmt: skip
     dump_json(res, out / "results.json")
-    np.savez_compressed(out / "per_star.npz", index=np.array(idx), ztf_id=ids.astype(str), p_true=p_true, superclass=sup, fine=fine, n_points=n_points, span=span,
+    np.savez_compressed(out / "per_star.npz", index=np.array(idx), ztf_id=ids.astype(str), p_true=p_true, p_catalogue_sharp=p_cat_sharp, superclass=sup, fine=fine, n_points=n_points, span=span,
                         **{f"p_{m}": periods[m] for m in methods}, **{f"trials_{m}": trials[m] for m in methods}, **{f"r2_{k}": v for k, v in r2.items()})  # fmt: skip
 
     md = [f"# Period report: {n} validation stars, whole light curves\n",
@@ -380,11 +422,15 @@ def run(args):
         md += [f"\n## {name} by superclass\n", "| method | " + " | ".join(f"{g} ({(sup == g).sum()})" for g in groups) + " |", "|---|" + "---|" * len(groups)]
         for m in methods:
             md.append(f"| {m} | " + " | ".join(f"{res['methods'][m]['by_superclass'][g][key]:.3f}" for g in groups) + " |")
-    md += ["\n## phase-fold test (adjusted R2 of a 3-harmonic wave, whole curve)\n", "| period | median R2 | mean R2 |", "|---|---|---|"]
+    md += [f"\n## phase-fold test (adjusted R2 of a {args.harmonics}-harmonic wave at the reference period, whole curve)\n", "| period | median R2 | mean R2 |", "|---|---|---|"]
     md += [f"| {k} | {v['median']:.3f} | {v['mean']:.3f} |" for k, v in res["fold"].items() if isinstance(v, dict)]
     md.append(f"\nmodel_refined folds at least as well as the catalogue (within 0.05) for {res['fold']['as_good_refined']:.1%} of the stars; model_cands for {res['fold']['as_good_cands']:.1%}.")
-    md.append(f"\n## better than the catalogue\n\n{len(better)} stars where the best model period folds better than the catalogue period by more than {args.gain:g} in R2 and reaches R2 > {args.min_r2:g} "
-              f"({worse} stars where it is worse by the same margin). By kind: " + ", ".join(f"{k}: {v}" for k, v in res["better"]["by_kind"].items()) + ". See better_than_catalogue.csv.")
+    b = res["better"]
+    md.append(f"\n## better than the catalogue\n\n{b['n']} stars where the best model period folds better than the catalogue period as given, by more than {args.gain:g} in R2, reaching R2 > {args.min_r2:g}. "
+              f"Of these, {b['n_catalogue_imprecise']} are the catalogue period made sharp (the same fine search within {args.cat_rel:.1%} of the catalogue value folds as well) and "
+              f"{b['n_different']} are a DIFFERENT period that beats even the sharpened catalogue by more than {args.gain:g} "
+              f"(by kind: " + ", ".join(f"{k}: {v}" for k, v in b["by_kind_different"].items()) + f"). {worse} stars fold worse than the sharpened catalogue by the same margin. "
+              f"Sharpening alone improves {b['catalogue_sharpening']['improved_by_gain']} catalogue folds by more than {args.gain:g}. See better_than_catalogue.csv (column verdict).")
     (out / "tables.md").write_text("\n".join(md) + "\n")
 
     # --- figures
@@ -420,18 +466,19 @@ def run(args):
         cand = np.flatnonzero(m)
         j = int(cand[np.argsort(np.abs(r2["model_cands"][cand] - np.median(r2["model_cands"][cand])))[0]])
         rows.append(j)
+
     def three(j):
-        pm, pb = periods["model"][j], periods["model_cands"][j]
-        return [(p_true[j], "catalogue period", r2["catalogue"][j]),
-                (pm, f"model alone ({pm / p_true[j] - 1:+.2%} off)", r2["model"][j]),
-                (pb, f"model + search ({pb / p_true[j] - 1:+.4%} off)" if abs(pb / p_true[j] - 1) < 0.1 else f"model + search ({pb / p_true[j]:.3f} x catalogue)", r2["model_cands"][j])]  # fmt: skip
+        pm, pb, H = periods["model"][j], periods["model_cands"][j], args.harmonics
+        return [(p_true[j], "catalogue period", r2["catalogue"][j], H),
+                (pm, f"model alone ({pm / p_true[j] - 1:+.2%} off)", r2["model"][j], h_of(pm, p_true[j], H)),
+                (pb, f"model + search ({pb / p_true[j] - 1:+.4%} off)" if abs(pb / p_true[j] - 1) < 0.1 else f"model + search ({pb / p_true[j]:.3f} x catalogue)", r2["model_cands"][j], h_of(pb, p_true[j], H))]  # fmt: skip
     if rows:
         fold_figure(out / "fold_demo.png", [(data["validation"][idx[j]], f"{fine[j]}\n{ids[j]}", three(j)) for j in rows],
                     "Phase-folded light curves with the fitted 3-harmonic wave: a typical hit of every class")  # fmt: skip
-    top = [int(j) for j in better[:8]]
+    top = [int(j) for j in diff[:6]] + [int(j) for j in better if verdict[j] == "catalogue imprecise"][:4]
     if top:
-        fold_figure(out / "fold_better.png", [(data["validation"][idx[j]], f"{fine[j]}\n{ids[j]}\n{kinds[j]}", three(j)) for j in top],
-                    "Stars where the model's period folds better than the catalogue period (largest gains)")  # fmt: skip
+        fold_figure(out / "fold_better.png", [(data["validation"][idx[j]], f"{fine[j]}\n{ids[j]}\n{verdict[j]}\n({kinds[j]})", three(j)) for j in top],
+                    "Stars where the model's period folds better than the catalogue period: different periods first, then catalogue periods made sharp")  # fmt: skip
     print("\n".join(md[3:3 + len(methods) + 2]))
     print(md[-1])
     print(f"wrote {out} in {time.time() - t_start:.0f}s")

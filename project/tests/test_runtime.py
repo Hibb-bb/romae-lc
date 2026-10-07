@@ -23,8 +23,12 @@ def test_runtime_end_to_end(tmp_path):
     np.savez(tmp_path / "pred.npz", index=idx, p_model=np.array([float(val[i].period) for i in idx]) * 1.02)
     out = tmp_path / "rt"
     rt.main(["--ckpt", str(tmp_path / "mae" / "mae.pt"), "--predictions", str(tmp_path / "pred.npz"), "--out", str(out), "--n-objects", "5",
-             "--ls-budgets", "500", "--astropy-budgets", "--device", "cpu", "--data", "sim", "--n-sim", "48"])  # fmt: skip
+             "--ls-budgets", "500", "--astropy-budgets", "--batch-sweep", "8", "--workers", "0", "--device", "cpu", "--data", "sim", "--n-sim", "48"])  # fmt: skip
     res = json.load(open(out / "results.json"))
     assert set(res["steps"]) == {"cut", "encode", "read", "search", "ls_full@500"}
+    res2 = rt.main(["--ckpt", str(tmp_path / "mae" / "mae.pt"), "--predictions", str(tmp_path / "pred.npz"), "--out", str(tmp_path / "rt2"), "--n-objects", "5",
+                    "--ls-budgets", "--astropy-budgets", "--static-pad", "--batch-multiple", "4", "--batch-sweep", "8", "16", "--workers", "0", "--device", "cpu", "--data", "sim", "--n-sim", "48"])  # fmt: skip
+    assert set(res2["batch_sweep"]) == {"8", "16"} or set(res2["batch_sweep"]) == {8, 16}
+    assert res2["static_pad"] and res2["steps"]["encode"]["n"] >= 1
     assert res["steps"]["encode"]["n"] >= 1 and res["model_total"]["median"] > 0 and res["encode_batched_per_star"] > 0
     assert (out / "tables.md").is_file() and (out / "runtime.png").is_file()

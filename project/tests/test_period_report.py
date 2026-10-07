@@ -42,6 +42,7 @@ def test_report_end_to_end(tmp_path):
     assert set(res["methods"]) == {"model", "model_refined", "model_cands", "ls_full@500", "relu"}
     assert res["methods"]["relu"]["within_0.1"] == 1.0 and res["methods"]["relu"]["within_0.01"] == 0.0
     assert res["methods"]["model_cands"]["trials_median"] > res["methods"]["model_refined"]["trials_median"]
+    assert "verdict" in open(out / "better_than_catalogue.csv").readline()
     d = np.load(out / "per_star.npz", allow_pickle=True)
     assert len(d["p_true"]) == 6 and np.isfinite(d["r2_catalogue"]).all()
     for name in ("tables.md", "hit_vs_period.png", "scatter_bend.png", "better_than_catalogue.csv"):

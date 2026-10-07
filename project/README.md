@@ -429,6 +429,14 @@ sbatch project/jobs/period_report.sh project/runs/maew_spec/latents100k.pt proje
 # star and batched on GPU, pooling + read-out MLP, fine search) against our GPU Lomb-Scargle and the collaborator's
 # astropy search (CPU) at the benchmark's budgets; tables.md, runtime.png.
 sbatch project/jobs/runtime.sh project/runs/maew_spec/mae.pt project/results/period_maew_spec_silu/predictions.npz --out project/results/runtime_spec
+#   runtime.py also sweeps the batched throughput (--batch-sweep, --workers), compiles the backbone (--compile, --static-pad)
+#   and quantises it with torchao (--quant int8wo|int8dq|fp8, --ref-latents for the accuracy check; `uv sync --extra quant`).
+# The model-seeded search over its own budget (project.eval.budget_sweep): widths x seed counts on the benchmark's stars,
+# and plot_budget draws the three-panel figure against the Lomb-Scargle curves of a benchmark folder.
+sbatch project/jobs/budget_sweep.sh project/runs/maew_spec/mae.pt project/results/period_maew_spec_silu/predictions.npz --out project/results/budget_sweep_spec
+# All of the above in one queue slot (eval_bundle.sh skips steps whose results.json exists), and the artifact page:
+sbatch project/jobs/eval_bundle.sh
+python -m project.eval.period_page --report project/results/period_report_spec3 --bench project/results/ls_benchmark_spec100 --runtime project/results/runtime_spec --sweep project/results/budget_sweep_spec --out project/results/period_page/index.html
 # Stage 1 with the PHASE BOTTLENECK (pretrain_phase.py, 2026-10-01): the encoder is trained end to end through the
 # phase decoder with no context, whose queries are the window's own points at their phase counted from the window's
 # START (catalogue period in the coordinate only). The only route to the reconstruction is a latent that holds the
