@@ -81,3 +81,17 @@ def test_query_tokens_mae_and_clean_jepa(tmp_path):
     out2 = tmp_path / "q_jepa"
     pretrain_mae.main(MAE_ARGS + common + ["--jepa", "--jepa-clean-target", "--out", str(out2)])
     assert (out2 / "DONE").is_file()
+
+
+def test_jepa_projection(tmp_path):
+    out = tmp_path / "proj"
+    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-proj", "8", "--jepa-proj-hidden", "16", "--steps", "3", "--out", str(out)])
+    enc, _ = load_encoder(str(out / "mae.pt"), "cpu")
+    model = enc.model
+    assert model.proj is not None and model.jepa_hparams["proj_dim"] == 8
+    values = torch.randn(2, 12, 2)
+    positions = torch.cat([torch.sort(torch.rand(2, 1, 12) * 5, -1).values + 1, torch.full((2, 1, 12), 472.0)], 1)
+    with torch.no_grad():
+        o = model(values, positions)
+    assert o.pred.shape[-1] == 8 and o.target.shape[-1] == 8 and torch.isfinite(o.loss)
+    assert model.embed_dim == 24  # the probes read the encoder width, not the projection

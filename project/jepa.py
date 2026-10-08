@@ -55,6 +55,8 @@ class TokenJEPA(nn.Module):
         use_target: bool = True,
         recon_weight: float = 0.0,
         clean_target: bool = False,
+        proj_dim: int = 0,
+        proj_hidden: int = 256,
     ):
         super().__init__()
         d = encoder["d_model"] if isinstance(encoder, dict) else encoder.d_model
@@ -68,6 +70,15 @@ class TokenJEPA(nn.Module):
         self.recon_weight = float(recon_weight)
         # denoising form: the target encoder sees the smooth fit (target_values) in the brightness channel, the context encoder the raw points
         self.clean_target = bool(clean_target)
+        # the alignment loss in a low-dimensional projection (BYOL / LeJEPA form): the encoder keeps what the
+        # loss does not need, the projection discards it; the probes read the pre-projection latent
+        self.proj_dim, self.proj_hidden = int(proj_dim), int(proj_hidden)
+        if self.proj_dim > 0:
+            self.proj = nn.Sequential(nn.Linear(d, proj_hidden), nn.GELU(), nn.Linear(proj_hidden, self.proj_dim))
+            self.proj_target = copy.deepcopy(self.proj)
+            self.proj_target.requires_grad_(False)
+        else:
+            self.proj = self.proj_target = None
         # the hybrid loss: a second head on the predictor's outputs reconstructs the hidden brightness, weighted by recon_weight
         self.recon_head = nn.Linear(self.context.dec_cfg.d_model, 1) if self.recon_weight > 0 else None
         self.last_stats: dict = {}
@@ -75,7 +86,8 @@ class TokenJEPA(nn.Module):
     # ---- what the loaders, probes and the pretraining script read
     @property
     def jepa_hparams(self) -> dict:
-        return dict(ema=self.ema, ema_end=self.ema_end, loss=self.loss_kind, use_target=self.use_target, recon_weight=self.recon_weight, clean_target=self.clean_target)
+        return dict(ema=self.ema, ema_end=self.ema_end, loss=self.loss_kind, use_target=self.use_target, recon_weight=self.recon_weight, clean_target=self.clean_target,
+                    proj_dim=self.proj_dim, proj_hidden=self.proj_hidden)
 
     @property
     def hparams(self) -> dict:
@@ -164,6 +176,9 @@ class TokenJEPA(nn.Module):
             pt.mul_(m).add_(pc.detach(), alpha=1.0 - m)
         for bt, bc in zip(self.target.buffers(), self.context.buffers()):
             bt.copy_(bc)
+        if self.proj is not None:
+            for pt, pc in zip(self.proj_target.parameters(), self.proj.parameters()):
+                pt.mul_(m).add_(pc.detach(), alpha=1.0 - m)
         return m
 
     def forward(self, values, positions, pad_mask=None, mask=None, weight=None, target_values=None) -> MAEOutput:
@@ -189,7 +204,10 @@ class TokenJEPA(nn.Module):
             xf, pf, pdf = tg.add_cls(xf, positions, pad_mask)
             xf = tg.run_transformer(xf, pf, pdf, tv)
             toks = xf[:, 1:] if tg.use_cls else xf
-            target = F.layer_norm(split(toks.float(), mask), (toks.shape[-1],))
+            target = split(toks.float(), mask)
+            if self.proj_target is not None:
+                target = self.proj_target(target)
+            target = F.layer_norm(target, (target.shape[-1],))
         if target.shape[1] == 0:
             raise ValueError("mask selects no tokens; nothing to predict")
         m_pos, m_pad = split(pos_t, mask).transpose(1, 2), split(pad_mask, mask)
@@ -207,6 +225,8 @@ class TokenJEPA(nn.Module):
         x = enc.decoder(x, enc.decoder_rope.prepare(pos), attention_mask(pad))
         hid = x[:, -k:]
         pred = enc.head(hid).float()
+        if self.proj is not None:
+            pred = F.layer_norm(self.proj(pred), (self.proj_dim,))
         real = (~m_pad).float()[..., None]
         err = F.smooth_l1_loss(pred, target, reduction="none") if self.loss_kind == "smoothl1" else F.mse_loss(pred, target, reduction="none")
         loss = (err * real).sum() / (real.sum() * target.shape[-1]).clamp_min(1e-8)
