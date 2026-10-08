@@ -60,7 +60,8 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--latents", required=True, help="cache with the train and validation splits")
     p.add_argument("--test-latents", required=True, help="cache with the test split")
-    p.add_argument("--features", nargs="+", default=["mean", "hand"], choices=["mean", "hand", "meanhand"])
+    p.add_argument("--features", nargs="+", default=["mean", "hand"], help="mean | hand | meanhand | a name given with --extra-features | mean+NAME")
+    p.add_argument("--extra-features", nargs="*", default=[], help="NAME=folder with <split>.npz (ids, features) files, e.g. starembed=project/results/starembed_feats")
     p.add_argument("--out", required=True)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--n-seeds", type=int, default=3, help="final models trained with seed, seed + 58, seed + 158, ... on train + validation")
@@ -105,6 +106,18 @@ def run(args):
             keep[:] = False
             keep[rng.choice(idx, args.n_objects, replace=False)] = True
         tab["sel"] = keep
+    extra = {}
+    for item in args.extra_features:
+        name, folder = item.split("=", 1)
+        extra[name] = {}
+        for s_, tab in tables.items():
+            z = np.load(Path(folder) / f"{s_}.npz", allow_pickle=True)
+            by_id = {str(i): k for k, i in enumerate(z["ids"])}
+            rows = np.array([by_id.get(str(i), -1) for i in tab["ids"]])
+            f = np.where(rows[:, None] >= 0, z["features"][np.clip(rows, 0, None)], -1.0).astype(np.float32)
+            f = np.nan_to_num(f, nan=-3.0, posinf=1e6, neginf=-1e6)
+            tab["features"][name] = f
+            print(f"[{name}] {s_}: {int((rows >= 0).sum())} of {len(rows)} stars matched, {f.shape[1]} features", flush=True)
     labels = sorted(set(tables["train"]["fine"][tables["train"]["sel"]].tolist()))
     label2idx = {l: i for i, l in enumerate(labels)}
     print(f"splits {[(s, int(t['sel'].sum())) for s, t in tables.items()]}; {len(labels)} classes: {labels}; loaded in {time.time() - t0:.0f}s", flush=True)
@@ -116,7 +129,12 @@ def run(args):
             tab = tables[split]
             sel = tab["sel"] & np.isin(tab["fine"], labels)
             f = tab["features"]
-            x = np.concatenate([f["mean"], f["hand"]], 1) if feat == "meanhand" else f[feat]
+            if feat == "meanhand":
+                x = np.concatenate([f["mean"], f["hand"]], 1)
+            elif "+" in feat:
+                x = np.concatenate([f[k] for k in feat.split("+")], 1)
+            else:
+                x = f[feat]
             return x[sel].astype(np.float32), np.array([label2idx[c] for c in tab["fine"][sel]])
         x_tr, y_tr = xy("train")
         x_va, y_va = xy("validation")
