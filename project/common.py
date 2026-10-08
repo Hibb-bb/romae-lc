@@ -1022,7 +1022,7 @@ def checkpoint_kind(ckpt: dict) -> str:
     """``"mae"`` for a stage-1 autoencoder checkpoint (:func:`mae_state`, or
     a bottleneck autoencoder with ``kind == "bottleneck"``), ``"wm"`` for a
     stage-2 world-model checkpoint (:func:`wm_state`)."""
-    if "mae" in ckpt or ckpt.get("kind") in ("bottleneck", "jepa"):
+    if "mae" in ckpt or ckpt.get("kind") in ("bottleneck", "jepa", "gruode"):
         return "mae"
     return "wm"
 
@@ -1055,6 +1055,10 @@ def load_mae(path, device="cpu") -> tuple[nn.Module, WMMeta]:
         from project.jepa import TokenJEPA
 
         model = TokenJEPA.from_checkpoint(ckpt)
+    elif ckpt.get("kind") == "gruode":
+        from project.gruode import GRUODEForPreTraining
+
+        model = GRUODEForPreTraining.from_checkpoint(ckpt)
     else:
         model = RoMAEForPreTraining(**ckpt["mae"], **ckpt["backbone"])
         model.load_state_dict(ckpt["state_dict"])

@@ -53,6 +53,7 @@ from torch.utils.data import DataLoader
 from romae_lc import RoMAEForPreTraining
 
 from project.bottleneck import BottleneckAE, bottleneck_state, fuse_tokens
+from project.gruode import GRUODEForPreTraining, gruode_state
 from project.jepa import TokenJEPA, jepa_state
 from project.mae_data import MASK_MODES, MultiWindowDataset, make_mask
 from project.common import (
@@ -220,6 +221,12 @@ def add_train_args(parser) -> None:
     g.add_argument("--query-delta", type=float, nargs=2, default=[0.5, 30.0], metavar=("START", "END"),
                    help="days around a random real token the queries are drawn from, ramped linearly from START to END over --query-ramp of the steps")
     g.add_argument("--query-ramp", type=float, default=0.6, help="share of the steps over which the query distance ramps")
+    g.add_argument("--encoder", choices=["transformer", "gruode"], default="transformer",
+                   help="gruode: the collaborators' GRU-ODE encoder (project.gruode) in place of the transformer, everything else the same")
+    g.add_argument("--rnn-band", choices=["centre", "percentiles"], default="centre", help="gruode: the band as its central wavelength or its 10/50/90 %% filter wavelengths")
+    g.add_argument("--rnn-ode-hidden", type=int, default=128)
+    g.add_argument("--rnn-time-unit", type=float, default=100.0, help="gruode: days per ODE time unit")
+    g.add_argument("--rnn-steps", type=int, default=1, help="gruode: fixed solver steps per gap")
     g.add_argument("--jepa", action="store_true", help="token-level JEPA (project.jepa): predict the EMA target encoder's latents of the hidden tokens instead of their values")
     g.add_argument("--jepa-ema", type=float, default=0.996, help="target encoder momentum at the start")
     g.add_argument("--jepa-ema-end", type=float, default=1.0, help="momentum at the end (linear schedule)")
@@ -414,6 +421,16 @@ def main(argv=None):
         model = BottleneckAE.from_checkpoint(ckpt)
     elif ckpt is not None and ckpt.get("kind") == "jepa":
         model = TokenJEPA.from_checkpoint(ckpt)
+    elif ckpt is not None and ckpt.get("kind") == "gruode":
+        model = GRUODEForPreTraining.from_checkpoint(ckpt)
+    elif args.encoder == "gruode":
+        model = GRUODEForPreTraining(
+            decoder=decoder, mask_ratio=args.mask_ratio, target_channels=1, encoder=encoder_config(args), n_channels=spec.n_channels, n_axes=2,
+            rope=rope_layouts(args, ladder), abs_timescales=None,
+            rnn=dict(band=args.rnn_band, ode_hidden=args.rnn_ode_hidden, steps=args.rnn_steps, time_unit=args.rnn_time_unit, time_scale=ladder.time_scale,
+                     band_wavelengths=[float(spec.tokenize["band_wavelengths"][k]) for k in sorted(spec.tokenize["band_wavelengths"])]),
+        )  # fmt: skip
+        print(f"GRU-ODE encoder: hidden {model.cfg.d_model}, {model.rnn_params / 1e6:.2f}M parameters, band features {model.n_band_feats}", flush=True)
     elif ckpt is not None:
         model = RoMAEForPreTraining(**ckpt["mae"], **ckpt["backbone"])
     elif args.jepa:
@@ -461,7 +478,7 @@ def main(argv=None):
         params_encoder=n_params(model.transformer) + n_params(model.projection),
         params_total=n_params(model),
     )
-    state_fn = bottleneck_state if isinstance(model, BottleneckAE) else jepa_state if isinstance(model, TokenJEPA) else mae_state
+    state_fn = bottleneck_state if isinstance(model, BottleneckAE) else jepa_state if isinstance(model, TokenJEPA) else gruode_state if isinstance(model, GRUODEForPreTraining) else mae_state
 
     if args.mask_mode != "random" and (args.bottleneck or isinstance(model, BottleneckAE)):
         parser.error("--mask-mode block / mix is for the plain masked autoencoder")
