@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=wm-w60
 #SBATCH --account=bfrf-dtai-gh
-#SBATCH --partition=ghx4-interactive
+#SBATCH --partition=ghx4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1

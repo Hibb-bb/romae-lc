@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=mae-w250
 #SBATCH --account=bfrf-dtai-gh
-#SBATCH --partition=ghx4-interactive
+#SBATCH --partition=ghx4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96g
-#SBATCH --time=02:00:00
+#SBATCH --time=12:00:00
 #SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
@@ -34,8 +34,8 @@ source .venv/bin/activate
 WINDOW=${WINDOW:-250}
 OUT=${OUT:-project/runs/mae_w${WINDOW}}
 LINK=${LINK:-1}
-MAX_LINKS=${MAX_LINKS:-8}
-BUDGET=${BUDGET:-6000}
+MAX_LINKS=${MAX_LINKS:-1}
+BUDGET=${BUDGET:-40000}
 SCRIPT=project/jobs/pretrain_mae.sh
 case "${1:-}" in *.pt) shift ;; esac   # a previous stage's checkpoint: not ours
 PIPELINE=${PIPELINE:-${THEN:-}}   # THEN is the one-stage form of PIPELINE

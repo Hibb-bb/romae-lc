@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=phase-dec
 #SBATCH --account=bfrf-dtai-gh
-#SBATCH --partition=ghx4-interactive
+#SBATCH --partition=ghx4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96g
-#SBATCH --time=02:00:00
+#SBATCH --time=12:00:00
 #SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
