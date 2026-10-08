@@ -54,6 +54,7 @@ class TokenJEPA(nn.Module):
         loss: str = "smoothl1",
         use_target: bool = True,
         recon_weight: float = 0.0,
+        clean_target: bool = False,
     ):
         super().__init__()
         d = encoder["d_model"] if isinstance(encoder, dict) else encoder.d_model
@@ -65,6 +66,8 @@ class TokenJEPA(nn.Module):
         self.target.requires_grad_(False)
         self.ema, self.ema_end, self.loss_kind, self.use_target = float(ema), float(ema_end), str(loss), bool(use_target)
         self.recon_weight = float(recon_weight)
+        # denoising form: the target encoder sees the smooth fit (target_values) in the brightness channel, the context encoder the raw points
+        self.clean_target = bool(clean_target)
         # the hybrid loss: a second head on the predictor's outputs reconstructs the hidden brightness, weighted by recon_weight
         self.recon_head = nn.Linear(self.context.dec_cfg.d_model, 1) if self.recon_weight > 0 else None
         self.last_stats: dict = {}
@@ -72,7 +75,7 @@ class TokenJEPA(nn.Module):
     # ---- what the loaders, probes and the pretraining script read
     @property
     def jepa_hparams(self) -> dict:
-        return dict(ema=self.ema, ema_end=self.ema_end, loss=self.loss_kind, use_target=self.use_target, recon_weight=self.recon_weight)
+        return dict(ema=self.ema, ema_end=self.ema_end, loss=self.loss_kind, use_target=self.use_target, recon_weight=self.recon_weight, clean_target=self.clean_target)
 
     @property
     def hparams(self) -> dict:
@@ -178,9 +181,13 @@ class TokenJEPA(nn.Module):
         # the targets: the EMA encoder's token latents of the whole window at the hidden positions
         with torch.no_grad():
             tg = self.target
-            xf = tg.embed(values, positions)
+            tv = values
+            if self.clean_target and target_values is not None:
+                clean = target_values if target_values.dim() == 3 else target_values[..., None]
+                tv = torch.cat([clean[..., :1].to(values.dtype), values[..., 1:]], -1)
+            xf = tg.embed(tv, positions)
             xf, pf, pdf = tg.add_cls(xf, positions, pad_mask)
-            xf = tg.run_transformer(xf, pf, pdf, values)
+            xf = tg.run_transformer(xf, pf, pdf, tv)
             toks = xf[:, 1:] if tg.use_cls else xf
             target = F.layer_norm(split(toks.float(), mask), (toks.shape[-1],))
         if target.shape[1] == 0:

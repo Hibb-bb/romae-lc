@@ -63,3 +63,10 @@ def test_smooth_targets_mae_and_jepa(tmp_path):
     out2 = tmp_path / "tpl_jepa"
     pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-recon-weight", "0.5", "--target", "template", "--template-harmonics", "2", "--template-min-points", "6", "--steps", "2", "--out", str(out2)])
     assert (out2 / "DONE").is_file()
+
+
+def test_jepa_clean_target(tmp_path):
+    out = tmp_path / "clean"
+    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-clean-target", "--target", "template", "--template-harmonics", "2", "--template-min-points", "6", "--steps", "2", "--out", str(out)])
+    enc, _ = load_encoder(str(out / "mae.pt"), "cpu")
+    assert enc.model.clean_target and enc.model.jepa_hparams["clean_target"]
