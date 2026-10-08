@@ -103,7 +103,7 @@ for v in ${@:-block mix range both}; do
         jepa)      run jepa single --size wide --spectral --jepa --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;
         maespec50) run maespec50 single --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;
         longspecw) run_long longspecw --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;   # the whole curve as one window, wide spectral (STEPS=50000; trained by pretrain_mae.sh lines)
-        longspecwtpl) run_long longspecwtpl --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --target mix ;;   # the same with the smooth fit as the target
+        longspecwtpl) run_long longspecwtpl --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --target template ;;   # the same with the smooth fit as the target
         jepainit)  run jepainit single --size wide --spectral --jepa --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --jepa-init project/runs/maew_spec/mae.pt ;;
         jepahyb)   run jepahyb single --size wide --spectral --jepa --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --jepa-recon-weight 0.5 ;;
         long)  run_long long ;;

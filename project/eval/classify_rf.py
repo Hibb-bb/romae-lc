@@ -63,6 +63,7 @@ def parse_args(argv=None):
     p.add_argument("--features", nargs="+", default=["mean", "hand"], choices=["mean", "hand", "meanhand"])
     p.add_argument("--out", required=True)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--n-seeds", type=int, default=3, help="final models trained with seed, seed + 58, seed + 158, ... on train + validation")
     p.add_argument("--standardize", action="store_true")
     p.add_argument("--exclude-anomaly", action="store_true", help="drop the three anomaly classes from every split")
     p.add_argument("--skip-hpo", action="store_true")
@@ -107,7 +108,7 @@ def run(args):
     labels = sorted(set(tables["train"]["fine"][tables["train"]["sel"]].tolist()))
     label2idx = {l: i for i, l in enumerate(labels)}
     print(f"splits {[(s, int(t['sel'].sum())) for s, t in tables.items()]}; {len(labels)} classes: {labels}; loaded in {time.time() - t0:.0f}s", flush=True)
-    seeds = [args.seed, args.seed + 58, args.seed + 158]
+    seeds = [args.seed] + [args.seed + 58 + 100 * i for i in range(args.n_seeds - 1)]  # the collaborators' 42, 100, 200, then 300, 400
     grid = json.loads(args.grid) if args.grid else PARAM_GRID
     results = {}
     for feat in args.features:
