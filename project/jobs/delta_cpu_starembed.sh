@@ -13,9 +13,11 @@
 # Delta (x86 CPU cluster) version of starembed_feats.sh: the StarEmbed hand-crafted features on every star
 # (FATS + light-curve, raw magnitudes), then the forest benchmark. Submit from the Delta login node, not DeltaAI:
 #   ssh login.delta.ncsa.illinois.edu
-#   cd /projects/bfrf/hibb/romae-lc && .venv-x86/bin/pip install light-curve "git+https://github.com/nabeelre/FATS" scikit-learn pandas
+#   cd /projects/bfrf/hibb/romae-lc
+#   UV_PROJECT_ENVIRONMENT=.venv-x86 uv sync --extra bench          # the x86 environment (torch CPU wheel, scikit-learn, pandas)
+#   uv pip install --python .venv-x86/bin/python light-curve "git+https://github.com/nabeelre/FATS"
 #   sbatch project/jobs/delta_cpu_starembed.sh
-# (check the account name with `accounts`; the CPU allocation is usually bfrf-delta-cpu)
+# (check the account name with `accounts`; the CPU allocation is usually bfrf-delta-cpu; the GPU one here is bfrf-dtai-gh)
 set -euo pipefail
 export HF_DATASETS_DISABLE_PROGRESS_BARS=1
 export OMP_NUM_THREADS=1 PYTHONUNBUFFERED=1
