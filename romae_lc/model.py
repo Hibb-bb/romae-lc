@@ -466,12 +466,16 @@ def _mae_forward(
     pad_mask=None,
     mask=None,
     weight=None,
+    target_values=None,
 ) -> MAEOutput:
     """Mask, encode the visible tokens with ``encoder``, decode the masked
     ones with the modules of ``parts`` (see :func:`_mae_head`). ``weight
     [B, N]`` (optional) weights every token's squared error in the loss
     (e.g. ``1 / sigma^2``); the loss is then the weighted mean over the
-    real masked tokens."""
+    real masked tokens. ``target_values [B, N]`` or ``[B, N, target_channels]``
+    (optional) replaces the token values as the reconstruction target (e.g.
+    a smooth fit of the window in place of the noisy observations); the
+    encoder still sees the values."""
     b, n, _ = values.shape
     if pad_mask is None:
         pad_mask = torch.zeros(b, n, dtype=torch.bool, device=values.device)
@@ -482,7 +486,11 @@ def _mae_forward(
     def split(t, m):
         return t[m].reshape(b, -1, *t.shape[2:])
 
-    target = split(values[..., :target_channels], mask)
+    if target_values is None:
+        target = split(values[..., :target_channels], mask)
+    else:
+        tv = target_values if target_values.dim() == 3 else target_values[..., None]
+        target = split(tv[..., :target_channels].to(values.dtype), mask)
     if target.shape[1] == 0:
         raise ValueError("mask selects no tokens; nothing to reconstruct")
     m_pos, m_pad = split(pos_t, mask).transpose(1, 2), split(pad_mask, mask)
@@ -556,7 +564,7 @@ class RoMAEForPreTraining(RoMAEBase):
             self.rope_layout, self.cfg.head_dim, self.dec_cfg.head_dim
         )
 
-    def forward(self, values, positions, pad_mask=None, mask=None, weight=None) -> MAEOutput:
+    def forward(self, values, positions, pad_mask=None, mask=None, weight=None, target_values=None) -> MAEOutput:
         """Mask, encode the visible tokens, decode the masked ones.
 
         Args:
@@ -579,6 +587,7 @@ class RoMAEForPreTraining(RoMAEBase):
             pad_mask,
             mask,
             weight,
+            target_values,
         )
 
     def backbone(self, pool: str = "cls") -> RoMAE:

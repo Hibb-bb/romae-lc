@@ -52,3 +52,14 @@ def test_jepa_hybrid_and_warm_start(tmp_path):
     with torch.no_grad():
         o = model(values, positions)
     assert torch.isfinite(o.loss) and "recon" in model.last_stats
+
+
+def test_smooth_targets_mae_and_jepa(tmp_path):
+    out = tmp_path / "tpl"
+    pretrain_mae.main(MAE_ARGS + ["--target", "mix", "--template-harmonics", "2", "--template-min-points", "6", "--steps", "2", "--out", str(out)])
+    assert (out / "DONE").is_file()
+    rows = [l for l in open(out / "log.jsonl") if '"eval"' in l]
+    assert rows and '"template_share"' in rows[-1]
+    out2 = tmp_path / "tpl_jepa"
+    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-recon-weight", "0.5", "--target", "template", "--template-harmonics", "2", "--template-min-points", "6", "--steps", "2", "--out", str(out2)])
+    assert (out2 / "DONE").is_file()

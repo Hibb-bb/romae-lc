@@ -208,6 +208,14 @@ def add_train_args(parser) -> None:
         help="train on windows of random length, log-uniform between LO and HI "
         "days (the evaluations stay at --window); the ladder then reaches 2 HI",
     )
+    g.add_argument("--target", choices=["obs", "template", "mix"], default="obs",
+                   help="reconstruction target: the observations, the window's smooth Fourier fit on the star's period (project.templates), "
+                   "or the fit where its band fits well (adjusted R2 >= --template-min-r2) and the observation elsewhere")
+    g.add_argument("--template-harmonics", type=int, default=6)
+    g.add_argument("--template-min-r2", type=float, default=0.5)
+    g.add_argument("--template-min-points", type=int, default=20, help="points a band needs in the window for a fit")
+    g.add_argument("--template-periods", default=None, help="periods.csv of project.eval.period_table; default: the catalogue period")
+    g.add_argument("--template-column", default="p_catalogue_sharp", help="its column, e.g. p_model_cands for the model's own periods")
     g.add_argument("--jepa", action="store_true", help="token-level JEPA (project.jepa): predict the EMA target encoder's latents of the hidden tokens instead of their values")
     g.add_argument("--jepa-ema", type=float, default=0.996, help="target encoder momentum at the start")
     g.add_argument("--jepa-ema-end", type=float, default=1.0, help="momentum at the end (linear schedule)")
@@ -462,7 +470,18 @@ def main(argv=None):
                                 len(spec.tokenize["band_wavelengths"]), latent_drop=0.0).to(dev)  # fmt: skip
     aux_modules = [m for m in (phase_head, fold_dec) if m is not None]
     train_periods = torch.tensor([float(r.period or float("nan")) for r in train], dtype=torch.float64)
-    aux_stats = {"phase": [], "fold": [], "spectral": []}
+    smooth = args.target != "obs"
+    if smooth and isinstance(model, BottleneckAE):
+        parser.error("--target template/mix is for the masked autoencoder and the JEPA")
+    if smooth:
+        from project.templates import period_lookup, template_periods
+
+        lookup = period_lookup(args.template_periods, args.template_column) if args.template_periods else None
+        train_template_periods = template_periods(train, lookup)
+        print(f"smooth targets ({args.target}): {args.template_harmonics} harmonics on "
+              f"{'the catalogue period' if lookup is None else args.template_column + ' of ' + args.template_periods}"
+              f"{'' if lookup is None else f' ({sum(1 for r in train if str(r.meta.get(chr(105)+chr(100))) in lookup)} of {len(train)} training stars found)'}", flush=True)
+    aux_stats = {"phase": [], "fold": [], "spectral": [], "template_share": []}
 
     def aux_losses(out, values, positions, pad, periods_rows):
         """The per-token phase loss on the encoder's visible-token outputs
@@ -508,7 +527,7 @@ def main(argv=None):
             total = total + args.spectral_aux * ls_
         return total
 
-    def forward(frames, mode=None, periods_rows=None):
+    def forward(frames, mode=None, periods_rows=None, template_rows=None):
         """The reconstruction loss of one fused window batch; the bottleneck
         model takes the Tokens with the per-point errors. ``mode`` is the
         mask mode (default: the run's). With ``periods_rows`` (the catalogue
@@ -525,7 +544,14 @@ def main(argv=None):
                 position=args.mask_block_pos, block_share=args.mask_block_share,
             )
         weight = error_weights(values, pad, spec.err_stats, args.loss_weight_cap) if args.loss_weight == "err" else None
-        out = model(values, positions, pad, mask, weight)
+        target_values = None
+        if smooth and template_rows is not None:
+            from project.templates import smooth_targets
+
+            target_values, share = smooth_targets(values, positions, pad, template_rows, spec, args.template_harmonics, args.template_min_r2,
+                                                  args.template_min_points, args.target)  # fmt: skip
+            aux_stats["template_share"].append(share)
+        out = model(values, positions, pad, mask, weight, target_values=target_values)
         loss = out.loss
         if aux and periods_rows is not None:
             loss = loss + aux_losses(out, values, positions, pad, periods_rows)
@@ -685,8 +711,9 @@ def main(argv=None):
             timer.got_batch()
             frames = [f.to(dev) for f in batch["frames"]]
             periods_rows = train_periods[batch["index"]].repeat(len(frames)) if aux else None
+            template_rows = train_template_periods[batch["index"]].repeat(len(frames)) if smooth else None
             with amp:
-                loss_t = forward(frames, periods_rows=periods_rows)
+                loss_t = forward(frames, periods_rows=periods_rows, template_rows=template_rows)
             opt.zero_grad(set_to_none=True)
             loss_t.backward()
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [p for m in aux_modules for p in m.parameters()], args.clip)

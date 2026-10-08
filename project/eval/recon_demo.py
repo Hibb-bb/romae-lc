@@ -100,7 +100,13 @@ def main(argv=None):
             assert np.allclose(th_sorted, th[order])
             r2 = 1.0 - np.sum((truth - pred) ** 2) / max(np.sum((truth - truth.mean()) ** 2), 1e-9)
             r2_seen = 1.0 - np.sum((truth - y[~m].mean()) ** 2) / max(np.sum((truth - truth.mean()) ** 2), 1e-9)
-            scores.append(dict(ztf_id=str(r.meta.get("id")), cls=fine_class(r), kind=kind, r2=float(r2), r2_mean_of_seen=float(r2_seen), n_hidden=int(m.sum()), n_seen=int((~m).sum())))
+            # the smooth fit of the whole window on the catalogue period, at the hidden times: the denoised target
+            from project.phase_decoder import fourier_fit, template_at
+            from romae_lc.data import Record
+            win = Record(t=frame[0], y=frame[1], err=frame[3], band=frame[2], label=r.label, period=r.period, meta=r.meta)
+            tpl = template_at(fourier_fit(win, float(r.period), 6), th_sorted, frame[2][m][order], float(r.period), 6)
+            r2_tpl = 1.0 - np.sum((tpl - pred) ** 2) / max(np.sum((tpl - tpl.mean()) ** 2), 1e-9)
+            scores.append(dict(ztf_id=str(r.meta.get("id")), cls=fine_class(r), kind=kind, r2=float(r2), r2_vs_template=float(r2_tpl), r2_mean_of_seen=float(r2_seen), n_hidden=int(m.sum()), n_seen=int((~m).sum())))
             # the model's token order is the tokenizer's (sorted by time); map predictions to the sorted hidden times
             for ax, fold in zip(axes[row], (False, True)):
                 style(ax)
@@ -124,7 +130,7 @@ def main(argv=None):
     plt.close(fig)
     json.dump(scores, open(out / "scores.json", "w"), indent=1)
     for s in scores:
-        print(f"{s['cls']:7s} {s['ztf_id']:20s} {s['kind']:6s} hidden {s['n_hidden']:3d} seen {s['n_seen']:3d}  R2 {s['r2']:.2f}  (mean of seen {s['r2_mean_of_seen']:.2f})")
+        print(f"{s['cls']:7s} {s['ztf_id']:20s} {s['kind']:6s} hidden {s['n_hidden']:3d} seen {s['n_seen']:3d}  R2 vs obs {s['r2']:.2f}  vs smooth fit {s['r2_vs_template']:.2f}  (mean of seen {s['r2_mean_of_seen']:.2f})")
     print(f"wrote {out}/recon_demo.png in {time.time() - t0:.0f}s")
 
 

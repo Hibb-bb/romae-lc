@@ -163,7 +163,7 @@ class TokenJEPA(nn.Module):
             bt.copy_(bc)
         return m
 
-    def forward(self, values, positions, pad_mask=None, mask=None, weight=None) -> MAEOutput:
+    def forward(self, values, positions, pad_mask=None, mask=None, weight=None, target_values=None) -> MAEOutput:
         enc = self.context
         b, n, _ = values.shape
         if pad_mask is None:
@@ -204,7 +204,8 @@ class TokenJEPA(nn.Module):
         err = F.smooth_l1_loss(pred, target, reduction="none") if self.loss_kind == "smoothl1" else F.mse_loss(pred, target, reduction="none")
         loss = (err * real).sum() / (real.sum() * target.shape[-1]).clamp_min(1e-8)
         if self.recon_head is not None:
-            values_hidden = split(values[..., :1], mask).float()
+            src = values[..., :1] if target_values is None else (target_values if target_values.dim() == 3 else target_values[..., None])[..., :1]
+            values_hidden = split(src.to(values.dtype), mask).float()
             recon = self.recon_head(hid).float()
             loss_recon = (F.mse_loss(recon, values_hidden, reduction="none") * real).sum() / real.sum().clamp_min(1e-8)
             loss = loss + self.recon_weight * loss_recon
