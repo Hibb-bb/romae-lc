@@ -53,6 +53,7 @@ class TokenJEPA(nn.Module):
         ema_end: float = 1.0,
         loss: str = "smoothl1",
         use_target: bool = True,
+        recon_weight: float = 0.0,
     ):
         super().__init__()
         d = encoder["d_model"] if isinstance(encoder, dict) else encoder.d_model
@@ -63,12 +64,15 @@ class TokenJEPA(nn.Module):
         self.target = copy.deepcopy(self.context)
         self.target.requires_grad_(False)
         self.ema, self.ema_end, self.loss_kind, self.use_target = float(ema), float(ema_end), str(loss), bool(use_target)
+        self.recon_weight = float(recon_weight)
+        # the hybrid loss: a second head on the predictor's outputs reconstructs the hidden brightness, weighted by recon_weight
+        self.recon_head = nn.Linear(self.context.dec_cfg.d_model, 1) if self.recon_weight > 0 else None
         self.last_stats: dict = {}
 
     # ---- what the loaders, probes and the pretraining script read
     @property
     def jepa_hparams(self) -> dict:
-        return dict(ema=self.ema, ema_end=self.ema_end, loss=self.loss_kind, use_target=self.use_target)
+        return dict(ema=self.ema, ema_end=self.ema_end, loss=self.loss_kind, use_target=self.use_target, recon_weight=self.recon_weight)
 
     @property
     def hparams(self) -> dict:
@@ -131,6 +135,20 @@ class TokenJEPA(nn.Module):
         return model
 
     # ---- training
+    def init_from_mae(self, ckpt: dict) -> None:
+        """Warm start: the context encoder's backbone (projection, transformer,
+        spectral layer, CLS, absolute-time features) and the predictor's
+        decoder from a masked-autoencoder checkpoint of the same shape; the
+        target encoder starts as a copy. The MAE head (width 1) is not
+        copied: the JEPA head outputs the encoder width."""
+        sd = ckpt["state_dict"]
+        own = self.context.state_dict()
+        picked = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape and not k.startswith("head.")}
+        missing = [k for k in own if k not in picked]
+        self.context.load_state_dict(picked, strict=False)
+        self.target.load_state_dict(self.context.state_dict())
+        print(f"warm start from the autoencoder: {len(picked)} tensors copied, {len(missing)} left as initialised ({', '.join(missing[:6])}{'...' if len(missing) > 6 else ''})", flush=True)
+
     def momentum(self, step: int, total: int) -> float:
         """Linear schedule from ``ema`` to ``ema_end`` over the run."""
         f = min(max(step / max(total, 1), 0.0), 1.0)
@@ -180,12 +198,21 @@ class TokenJEPA(nn.Module):
         pos = torch.cat([v_pos, m_pos], dim=2)
         pad = torch.cat([v_pad, m_pad], dim=1)
         x = enc.decoder(x, enc.decoder_rope.prepare(pos), attention_mask(pad))
-        pred = enc.head(x[:, -k:]).float()
+        hid = x[:, -k:]
+        pred = enc.head(hid).float()
         real = (~m_pad).float()[..., None]
         err = F.smooth_l1_loss(pred, target, reduction="none") if self.loss_kind == "smoothl1" else F.mse_loss(pred, target, reduction="none")
         loss = (err * real).sum() / (real.sum() * target.shape[-1]).clamp_min(1e-8)
+        if self.recon_head is not None:
+            values_hidden = split(values[..., :1], mask).float()
+            recon = self.recon_head(hid).float()
+            loss_recon = (F.mse_loss(recon, values_hidden, reduction="none") * real).sum() / real.sum().clamp_min(1e-8)
+            loss = loss + self.recon_weight * loss_recon
+            self.last_stats_recon = float(loss_recon)
         with torch.no_grad():  # collapse watch: the spread of the targets and the predictions across tokens
             self.last_stats = dict(target_std=float(target[real[..., 0] > 0].std(0).mean()), pred_std=float(pred[real[..., 0] > 0].std(0).mean()))
+            if self.recon_head is not None:
+                self.last_stats["recon"] = self.last_stats_recon
         return MAEOutput(loss=loss, pred=pred, target=target, mask=mask, enc_tokens=enc_tokens, enc_positions=v_pos, enc_pad=v_pad)
 
 

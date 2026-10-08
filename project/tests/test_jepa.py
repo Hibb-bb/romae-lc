@@ -32,3 +32,23 @@ def test_jepa_trains_saves_and_loads(tmp_path):
         o = model(values, positions)
     assert torch.isfinite(o.loss) and o.pred.shape[-1] == model.embed_dim and o.pred.shape == o.target.shape
     assert "target_std" in model.last_stats
+
+
+def test_jepa_hybrid_and_warm_start(tmp_path):
+    mae = tmp_path / "mae"
+    pretrain_mae.main(MAE_ARGS + ["--steps", "2", "--out", str(mae)])
+    out = tmp_path / "jepa"
+    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-recon-weight", "0.5", "--jepa-init", str(mae / "mae.pt"), "--steps", "2", "--out", str(out)])
+    enc, _ = load_encoder(str(out / "mae.pt"), "cpu")
+    model = enc.model
+    assert model.recon_head is not None and model.jepa_hparams["recon_weight"] == 0.5
+    mae_model, _ = load_encoder(str(mae / "mae.pt"), "cpu")
+    # the warm start copied the autoencoder's projection; two training steps keep them close
+    a = mae_model.model.projection.weight.detach()
+    b = model.context.projection.weight.detach()
+    assert (a - b).abs().max() < 0.05 * a.abs().max() + 1e-3
+    values = torch.randn(2, 12, 2)
+    positions = torch.cat([torch.sort(torch.rand(2, 1, 12) * 5, -1).values + 1, torch.full((2, 1, 12), 472.0)], 1)
+    with torch.no_grad():
+        o = model(values, positions)
+    assert torch.isfinite(o.loss) and "recon" in model.last_stats

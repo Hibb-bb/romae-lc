@@ -213,6 +213,8 @@ def add_train_args(parser) -> None:
     g.add_argument("--jepa-ema-end", type=float, default=1.0, help="momentum at the end (linear schedule)")
     g.add_argument("--jepa-loss", choices=["smoothl1", "mse"], default="smoothl1")
     g.add_argument("--jepa-use-context", action="store_true", help="use the context encoder downstream (default: the EMA target encoder)")
+    g.add_argument("--jepa-recon-weight", type=float, default=0.0, help="hybrid loss: this weight times the MSE of a brightness head on the predictor's outputs")
+    g.add_argument("--jepa-init", default=None, help="warm start the JEPA encoder (and the target copy) from this masked-autoencoder mae.pt")
     g.add_argument(
         "--bottleneck",
         action="store_true",
@@ -403,8 +405,10 @@ def main(argv=None):
         model = TokenJEPA(
             decoder=decoder, mask_ratio=args.mask_ratio, encoder=encoder_config(args), n_channels=spec.n_channels, n_axes=2,
             rope=rope_layouts(args, ladder), abs_timescales=abs_timescales(ladder) if args.abs_time else None, spectral=spectral_kw,
-            ema=args.jepa_ema, ema_end=args.jepa_ema_end, loss=args.jepa_loss, use_target=not args.jepa_use_context,
+            ema=args.jepa_ema, ema_end=args.jepa_ema_end, loss=args.jepa_loss, use_target=not args.jepa_use_context, recon_weight=args.jepa_recon_weight,
         )  # fmt: skip
+        if args.jepa_init:
+            model.init_from_mae(torch.load(args.jepa_init, map_location="cpu", weights_only=False))
     elif args.bottleneck:
         model = BottleneckAE(
             encoder=encoder_config(args),
