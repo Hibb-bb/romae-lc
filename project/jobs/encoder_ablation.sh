@@ -97,6 +97,11 @@ for v in ${@:-block mix range both}; do
         spec)  run spec single --spectral ;;
         specaux) run specaux single --spectral --spectral-aux 0.5 ;;
         specaux50) run specaux50 single --spectral --spectral-aux 0.5 ;;   # the same at STEPS=50000
+        # token-level JEPA against the masked autoencoder, same wide spectral encoder, same masks (a stretch
+        # plus random points), 50k steps each (STEPS=50000; the training itself runs as a pretrain_mae.sh chain
+        # into project/runs/enc_<name>, this script then finds DONE and only caches and probes)
+        jepa)      run jepa single --size wide --spectral --jepa --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;
+        maespec50) run maespec50 single --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;
         long)  run_long long ;;
         hidden)   run_long hidden --mask-mode blockplus --mask-ratio 0.25 --mask-block-share 0.5 ;;
         hiddensp) run_long hiddensp --mask-mode blockplus --mask-ratio 0.25 --mask-block-share 0.5 --spectral --spectral-aux 0.5 ;;

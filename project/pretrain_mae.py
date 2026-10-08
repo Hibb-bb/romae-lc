@@ -53,6 +53,7 @@ from torch.utils.data import DataLoader
 from romae_lc import RoMAEForPreTraining
 
 from project.bottleneck import BottleneckAE, bottleneck_state, fuse_tokens
+from project.jepa import TokenJEPA, jepa_state
 from project.mae_data import MASK_MODES, MultiWindowDataset, make_mask
 from project.common import (
     FrameEncoder,
@@ -207,6 +208,11 @@ def add_train_args(parser) -> None:
         help="train on windows of random length, log-uniform between LO and HI "
         "days (the evaluations stay at --window); the ladder then reaches 2 HI",
     )
+    g.add_argument("--jepa", action="store_true", help="token-level JEPA (project.jepa): predict the EMA target encoder's latents of the hidden tokens instead of their values")
+    g.add_argument("--jepa-ema", type=float, default=0.996, help="target encoder momentum at the start")
+    g.add_argument("--jepa-ema-end", type=float, default=1.0, help="momentum at the end (linear schedule)")
+    g.add_argument("--jepa-loss", choices=["smoothl1", "mse"], default="smoothl1")
+    g.add_argument("--jepa-use-context", action="store_true", help="use the context encoder downstream (default: the EMA target encoder)")
     g.add_argument(
         "--bottleneck",
         action="store_true",
@@ -384,10 +390,21 @@ def main(argv=None):
         depth=args.dec_depth,
         attention=args.attention,
     )
+    spectral_kw = dict(time_scale=ladder.time_scale, p_min=args.spectral_p[0], p_max=args.spectral_p[1], rel=args.spectral_rel,
+                       channels=args.spectral_channels, reader=args.spectral_reader, depth=args.spectral_depth,
+                       after_layer=args.spectral_after) if args.spectral else None  # fmt: skip
     if ckpt is not None and ckpt.get("kind") == "bottleneck":
         model = BottleneckAE.from_checkpoint(ckpt)
+    elif ckpt is not None and ckpt.get("kind") == "jepa":
+        model = TokenJEPA.from_checkpoint(ckpt)
     elif ckpt is not None:
         model = RoMAEForPreTraining(**ckpt["mae"], **ckpt["backbone"])
+    elif args.jepa:
+        model = TokenJEPA(
+            decoder=decoder, mask_ratio=args.mask_ratio, encoder=encoder_config(args), n_channels=spec.n_channels, n_axes=2,
+            rope=rope_layouts(args, ladder), abs_timescales=abs_timescales(ladder) if args.abs_time else None, spectral=spectral_kw,
+            ema=args.jepa_ema, ema_end=args.jepa_ema_end, loss=args.jepa_loss, use_target=not args.jepa_use_context,
+        )  # fmt: skip
     elif args.bottleneck:
         model = BottleneckAE(
             encoder=encoder_config(args),
@@ -422,7 +439,7 @@ def main(argv=None):
         params_encoder=n_params(model.transformer) + n_params(model.projection),
         params_total=n_params(model),
     )
-    state_fn = bottleneck_state if isinstance(model, BottleneckAE) else mae_state
+    state_fn = bottleneck_state if isinstance(model, BottleneckAE) else jepa_state if isinstance(model, TokenJEPA) else mae_state
 
     if args.mask_mode != "random" and (args.bottleneck or isinstance(model, BottleneckAE)):
         parser.error("--mask-mode block / mix is for the plain masked autoencoder")
@@ -514,7 +531,7 @@ def main(argv=None):
         f"params: encoder {sizes['params_encoder'] / 1e6:.2f}M, "
         f"total {sizes['params_total'] / 1e6:.2f}M"
     )
-    opt = torch.optim.AdamW(list(model.parameters()) + [p for m in aux_modules for p in m.parameters()], lr=args.lr, weight_decay=args.wd)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad] + [p for m in aux_modules for p in m.parameters()], lr=args.lr, weight_decay=args.wd)
     sched = LambdaLR(opt, cosine_schedule(args.steps, args.warmup))
     step, epoch, elapsed, last_metrics = 0, 0, 0.0, None
     if ckpt is not None:
@@ -671,6 +688,10 @@ def main(argv=None):
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [p for m in aux_modules for p in m.parameters()], args.clip)
             opt.step()
             sched.step()
+            if isinstance(model, TokenJEPA):
+                model.ema_update(step, args.steps)
+                for k_, v_ in model.last_stats.items():
+                    aux_stats.setdefault(f"jepa_{k_}", []).append(v_)
             timer.done_step()
             step += 1
             total += loss_t.item()
