@@ -437,6 +437,18 @@ sbatch project/jobs/budget_sweep.sh project/runs/maew_spec/mae.pt project/result
 # All of the above in one queue slot (eval_bundle.sh skips steps whose results.json exists), and the artifact page:
 sbatch project/jobs/eval_bundle.sh
 python -m project.eval.period_page --report project/results/period_report_spec3 --bench project/results/ls_benchmark_spec100 --runtime project/results/runtime_spec --sweep project/results/budget_sweep_spec --out project/results/period_page/index.html
+# Stage 1 as a TOKEN-LEVEL JEPA (project/jepa.py, 2026-10-07): the same encoder (spectral layer included) predicts the EMA
+# target encoder's latents of the hidden tokens instead of their values (I-JEPA recipe: EMA target, stop-gradient,
+# asymmetric predictor = the autoencoder's light decoder; no reconstruction, no SIGReg, no catalogue). kind == "jepa";
+# every loader and probe treats the checkpoint like mae.pt (downstream = the EMA target encoder by default,
+# --jepa-use-context for the other). Same masks for the matched autoencoder control:
+sbatch --job-name=jepa50 --export=ALL,OUT=project/runs/enc_jepa,MAX_LINKS=8 project/jobs/pretrain_mae.sh --size wide --spectral --jepa --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --steps 50000
+STEPS=50000 sbatch project/jobs/encoder_ablation.sh jepa          # after DONE: cache + period probe + phase probe
+sbatch --job-name=maespec50 --export=ALL,OUT=project/runs/enc_maespec50 project/jobs/pretrain_mae.sh --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --steps 50000
+# A period for every star of every split (step 0 of the phase-coordinate plan; project.eval.period_table) and the
+# masked-reconstruction demo of the autoencoder (project.eval.recon_demo):
+sbatch project/jobs/period_table.sh project/runs/maew_spec/latents100k.pt project/results/period_table_spec
+python -m project.eval.recon_demo --ckpt project/runs/maew_spec/mae.pt --out project/results/recon_demo_spec --device cpu
 # Stage 1 with the PHASE BOTTLENECK (pretrain_phase.py, 2026-10-01): the encoder is trained end to end through the
 # phase decoder with no context, whose queries are the window's own points at their phase counted from the window's
 # START (catalogue period in the coordinate only). The only route to the reconstruction is a latent that holds the
