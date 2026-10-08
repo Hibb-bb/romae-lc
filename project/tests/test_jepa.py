@@ -70,3 +70,14 @@ def test_jepa_clean_target(tmp_path):
     pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-clean-target", "--target", "template", "--template-harmonics", "2", "--template-min-points", "6", "--steps", "2", "--out", str(out)])
     enc, _ = load_encoder(str(out / "mae.pt"), "cpu")
     assert enc.model.clean_target and enc.model.jepa_hparams["clean_target"]
+
+
+def test_query_tokens_mae_and_clean_jepa(tmp_path):
+    common = ["--target", "template", "--template-harmonics", "2", "--template-min-points", "6", "--query-extra", "6", "--query-delta", "0.5", "5", "--steps", "2"]
+    out = tmp_path / "q_mae"
+    pretrain_mae.main(MAE_ARGS + common + ["--out", str(out)])
+    rows = [l for l in open(out / "log.jsonl") if '"eval"' in l]
+    assert rows and '"query_delta_days"' in rows[-1]
+    out2 = tmp_path / "q_jepa"
+    pretrain_mae.main(MAE_ARGS + common + ["--jepa", "--jepa-clean-target", "--out", str(out2)])
+    assert (out2 / "DONE").is_file()

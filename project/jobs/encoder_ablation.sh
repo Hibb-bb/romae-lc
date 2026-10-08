@@ -103,8 +103,8 @@ for v in ${@:-block mix range both}; do
         jepa)      run jepa single --size wide --spectral --jepa --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;
         maespec50) run maespec50 single --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;
         longspecw) run_long longspecw --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;   # the whole curve as one window, wide spectral (STEPS=50000; trained by pretrain_mae.sh lines)
-        longspecwtpl) run_long longspecwtpl --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --target template ;;   # the same with the smooth fit as the target
-        jepaclean) run jepaclean single --size wide --spectral --jepa --jepa-clean-target --target template --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;   # denoising JEPA: targets from the smooth fit
+        longspecwtpl) run_long longspecwtpl --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --target template --query-extra 128 --query-delta 0.5 30 ;;   # the same with the smooth fit as the target, plus query tokens at any time
+        jepaclean) run jepaclean single --size wide --spectral --jepa --jepa-clean-target --target template --query-extra 128 --query-delta 0.5 30 --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;   # denoising JEPA: targets from the smooth fit
         jepainit)  run jepainit single --size wide --spectral --jepa --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --jepa-init project/runs/maew_spec/mae.pt ;;
         jepahyb)   run jepahyb single --size wide --spectral --jepa --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --jepa-recon-weight 0.5 ;;
         long)  run_long long ;;

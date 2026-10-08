@@ -216,6 +216,10 @@ def add_train_args(parser) -> None:
     g.add_argument("--template-min-points", type=int, default=20, help="points a band needs in the window for a fit")
     g.add_argument("--template-periods", default=None, help="periods.csv of project.eval.period_table; default: the catalogue period")
     g.add_argument("--template-column", default="p_catalogue_sharp", help="its column, e.g. p_model_cands for the model's own periods")
+    g.add_argument("--query-extra", type=int, default=0, help="with --target template/mix: extra hidden query tokens per window at sampled times, the fit as their target")
+    g.add_argument("--query-delta", type=float, nargs=2, default=[0.5, 30.0], metavar=("START", "END"),
+                   help="days around a random real token the queries are drawn from, ramped linearly from START to END over --query-ramp of the steps")
+    g.add_argument("--query-ramp", type=float, default=0.6, help="share of the steps over which the query distance ramps")
     g.add_argument("--jepa", action="store_true", help="token-level JEPA (project.jepa): predict the EMA target encoder's latents of the hidden tokens instead of their values")
     g.add_argument("--jepa-ema", type=float, default=0.996, help="target encoder momentum at the start")
     g.add_argument("--jepa-ema-end", type=float, default=1.0, help="momentum at the end (linear schedule)")
@@ -531,7 +535,7 @@ def main(argv=None):
             total = total + args.spectral_aux * ls_
         return total
 
-    def forward(frames, mode=None, periods_rows=None, template_rows=None):
+    def forward(frames, mode=None, periods_rows=None, template_rows=None, step_now=0):
         """The reconstruction loss of one fused window batch; the bottleneck
         model takes the Tokens with the per-point errors. ``mode`` is the
         mask mode (default: the run's). With ``periods_rows`` (the catalogue
@@ -550,11 +554,24 @@ def main(argv=None):
         weight = error_weights(values, pad, spec.err_stats, args.loss_weight_cap) if args.loss_weight == "err" else None
         target_values = None
         if smooth and template_rows is not None:
-            from project.templates import smooth_targets
+            from project.templates import augment_with_queries, sample_queries, smooth_targets, template_eval
 
             target_values, share = smooth_targets(values, positions, pad, template_rows, spec, args.template_harmonics, args.template_min_r2,
                                                   args.template_min_points, args.target)  # fmt: skip
             aux_stats["template_share"].append(share)
+            if args.query_extra > 0:
+                # extra hidden tokens at sampled times, the fit as their target: the distance to a seen point ramps up over training
+                from romae_lc.model import gen_mask
+
+                last = smooth_targets.last
+                frac = min(step_now / max(args.query_ramp * args.steps, 1), 1.0)
+                delta = args.query_delta[0] + (args.query_delta[1] - args.query_delta[0]) * frac
+                if mask is None:
+                    mask = gen_mask(args.mask_ratio, pad)
+                t_q, band_q = sample_queries(positions, pad, last["band"], args.query_extra, delta, spec.tokenize["time_scale"])
+                target_q = template_eval(last["beta"], last["period"], t_q, band_q, args.template_harmonics)
+                values, positions, pad, mask, target_values, weight = augment_with_queries(values, positions, pad, mask, target_values, weight, t_q, band_q, target_q, spec)
+                aux_stats.setdefault("query_delta_days", []).append(float(delta))
         out = model(values, positions, pad, mask, weight, target_values=target_values)
         loss = out.loss
         if aux and periods_rows is not None:
@@ -717,7 +734,7 @@ def main(argv=None):
             periods_rows = train_periods[batch["index"]].repeat(len(frames)) if aux else None
             template_rows = train_template_periods[batch["index"]].repeat(len(frames)) if smooth else None
             with amp:
-                loss_t = forward(frames, periods_rows=periods_rows, template_rows=template_rows)
+                loss_t = forward(frames, periods_rows=periods_rows, template_rows=template_rows, step_now=step)
             opt.zero_grad(set_to_none=True)
             loss_t.backward()
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [p for m in aux_modules for p in m.parameters()], args.clip)
