@@ -174,7 +174,7 @@ def test_dataset_items_and_seeding(records):
     ds = FrameDataset(records, cfg, seed=0)
     assert len(ds) == 12 and ds.indices == list(range(12))
     item = ds[3]
-    assert set(item) == {"frames", "actions", "label", "index"}
+    assert set(item) == {"frames", "actions", "label", "index", "starts"}
     assert len(item["frames"]) == 4 and item["actions"].shape == (4, 1)
     assert item["label"] == records[3].label and item["index"] == 3
     assert not np.array_equal(item["actions"], ds[3]["actions"])

@@ -185,3 +185,141 @@ def smooth_targets(values, positions, pad, period_rows, spec, harmonics=6, min_r
     share = float(use.sum()) / max(float(real.sum()), 1.0)
     smooth_targets.last = dict(beta=beta, period=period, band=band, t_days=t_days, y=y, real=real)
     return target, share
+
+
+# ------------------------------------------------- whole-record templates
+
+H_MAX = 8
+H_CHOICES = (1, 2, 3, 4, 6, 8)
+
+
+def period_lookup_best(path: str, cat_column: str = "p_catalogue_sharp", other_column: str = "p_model_cands") -> dict:
+    """``{ztf_id: period}`` from the period table: the sharpened catalogue
+    period, or the model's candidate period where the verdict says the
+    catalogue is another period."""
+    out = {}
+    with open(path) as f:
+        for row in csv.DictReader(f):
+            col = other_column if row.get("verdict") == "other period" else cat_column
+            try:
+                v = float(row[col])
+            except (KeyError, ValueError):
+                continue
+            if np.isfinite(v) and v > 0:
+                out[str(row["ztf_id"])] = v
+    return out
+
+
+def _fit_one(args):
+    i, t, y, err, band, period, n_bands = args
+    coef = np.zeros((n_bands, 2 * H_MAX + 1))
+    r2 = np.full(n_bands, np.nan)
+    if not (np.isfinite(period) and period > 0):
+        return i, coef, r2, 0
+    from project import fold
+
+    best = (-np.inf, 0, None, None)
+    for h in H_CHOICES:
+        n_par = 2 * h + 1
+        ss_res = ss_tot = 0.0
+        n_tot = p_tot = nb = 0
+        betas, r2s = {}, {}
+        for b in range(n_bands):
+            m = band == b
+            n = int(m.sum())
+            if n < n_par + 5:
+                continue
+            w = 1.0 / (np.maximum(err[m], 0.0) ** 2 + 1e-6)
+            sw = np.sqrt(w)
+            x = fold.design(t[m].astype(np.float64), period, h)
+            beta, *_ = np.linalg.lstsq(x * sw[:, None], y[m] * sw, rcond=None)
+            res = y[m] - x @ beta
+            mean = (w * y[m]).sum() / w.sum()
+            sr, st = float((w * res**2).sum()), float((w * (y[m] - mean) ** 2).sum())
+            betas[b] = beta
+            r2s[b] = 1.0 - (sr / max(n - n_par, 1)) / max(st / max(n - 1, 1), 1e-12)
+            ss_res, ss_tot, n_tot, p_tot, nb = ss_res + sr, ss_tot + st, n_tot + n, p_tot + n_par, nb + 1
+        if not betas or n_tot - p_tot <= 0 or ss_tot <= 0:
+            continue
+        adj = 1.0 - (ss_res / (n_tot - p_tot)) / (ss_tot / (n_tot - nb))
+        if adj > best[0] + 0.002:  # a higher harmonic count must earn its keep
+            best = (adj, h, betas, r2s)
+    adj, h, betas, r2s = best
+    if betas is None:
+        return i, coef, r2, 0
+    for b, beta in betas.items():  # fold.design interleaves (1, cos1, sin1, cos2, sin2, ...); stored as (1, cos1..H, sin1..H)
+        coef[b, 0] = beta[0]
+        coef[b, 1 : 1 + h] = beta[1 : 1 + 2 * h : 2]
+        coef[b, 1 + H_MAX : 1 + H_MAX + h] = beta[2 : 2 + 2 * h : 2]
+        r2[b] = r2s[b]
+    return i, coef, r2, h
+
+
+def fit_record_templates(records, periods, n_bands: int = 3, workers: int = 8, log=print) -> dict:
+    """One Fourier template per star, fitted per band on the WHOLE light
+    curve (as the model sees it: the standardised records) on ``periods[i]``,
+    with the harmonic count chosen per star by the pooled adjusted R2.
+    Returns ``dict(coef [n, n_bands, 2 H_MAX + 1], period [n], harmonics [n],
+    r2 [n, n_bands])`` as tensors (zero coefficients and NaN R2 where there
+    is no fit)."""
+    import time
+    from multiprocessing import Pool
+
+    t0 = time.time()
+    jobs = [(i, r.t, r.y, r.err, r.band, float(periods[i]), n_bands) for i, r in enumerate(records)]
+    coef = np.zeros((len(records), n_bands, 2 * H_MAX + 1))
+    r2 = np.full((len(records), n_bands), np.nan)
+    hs = np.zeros(len(records), dtype=np.int64)
+    with Pool(max(workers, 1)) as pool:
+        for k, (i, c, q, h) in enumerate(pool.imap_unordered(_fit_one, jobs, chunksize=64)):
+            coef[i], r2[i], hs[i] = c, q, h
+            if (k + 1) % 10000 == 0:
+                log(f"  templates {k + 1} / {len(records)}, {time.time() - t0:.0f}s")
+    ok = hs > 0
+    log(f"templates: {int(ok.sum())} of {len(records)} stars fitted in {time.time() - t0:.0f}s; harmonics "
+        + ", ".join(f"{h}: {int((hs == h).sum())}" for h in H_CHOICES) + f"; median R2 {np.nanmedian(r2[ok]):.3f}")
+    return dict(coef=torch.tensor(coef, dtype=torch.float64), period=torch.tensor(np.asarray(periods, dtype=np.float64)),
+                harmonics=torch.tensor(hs), r2=torch.tensor(r2, dtype=torch.float32))
+
+
+class RecordTemplates:
+    """The stored templates on a device: ``eval(rows, t_abs, band)`` gives
+    the fit of record ``rows[b]`` at absolute record times ``t_abs [B, N]``
+    (days) and bands ``band [B, N]`` -> ``[B, N]``; NaN where the band has
+    no fit."""
+
+    def __init__(self, fitted: dict, device):
+        self.coef = fitted["coef"].to(device)
+        self.period = fitted["period"].to(device)
+        self.harmonics = fitted["harmonics"].to(device)
+        self.r2 = fitted["r2"].to(device)
+
+    @torch.no_grad()
+    def eval(self, rows, t_abs, band):
+        rows = rows.to(self.coef.device)
+        beta = self.coef[rows]  # [B, n_bands, 2H+1]
+        p = self.period[rows].clamp_min(1e-6)
+        k = torch.arange(1, H_MAX + 1, dtype=torch.float64, device=self.coef.device)
+        arg = (2.0 * math.pi) * t_abs.double().to(self.coef.device)[..., None] / p[:, None, None] * k
+        x = torch.cat([torch.ones_like(arg[..., :1]), arg.cos(), arg.sin()], -1)  # [B, N, 2H+1]
+        c = torch.gather(beta, 1, band.long().to(self.coef.device)[..., None].expand(-1, -1, beta.shape[-1]))
+        out = (x * c).sum(-1).float()
+        has = torch.isfinite(torch.gather(self.r2[rows], 1, band.long().to(self.coef.device)))
+        return torch.where(has, out, torch.full_like(out, float("nan")))
+
+
+def record_targets(templates, rows, starts, values, positions, pad, spec, mode="template", min_r2=0.5):
+    """The reconstruction target of a fused batch from the stored
+    whole-record templates: ``rows [B]`` record indices, ``starts [B]``
+    window starts (record days). Returns ``(target [B, N], share)``."""
+    from project.phase_decoder import band_ids, band_table
+
+    y = values[..., 0].float()
+    real = ~pad
+    t_abs = starts.to(positions.device)[:, None].double() + (positions[:, 0].double() - 1.0) * spec.tokenize["time_scale"]
+    band = band_ids(positions[:, 1], band_table(spec))
+    tpl = bounded(templates.eval(rows, t_abs, band), y, real)
+    r2 = torch.gather(templates.r2[rows.to(templates.r2.device)], 1, band.long().to(templates.r2.device)).to(y.device)
+    use = torch.isfinite(tpl) & real & ((r2 >= min_r2) if mode == "mix" else torch.ones_like(real))
+    record_targets.last = dict(t_abs=t_abs, band=band, y=y, real=real)
+    return torch.where(use, tpl, y), float(use.sum()) / max(float(real.sum()), 1.0)

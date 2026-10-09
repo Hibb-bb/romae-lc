@@ -206,6 +206,7 @@ def sample_frames(record: Record, cfg: FrameConfig, rng: np.random.Generator):
         best = (0, d, starts, masks)
     _, d, starts, masks = best
     frames = _cut(record, t, masks, starts, cfg, rng, augment=True)
+    sample_frames.last_starts = np.asarray(starts, dtype=np.float64)  # record time (days) of every window's start, for the caller that needs it
     return frames, d.astype(np.float32).reshape(n_frames, 1)
 
 
@@ -337,7 +338,7 @@ class FrameDataset(Dataset):
         rng = np.random.default_rng(entropy)
         record = self.records[i]
         frames, actions = sample_frames(record, self.cfg, rng)
-        return dict(frames=frames, actions=actions, label=record.label, index=j)
+        return dict(frames=frames, actions=actions, label=record.label, index=j, starts=sample_frames.last_starts.copy())
 
 
 def collate_frames(batch: list[dict], **tokenize_kwargs) -> dict:
@@ -372,10 +373,13 @@ def collate_frames(batch: list[dict], **tokenize_kwargs) -> dict:
     actions = np.stack(
         [np.asarray(item["actions"], dtype=np.float32) for item in batch]
     )
-    return dict(
+    out = dict(
         frames=frames,
         actions=torch.from_numpy(actions),
         n_tokens=torch.stack([f.n_real for f in frames], 1).long(),
         label=torch.tensor([item["label"] for item in batch], dtype=torch.long),
         index=torch.tensor([item["index"] for item in batch], dtype=torch.long),
     )
+    if all("starts" in item for item in batch):  # window starts in record time (days), [B, T]
+        out["starts"] = torch.from_numpy(np.stack([np.asarray(item["starts"], dtype=np.float64) for item in batch]))
+    return out

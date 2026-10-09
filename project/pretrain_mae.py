@@ -217,6 +217,10 @@ def add_train_args(parser) -> None:
     g.add_argument("--template-min-points", type=int, default=20, help="points a band needs in the window for a fit")
     g.add_argument("--template-periods", default=None, help="periods.csv of project.eval.period_table; default: the catalogue period")
     g.add_argument("--template-column", default="p_catalogue_sharp", help="its column, e.g. p_model_cands for the model's own periods")
+    g.add_argument("--template-fit", choices=["record", "window"], default="record",
+                   help="record: one template per star fitted on its whole light curve (harmonics chosen per star), stored and read at absolute times; "
+                   "window: refitted on every window's points (the first version)")
+    g.add_argument("--template-workers", type=int, default=8, help="processes for the whole-record fits at startup")
     g.add_argument("--query-extra", type=int, default=0, help="with --target template/mix: extra hidden query tokens per window at sampled times, the fit as their target")
     g.add_argument("--query-delta", type=float, nargs=2, default=[0.5, 30.0], metavar=("START", "END"),
                    help="days around a random real token the queries are drawn from, ramped linearly from START to END over --query-ramp of the steps")
@@ -498,13 +502,28 @@ def main(argv=None):
     aux_modules = [m for m in (phase_head, fold_dec) if m is not None]
     train_periods = torch.tensor([float(r.period or float("nan")) for r in train], dtype=torch.float64)
     smooth = args.target != "obs"
+    record_templates = None
     if smooth and isinstance(model, BottleneckAE):
         parser.error("--target template/mix is for the masked autoencoder and the JEPA")
     if smooth:
         from project.templates import period_lookup, template_periods
 
-        lookup = period_lookup(args.template_periods, args.template_column) if args.template_periods else None
+        from project.templates import RecordTemplates, fit_record_templates, period_lookup_best
+
+        if args.template_periods and args.template_column == "p_catalogue_sharp":
+            lookup = period_lookup_best(args.template_periods)  # the sharpened catalogue, or the model's period where the catalogue is another period
+        else:
+            lookup = period_lookup(args.template_periods, args.template_column) if args.template_periods else None
         train_template_periods = template_periods(train, lookup)
+        if args.template_fit == "record":
+            tpl_file = out / "templates.pt"
+            if tpl_file.is_file():
+                fitted = torch.load(tpl_file, map_location="cpu", weights_only=False)
+                print(f"templates: loaded {tpl_file}", flush=True)
+            else:
+                fitted = fit_record_templates(train, train_template_periods.numpy(), n_bands=len(spec.tokenize["band_wavelengths"]), workers=args.template_workers)
+                torch.save(fitted, tpl_file)
+            record_templates = RecordTemplates(fitted, dev)
         print(f"smooth targets ({args.target}): {args.template_harmonics} harmonics on "
               f"{'the catalogue period' if lookup is None else args.template_column + ' of ' + args.template_periods}"
               f"{'' if lookup is None else f' ({sum(1 for r in train if str(r.meta.get(chr(105)+chr(100))) in lookup)} of {len(train)} training stars found)'}", flush=True)
@@ -554,7 +573,7 @@ def main(argv=None):
             total = total + args.spectral_aux * ls_
         return total
 
-    def forward(frames, mode=None, periods_rows=None, template_rows=None, step_now=0):
+    def forward(frames, mode=None, periods_rows=None, template_rows=None, step_now=0, index_rows=None, start_rows=None):
         """The reconstruction loss of one fused window batch; the bottleneck
         model takes the Tokens with the per-point errors. ``mode`` is the
         mask mode (default: the run's). With ``periods_rows`` (the catalogue
@@ -573,24 +592,31 @@ def main(argv=None):
         weight = error_weights(values, pad, spec.err_stats, args.loss_weight_cap) if args.loss_weight == "err" else None
         target_values = None
         if smooth and template_rows is not None:
-            from project.templates import augment_with_queries, sample_queries, smooth_targets, template_eval
+            from project.templates import augment_with_queries, bounded, record_targets, sample_queries, smooth_targets, template_eval
 
-            target_values, share = smooth_targets(values, positions, pad, template_rows, spec, args.template_harmonics, args.template_min_r2,
-                                                  args.template_min_points, args.target)  # fmt: skip
+            use_record = record_templates is not None and index_rows is not None and start_rows is not None
+            if use_record:
+                target_values, share = record_targets(record_templates, index_rows, start_rows, values, positions, pad, spec, args.target, args.template_min_r2)
+                last = record_targets.last
+            else:
+                target_values, share = smooth_targets(values, positions, pad, template_rows, spec, args.template_harmonics, args.template_min_r2,
+                                                      args.template_min_points, args.target)  # fmt: skip
+                last = smooth_targets.last
             aux_stats["template_share"].append(share)
             if args.query_extra > 0:
                 # extra hidden tokens at sampled times, the fit as their target: the distance to a seen point ramps up over training
                 from romae_lc.model import gen_mask
 
-                last = smooth_targets.last
                 frac = min(step_now / max(args.query_ramp * args.steps, 1), 1.0)
                 delta = args.query_delta[0] + (args.query_delta[1] - args.query_delta[0]) * frac
                 if mask is None:
                     mask = gen_mask(args.mask_ratio, pad)
                 t_q, band_q = sample_queries(positions, pad, last["band"], args.query_extra, delta, spec.tokenize["time_scale"])
-                from project.templates import bounded
-
-                target_q = bounded(template_eval(last["beta"], last["period"], t_q, band_q, args.template_harmonics), last["y"], last["real"])
+                if use_record:
+                    t_abs_q = start_rows.to(t_q.device)[:, None].double() + t_q.double()
+                    target_q = bounded(record_templates.eval(index_rows, t_abs_q, band_q), last["y"], last["real"])
+                else:
+                    target_q = bounded(template_eval(last["beta"], last["period"], t_q, band_q, args.template_harmonics), last["y"], last["real"])
                 values, positions, pad, mask, target_values, weight = augment_with_queries(values, positions, pad, mask, target_values, weight, t_q, band_q, target_q, spec)
                 aux_stats.setdefault("query_delta_days", []).append(float(delta))
         out = model(values, positions, pad, mask, weight, target_values=target_values)
@@ -754,8 +780,10 @@ def main(argv=None):
             frames = [f.to(dev) for f in batch["frames"]]
             periods_rows = train_periods[batch["index"]].repeat(len(frames)) if aux else None
             template_rows = train_template_periods[batch["index"]].repeat(len(frames)) if smooth else None
+            index_rows = batch["index"].repeat(len(frames)) if smooth else None  # fused rows: frame t of every item in rows t B .. (t + 1) B
+            start_rows = batch["starts"].T.reshape(-1) if (smooth and "starts" in batch) else None
             with amp:
-                loss_t = forward(frames, periods_rows=periods_rows, template_rows=template_rows, step_now=step)
+                loss_t = forward(frames, periods_rows=periods_rows, template_rows=template_rows, step_now=step, index_rows=index_rows, start_rows=start_rows)
             opt.zero_grad(set_to_none=True)
             loss_t.backward()
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [p for m in aux_modules for p in m.parameters()], args.clip)

@@ -95,3 +95,29 @@ def test_jepa_projection(tmp_path):
         o = model(values, positions)
     assert o.pred.shape[-1] == 8 and o.target.shape[-1] == 8 and torch.isfinite(o.loss)
     assert model.embed_dim == 24  # the probes read the encoder width, not the projection
+
+
+def test_record_templates_and_training(tmp_path):
+    import math
+
+    from romae_lc.data import Record
+    from project.templates import RecordTemplates, fit_record_templates
+
+    rng = np.random.default_rng(0)
+    recs = []
+    for P in (0.7, 3.0):
+        t = np.sort(rng.uniform(0, 900, 400)); band = rng.integers(0, 2, 400)
+        y = np.sin(2 * math.pi * t / P) + 0.3 * np.cos(4 * math.pi * t / P) + band * 0.5 + 0.05 * rng.standard_normal(400)
+        recs.append(Record(t=t.astype(np.float32), y=y.astype(np.float32), err=np.full(400, 0.05, np.float32), band=band.astype(np.int64), label=0, period=P, meta={}))
+    fitted = fit_record_templates(recs, [0.7, 3.0], n_bands=2, workers=2, log=lambda *_: None)
+    assert (fitted["harmonics"] >= 2).all()
+    tpl = RecordTemplates(fitted, "cpu")
+    t_abs = torch.rand(2, 30, dtype=torch.float64) * 900; band = torch.randint(0, 2, (2, 30))
+    P = torch.tensor([0.7, 3.0], dtype=torch.float64)[:, None]
+    truth = torch.sin(2 * math.pi * t_abs / P) + 0.3 * torch.cos(4 * math.pi * t_abs / P) + band * 0.5
+    assert (tpl.eval(torch.tensor([0, 1]), t_abs, band) - truth.float()).abs().mean() < 0.05
+    out = tmp_path / "rec"
+    pretrain_mae.main(MAE_ARGS + ["--target", "template", "--template-fit", "record", "--template-workers", "2", "--query-extra", "6", "--query-delta", "0.5", "5", "--steps", "2", "--out", str(out)])
+    assert (out / "templates.pt").is_file() and (out / "DONE").is_file()
+    rows = [l for l in open(out / "log.jsonl") if '"eval"' in l]
+    assert '"template_share"' in rows[-1] and '"query_delta_days"' in rows[-1]
