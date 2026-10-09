@@ -588,7 +588,9 @@ def main(argv=None):
                 if mask is None:
                     mask = gen_mask(args.mask_ratio, pad)
                 t_q, band_q = sample_queries(positions, pad, last["band"], args.query_extra, delta, spec.tokenize["time_scale"])
-                target_q = template_eval(last["beta"], last["period"], t_q, band_q, args.template_harmonics)
+                from project.templates import bounded
+
+                target_q = bounded(template_eval(last["beta"], last["period"], t_q, band_q, args.template_harmonics), last["y"], last["real"])
                 values, positions, pad, mask, target_values, weight = augment_with_queries(values, positions, pad, mask, target_values, weight, t_q, band_q, target_q, spec)
                 aux_stats.setdefault("query_delta_days", []).append(float(delta))
         out = model(values, positions, pad, mask, weight, target_values=target_values)

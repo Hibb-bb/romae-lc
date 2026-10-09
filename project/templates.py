@@ -46,7 +46,7 @@ def template_periods(records, lookup: dict | None) -> torch.Tensor:
 
 
 @torch.no_grad()
-def window_coefs(y, w, t_days, band, period, real, harmonics: int = 6, min_points: int = 20, ridge: float = 1e-6, n_bands: int | None = None):
+def window_coefs(y, w, t_days, band, period, real, harmonics: int = 6, min_points: int = 20, ridge: float = 1e-3, n_bands: int | None = None):
     """``(beta [B, n_bands, 2H+1], r2 [B, n_bands])``: the weighted Fourier
     fit of every row and band on the row's period (NaN where the band has
     fewer than ``min_points`` real points or the row has no period) and the
@@ -69,7 +69,8 @@ def window_coefs(y, w, t_days, band, period, real, harmonics: int = 6, min_point
         if not (cnt >= min_points).any():
             continue
         wm = w * m
-        a = torch.einsum("bni,bn,bnj->bij", x, wm, x) + eye
+        a = torch.einsum("bni,bn,bnj->bij", x, wm, x)
+        a = a + eye * a.diagonal(dim1=-2, dim2=-1).mean(-1).clamp_min(1e-12)[:, None, None]  # ridge relative to the problem's scale
         rhs = torch.einsum("bni,bn->bi", x, wm * y)
         beta = torch.linalg.solve(a, rhs[..., None])[..., 0]
         fit = torch.einsum("bni,bi->bn", x, beta)
@@ -151,6 +152,16 @@ def augment_with_queries(values, positions, pad, mask, target, weight, t_q, band
     return values, positions, pad, mask, target, weight
 
 
+def bounded(template, y, real, margin: float = 1.0):
+    """NaN where the fit leaves the window's observed range by more than
+    ``margin`` times the range: a near-singular fit, not a target."""
+    lo = torch.where(real, y, torch.full_like(y, float("inf"))).min(1, keepdim=True).values
+    hi = torch.where(real, y, torch.full_like(y, float("-inf"))).max(1, keepdim=True).values
+    span = (hi - lo).clamp_min(1e-3)
+    ok = (template >= lo - margin * span) & (template <= hi + margin * span)
+    return torch.where(ok, template, torch.full_like(template, float("nan")))
+
+
 def smooth_targets(values, positions, pad, period_rows, spec, harmonics=6, min_r2=0.5, min_points=20, mode="mix"):
     """The reconstruction target for a fused batch: the window's smooth fit
     where its band fits well (adjusted R2 >= ``min_r2``), the observation
@@ -167,10 +178,10 @@ def smooth_targets(values, positions, pad, period_rows, spec, harmonics=6, min_r
     real = ~pad
     period = period_rows.to(values.device)
     beta, r2b = window_coefs(y, w, t_days, band, period, real, harmonics, min_points, n_bands=len(spec.tokenize["band_wavelengths"]))
-    template = template_eval(beta, period, t_days, band, harmonics)
+    template = bounded(template_eval(beta, period, t_days, band, harmonics), y, real)
     r2 = torch.gather(r2b, 1, band.long()).float()
     use = torch.isfinite(template) & (r2 >= (min_r2 if mode == "mix" else -1e9)) & real
     target = torch.where(use, template, y)
     share = float(use.sum()) / max(float(real.sum()), 1.0)
-    smooth_targets.last = dict(beta=beta, period=period, band=band, t_days=t_days)
+    smooth_targets.last = dict(beta=beta, period=period, band=band, t_days=t_days, y=y, real=real)
     return target, share

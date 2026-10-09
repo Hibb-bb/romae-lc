@@ -107,6 +107,7 @@ for v in ${@:-block mix range both}; do
         jepaclean) run jepaclean single --size wide --spectral --jepa --jepa-proj 32 --jepa-clean-target --target template --query-extra 128 --query-delta 0.5 30 --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;   # denoising JEPA: targets from the smooth fit
         jepacleanshort) run jepacleanshort single --size wide --spectral --jepa --jepa-proj 32 --jepa-clean-target --target template --query-extra 128 --query-delta 0.5 2 --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;   # learnability: queries stay within 2 days of a seen point
         gruode)    run gruode single --encoder gruode --size wide --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 ;;   # the collaborators' GRU-ODE encoder, same objective and probes
+        longspecwtpl2) run_long longspecwtpl2 --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --target template --query-extra 128 --query-delta 0.5 30 ;;   # the same with bounded fits (ridge 1e-3, range check)
         jepainit)  run jepainit single --size wide --spectral --jepa --jepa-proj 32 --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --jepa-init project/runs/maew_spec/mae.pt ;;
         jepahyb)   run jepahyb single --size wide --spectral --jepa --jepa-proj 32 --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --jepa-recon-weight 0.5 ;;
         long)  run_long long ;;
