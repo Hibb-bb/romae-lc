@@ -24,7 +24,7 @@ while true; do
         echo "$(date '+%F %T') the list is empty: done"
         exit 0
     fi
-    if [ "$(squeue -u "$USER" -h 2>/dev/null | wc -l)" -eq 0 ]; then
+    if [ "$(squeue -u "$USER" -p "${QUEUE_PARTITION:-ghx4-interactive}" -h 2>/dev/null | wc -l)" -eq 0 ]; then
         echo "$(date '+%F %T') submitting: $line"
         if out=$(eval "$line" 2>&1); then
             echo "$(date '+%F %T') $out"

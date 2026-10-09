@@ -4,9 +4,9 @@
 #SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=120g
-#SBATCH --time=06:00:00
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=64g
+#SBATCH --time=15:00:00
 #SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
@@ -14,7 +14,7 @@
 # (FATS + light-curve, raw magnitudes), then the forest benchmark. Submit from the Delta login node, not DeltaAI:
 #   ssh login.delta.ncsa.illinois.edu
 #   cd /projects/bfrf/hibb/romae-lc
-#   UV_PROJECT_ENVIRONMENT=.venv-x86 uv sync --extra bench          # the x86 environment (torch CPU wheel, scikit-learn, pandas)
+#   UV_PROJECT_ENVIRONMENT=.venv-x86 uv sync --extra bench --extra hf   # the x86 environment (torch CPU wheel, scikit-learn, pandas, datasets)
 #   uv pip install --python .venv-x86/bin/python light-curve "git+https://github.com/nabeelre/FATS"
 #   sbatch project/jobs/delta_cpu_starembed.sh
 # (check the account name with `accounts`; the CPU allocation is usually bfrf-delta-cpu; the GPU one here is bfrf-dtai-gh)
