@@ -205,7 +205,7 @@ def test_collate_shapes_and_padding(records):
     sizes = np.array([[len(f[0]) for f in item["frames"]] for item in items])
     assert len({tuple(row) for row in sizes}) > 1  # windows differ in size
     batch = collate_frames(items, band_wavelengths=WL, time_scale=0.5)
-    assert set(batch) == {"frames", "actions", "n_tokens", "label", "index"}
+    assert set(batch) == {"frames", "actions", "n_tokens", "label", "index", "starts"}
     assert len(batch["frames"]) == 4
     for t, tok in enumerate(batch["frames"]):
         assert isinstance(tok, Tokens)
