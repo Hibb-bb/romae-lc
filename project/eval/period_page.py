@@ -1,6 +1,6 @@
 """Build the period artifact page (https://claude.ai/artifact/JoubE7CVCj2KSB1QtGzwub)
 from the result folders. Sections: hit rates (table, two scatter panels); clean
-folds (as good as the catalogue, and cleaner than it; no fitted wave); the
+folds (as good as the catalogue, and model + fine search cleaner than it; no fitted wave); the
 cost comparison (hit rate against trials per threshold, the trials table,
 runtime); analysis (bars by class, hit rate against the period per threshold,
 heat maps); the encoders. One figure per tolerance, little text:
@@ -26,7 +26,7 @@ from project.eval.period_report import fold_panel, plot_hit_vs_period, rel_error
 from project.plot_period_examples import CLASS_COLOUR, CLASS_NAME, INK, INK2, OTHER, SURFACE, style
 
 HEAD = '<title>ZTF Period Figures</title>\n<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@500;700&family=Public+Sans:wght@400;600&display=swap">\n<style>\n/* layout: one reading column for text, figures break out wider on a light paper panel */\n:root {\n  --bg: #f3f5f8; --fg: #14202e; --muted: #526173; --rule: #d5dbe3;\n  --accent: #2a78d6; --panel: #ffffff; --paper: #fcfcfb;\n  --display: "Figtree", "Segoe UI", system-ui, sans-serif;\n  --body: "Public Sans", "Segoe UI", system-ui, sans-serif;\n}\n@media (prefers-color-scheme: dark) {\n  :root:not([data-theme="light"]) { --bg: #0f151c; --fg: #e8edf3; --muted: #9aa8b8; --rule: #2a3542; --accent: #6aa7ee; --panel: #171f29; --paper: #fcfcfb; color-scheme: dark }\n}\n:root[data-theme="dark"] { --bg: #0f151c; --fg: #e8edf3; --muted: #9aa8b8; --rule: #2a3542; --accent: #6aa7ee; --panel: #171f29; --paper: #fcfcfb; color-scheme: dark }\nbody { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 16px; line-height: 1.6; padding-inline: 20px; padding-block: 36px 64px; }\nmain { max-width: 1080px; margin-inline: auto; display: flex; flex-direction: column; gap: 40px; }\n.text { max-width: 66ch; display: flex; flex-direction: column; gap: 12px; }\nh1 { font-family: var(--display); font-weight: 700; font-size: clamp(1.7rem, 4vw, 2.3rem); line-height: 1.15; margin: 0; text-wrap: balance; }\nh2 { font-family: var(--display); font-weight: 700; font-size: 1.3rem; line-height: 1.25; margin: 0; text-wrap: balance; }\np { margin: 0; }\n.lede { color: var(--muted); font-size: 1.05rem; }\nsection { display: flex; flex-direction: column; gap: 16px; }\nfigure { margin: 0; background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 8px; overflow-x: auto; }\nfigure img { display: block; width: 100%; min-width: 0; height: auto; }\nul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; }\n.tablewrap { overflow-x: auto; }\ntable { border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 0.95rem; }\nth, td { text-align: left; padding: 7px 18px 7px 0; border-bottom: 1px solid var(--rule); }\nth { font-family: var(--display); font-weight: 500; color: var(--muted); font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; }\ntd.n { text-align: right; padding-right: 24px; }\ncode { font-size: 0.92em; background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }\n.note { border-left: 3px solid var(--accent); padding-left: 14px; color: var(--muted); }\n</style>\n'
-ENC_TAB = '<h2>The encoders behind these numbers</h2>\n      <p>Period hit rate of the bin read-out on the pooled latent, 5,346 validation stars, 240 bins.</p>\n    </div>\n    <div class="tablewrap"><table>\n      <tr><th>encoder</th><th>steps</th><th>within 1%</th><th>within 10%</th><th>within 20%</th></tr>\n      <tr><td>light, plain</td><td class=n>50,000</td><td class=n>0.36</td><td class=n>0.66</td><td class=n></td></tr>\n      <tr><td>wide, plain</td><td class=n>110,000</td><td class=n>0.58</td><td class=n>0.71</td><td class=n>0.80</td></tr>\n      <tr><td>light, spectral layer</td><td class=n>50,000</td><td class=n>0.35</td><td class=n>0.76</td><td class=n>0.85</td></tr>\n      <tr><td>wide, spectral layer</td><td class=n>54,000</td><td class=n>0.69</td><td class=n>0.77</td><td class=n>0.85</td></tr>\n      <tr><td>wide, spectral layer</td><td class=n>100,000</td><td class=n>0.70</td><td class=n>0.77</td><td class=n>0.84</td></tr>\n    </table></div>\n    <div class="text">\n      <p>The spectral layer sums each window\'s learned token features with the phasor at every point\'s own time over 20,000 trial frequencies, and hands a summary of that spectrum to the latent. It is the one encoder-side change that moved the period after about fifteen others did not.</p>\n    </div>\n  </section>\n'
+ENC_TAB = '<h2>The encoders behind these numbers</h2>\n      <p>Period hit rate of the bin read-out on the pooled latent, 5,346 validation stars, 240 bins.</p>\n    </div>\n    <div class="tablewrap"><table>\n      <tr><th>encoder</th><th>steps</th><th>within 1%</th><th>within 10%</th><th>within 20%</th></tr>\n      <tr><td>light, plain</td><td class=n>50,000</td><td class=n>0.36</td><td class=n>0.66</td><td class=n></td></tr>\n      <tr><td>wide, plain</td><td class=n>110,000</td><td class=n>0.58</td><td class=n>0.71</td><td class=n>0.80</td></tr>\n      <tr><td>light, spectral layer</td><td class=n>50,000</td><td class=n>0.35</td><td class=n>0.76</td><td class=n>0.85</td></tr>\n      <tr><td>wide, spectral layer</td><td class=n>54,000</td><td class=n>0.69</td><td class=n>0.77</td><td class=n>0.85</td></tr>\n      <tr><td>wide, spectral layer</td><td class=n>100,000</td><td class=n>0.70</td><td class=n>0.77</td><td class=n>0.84</td></tr>\n    </table></div>\n    <div class="text">\n    </div>\n  </section>\n'
 FIGS = Path("project/results/period_page/figs")
 C = dict(model="#6baed6", refined="#2171b5", cands="#08306b", ls="#e6550d", ls_alias="#fd8d3c")
 LS_DASH, LS_DOT = (0, (5, 2.5)), (0, (1.2, 1.6))
@@ -211,6 +211,70 @@ def fold_rows_figure(path, rows, heading):
 
 # ---------------------------------------------------------------- page
 
+def fig_spectral_diagram():
+    """Two lanes of boxes: Lomb-Scargle (fixed) above, the spectral layer
+    (learned) below; the shared step, the phasor sum over the actual
+    times, is drawn the same way in both."""
+    from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+    fig, ax = plt.subplots(figsize=(13.5, 5.6))
+    fig.patch.set_facecolor(SURFACE)
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    ax.axis("off")
+    blue, orange, shared = "#dbe9f7", "#fde3cf", "#e8e3f3"
+    edge = {"blue": C["refined"], "orange": C["ls"], "shared": "#6a51a3"}
+
+    def box(x, y, w, h, text, kind, bold=None):
+        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0,rounding_size=1.6", fc={"blue": blue, "orange": orange, "shared": shared}[kind],
+                                    ec=edge[kind], lw=1.4 if kind != "shared" else 2.0))
+        if bold:
+            ax.text(x + w / 2, y + h - 3.2, bold, ha="center", va="top", fontsize=9.4, fontweight="bold", color=INK)
+            ax.text(x + w / 2, y + h - 10.5, text, ha="center", va="top", fontsize=8.3, color=INK2, linespacing=1.25)
+        else:
+            ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=8.6, color=INK, linespacing=1.25)
+
+    def arrow(x0, x1, y, text=None):
+        ax.add_patch(FancyArrowPatch((x0, y), (x1, y), arrowstyle="-|>", mutation_scale=12, color=INK2, lw=1.1, shrinkA=0, shrinkB=0))
+        if text:
+            ax.text((x0 + x1) / 2, y + 1.8, text, ha="center", va="bottom", fontsize=7.2, color=INK2, linespacing=1.15)
+
+    # lane labels
+    ax.text(0.5, 88, "Lomb-Scargle\n(fixed)", ha="left", va="center", fontsize=10, fontweight="bold", color=edge["orange"])
+    ax.text(0.5, 44, "spectral layer\n(learned, inside\nthe encoder)", ha="left", va="center", fontsize=10, fontweight="bold", color=edge["blue"])
+    ax.plot([0.5, 99.5], [66, 66], color="#c9cfd8", lw=0.8, ls=(0, (3, 3)))
+    x1, w1, x2, w2, x3, w3, x4, w4 = 13, 16, 35, 23, 64, 16, 85, 14
+
+    # Lomb-Scargle lane: 4 boxes
+    yl, hl = 78, 20
+    box(x1, yl, w1, hl, "one number per observation:\nbrightness, centred,\nweighted by 1/σ²", "orange", bold="input")
+    arrow(x1 + w1 + 0.4, x2 - 0.4, yl + hl / 2)
+    box(x2, yl, w2, hl, "$Z(f)=\\sum_j y_j\\,e^{2\\pi i f t_j}$\nuniform grid of trial\nfrequencies, set per run", "shared", bold="phasor sum over the actual times")
+    arrow(x2 + w2 + 0.4, x3 - 0.4, yl + hl / 2)
+    box(x3, yl, w3, hl, "one power per frequency,\nnormalised to [0, 1]\nfor one sinusoid", "orange", bold="periodogram")
+    arrow(x3 + w3 + 0.4, x4 - 0.4, yl + hl / 2)
+    box(x4, yl, w4, hl, "the highest peak;\naliases and harmonics\nhandled by rules", "orange", bold="read-out")
+
+    # spectral-layer lane: 7 boxes in two rows
+    yt, ht = 42, 20
+    box(x1, yt, w1, ht, "brightness, error, band,\ntime → encoder blocks 1–2\n→ 384-wide feature $h_j$", "blue", bold="tokens of one window")
+    arrow(x1 + w1 + 0.4, x2 - 0.4, yt + ht / 2, "linear map\n8 channels")
+    box(x2, yt, w2, ht, "$Z_m(f)=\\sum_j a_{j,m}\\,e^{2\\pi i f t_j}$\n20,260 log-spaced frequencies,\n0.02 to 500 d, step 0.05 %", "shared", bold="the same sum, 8 learned channels")
+    arrow(x2 + w2 + 0.4, x3 - 0.4, yt + ht / 2)
+    box(x3, yt, w3, ht, "$|Z|^2$ per channel at f, 2f\nand f/2, plus their logs:\n48 × 20,260, standardised", "blue", bold="power map")
+    arrow(x3 + w3 + 0.4, x4 - 0.4, yt + ht / 2)
+    box(x4, yt, w4, ht, "dilated 1-D convolution\nalong frequency,\n32 wide, 3 blocks", "blue", bold="reader")
+    # bend down to the second row (right to left)
+    xm = x4 + w4 / 2
+    ax.add_patch(FancyArrowPatch((xm, yt), (xm, 30), arrowstyle="-", color=INK2, lw=1.1, shrinkA=0, shrinkB=0))
+    ax.add_patch(FancyArrowPatch((xm, 30), (x3 + w3 + 0.4, 30), arrowstyle="-|>", mutation_scale=12, color=INK2, lw=1.1, shrinkA=0, shrinkB=0))
+    yb, hb = 6, 24
+    box(x3, yb, w3, hb, "softmax over the bins:\npeak position, spread,\npooled summary", "blue", bold="a score per frequency bin")
+    ax.add_patch(FancyArrowPatch((x3 - 0.4, yb + hb / 2), (x2 + w2 + 0.4, yb + hb / 2), arrowstyle="-|>", mutation_scale=12, color=INK2, lw=1.1, shrinkA=0, shrinkB=0))
+    box(x2, yb, w2, hb, "the summary is added to the\nCLS token; the remaining encoder\nblocks run; the pooled latent\nfeeds the period read-outs", "blue", bold="back into the encoder")
+    ax.text(x1, yb + hb / 2, "pre-training only: a small loss\n(weight 0.5) asks the scores to\npoint at the catalogue bin.\nAt inference no catalogue\nvalue enters.", ha="left", va="center", fontsize=7.6, color=INK2, linespacing=1.3)
+    return save(fig, "spectral_layer.png")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report", required=True)
@@ -227,7 +291,8 @@ def main():
     R, B, T, SW = (json.load(open(p / "results.json")) for p in (rep, ben, run, Path(a.sweep)))
     d = np.load(rep / "per_star.npz", allow_pickle=True)
     bd = np.load(ben / "per_star.npz", allow_pickle=True)
-    rows = list(csv.DictReader(open(rep / "better_than_catalogue.csv")))
+    csv_name = "model_fine_search.csv" if (rep / "model_fine_search.csv").is_file() else "better_than_catalogue.csv"
+    rows = list(csv.DictReader(open(rep / csv_name)))
     M, BM, S = R["methods"], B["methods"], T["steps"]
     n = R["n_stars"]
     ls = [m for m in M if m.startswith("astropy_mb@")][0]
@@ -281,9 +346,9 @@ def main():
     imprecise = [r for r in rows if r["verdict"] != "different period"]
     pick = [int(r["val_index"]) for r in diff[:6]] + [int(r["val_index"]) for r in imprecise[:3]]
     pos = {int(i): j for j, i in enumerate(idx)}
-    f_better = fold_rows_figure(FIGS / "folds_cleaner.png",
+    f_better = fold_rows_figure(FIGS / "folds_model_fine_search.png",
                                 [(val[i], f"{fine[pos[i]]}\n{d['ztf_id'][pos[i]]}\n{'other period' if pos[i] in [pos[int(r['val_index'])] for r in diff[:6]] else 'same period, sharper'}", two(pos[i])) for i in pick],
-                                "Stars where the model's period folds the light curve more cleanly than the catalogue value")
+                                "Model + fine search: stars where its period folds the light curve more cleanly than the catalogue value")
     F = R["fold"]
     bt = R["better"]
 
@@ -292,6 +357,7 @@ def main():
     bench_budgets = sorted({int(m.split("@")[1]) for m in BM if m.startswith("astropy_mb@")})
     rt_budgets = sorted({int(k.split("@")[1]) for k in S if k.startswith("astropy_mb@") and S[k]["n"]})
     f_rt = fig_runtime(T, rt_budgets)
+    f_spec = fig_spectral_diagram()
     one_ms = 1e3 * (S["encode"]["median"] + S["read"]["median"] + S["search"]["median"])
     table5 = ["<tr><th>method</th><th>milliseconds per star</th></tr>",
               f"<tr><td>model, encoder + read-out + fine search, batched over stars (GPU)</td><td class=n>{1e3 * T['model_total_batched_per_star']:.0f}</td></tr>",
@@ -314,11 +380,12 @@ def main():
     cross = B["crossing"]["[alias-tolerant 0.01%] astropy, multiband to match model_refined"]
     top1 = sorted((v for v in SW["settings"].values() if v["top"] == min(x["top"] for x in SW["settings"].values())), key=lambda v: v["rel"])
     top5 = sorted((v for v in SW["settings"].values() if v["top"] == max(x["top"] for x in SW["settings"].values())), key=lambda v: v["rel"])
+    min_trials = min(v["trials_median"] for v in SW["settings"].values())
     width_items = "".join(f"<li>width {v1['rel']:.0%} of the period: about {v1['trials_median']:,.0f} trials per star for the fine search, {v5['trials_median']:,.0f} with the candidates</li>" for v1, v5 in zip(top1, top5))
     page = f"""{HEAD}<main>
   <div class="text">
     <h1>Period from the model, star by star</h1>
-    <p class="lede">All {n:,} validation stars from ZTF, whole light curves. The encoder (wide, with the spectral layer) gives a rough period; a fine search near it makes it sharp. Lomb-Scargle throughout is the astropy search on a uniform frequency grid. Updated 6 October.</p>
+    <p class="lede">All {n:,} validation stars from ZTF, whole light curves. The encoder (wide, with the spectral layer) gives a rough period; a fine search near it makes it sharp. Lomb-Scargle throughout is the astropy search on a uniform frequency grid. Updated 9 October.</p>
   </div>
 
   <section>
@@ -342,9 +409,9 @@ def main():
         <tr><th>fold R2, median over the stars</th><th>catalogue</th><th>catalogue sharpened</th><th>model + fine search</th><th>model candidates + search</th></tr>
         <tr><td>whole light curve</td><td class=n>{F['catalogue']['median']:.3f}</td><td class=n>{F['catalogue_sharp']['median']:.3f}</td><td class=n>{F['model_refined']['median']:.3f}</td><td class=n>{F['model_cands']['median']:.3f}</td></tr>
       </table></div>
-      <p>For {bt['n']:,} stars the model's period folds more cleanly than the catalogue value as listed (R2 higher by more than 0.1, reaching 0.5). For {bt['n_catalogue_imprecise']:,} of them the catalogue period is the same one made sharper; for {bt['n_different']:,} it is another period that also folds better than the sharpened catalogue value. The full list is in <a href="better_than_catalogue.csv">better_than_catalogue.csv</a>.</p>
+      <p>For {bt['n']:,} stars the period from model + fine search folds more cleanly than the catalogue value as listed (R2 higher by more than 0.1, reaching 0.5). For {bt['n_catalogue_imprecise']:,} of them the catalogue period is the same one made sharper; for {bt['n_different']:,} it is another period that also folds better than the sharpened catalogue value. The full list is in <a href="model_fine_search.csv">model_fine_search.csv</a>.</p>
     </div>
-    {img(f_better, "Phase-folded light curves of stars where the model period folds more cleanly than the catalogue value: other periods first, then the same period made sharper")}
+    {img(f_better, "Phase-folded light curves of stars where the model + fine search period folds more cleanly than the catalogue value: other periods first, then the same period made sharper")}
     <div class="text">
       <p class="note">A cleaner fold is evidence, not proof: on night-only sampling a period one cycle per day away folds almost as well, and the half period of a symmetric eclipsing binary folds like the full one.</p>
     </div>
@@ -356,6 +423,7 @@ def main():
       <p>1,000 validation stars. The x axis is the number of trial periods evaluated per star, the common currency of both methods. For Lomb-Scargle it is the size of its frequency grid. For the model it is set by the width of the fine search around its guess: the grid is spaced by the star's baseline, so a wider window costs more trials. Each marker shape is one width:</p>
       <ul>{width_items}</ul>
       <p>Within 0.01 % Lomb-Scargle never reaches the model; with the double and the half accepted it needs {cross:,.0f} trials to match the model's {BM['model_refined']['trials_median']:,.0f}.</p>
+      <p class="note">To do: push the budget further down. The smallest setting here is still {min_trials:,.0f} trials per star. Next, run narrower windows and a coarser grid (fewer trials per unit of 1/baseline) to find the budget at which model + fine search breaks, and whether it breaks gently (losing the 0.01 % hits first) or all at once.</p>
     </div>
     {img(f_cost[0], "Hit rate within 10 percent against trial frequencies per star for Lomb-Scargle and for the model's search")}
     {img(f_cost[1], "Hit rate within 1 percent against trial frequencies per star for Lomb-Scargle and for the model's search")}
@@ -382,6 +450,29 @@ def main():
     <div class="text"><p>Where the hits are: within 0.01 %, over points per window against valid windows, and over observation cadence against baseline, model with the fine search against Lomb-Scargle at {max(bench_budgets):,} trials (1,000 stars).</p></div>
     {img(FIGS / "heat_points_windows.png", "Heat maps of the hit rate over points per window and number of windows")}
     {img(FIGS / "heat_cadence_span.png", "Heat maps of the hit rate over observation cadence and baseline")}
+  </section>
+
+  <section>
+    <div class="text">
+      <h2>The spectral layer</h2>
+      <p>A period within 0.01 % over a 2,700 day baseline needs frequency resolution of about one over the baseline: tens of thousands of trial frequencies. Attention cannot give that. Rotary attention does multiply by phasors, but it sums its few hundred frequency rungs inside one dot product and then normalises the scores per row, so the power at a single frequency is never formed. Lomb-Scargle gets the resolution by summing phasors over the actual observation times, one sum per trial frequency. The spectral layer keeps that mechanism and makes what is summed, and how the spectrum is read, learned.</p>
+    </div>
+    {img(f_spec, "Diagram of the spectral layer inside the encoder, with the Lomb-Scargle periodogram as the fixed version of the same sum")}
+    <div class="text">
+      <p>What happens inside, for one window of up to 256 observations. The first two encoder blocks mix brightness, error, band and time into a 384-wide feature per observation. A linear map turns each feature into 8 numbers, centred over the window. For each of 20,260 trial frequencies, log-spaced from 500 days to half an hour with a step of 0.05 %, the layer sums the 8 numbers times the phasor at the observation's own time, and keeps the squared magnitude. The map of powers (also read at twice and half the frequency, so a harmonic sits next to its fundamental) is standardised and read by a small dilated convolution along the frequency axis. The reader gives a score per frequency bin. The softmax over the bins gives a peak position, a spread, and a pooled summary, which are added to the CLS token before the remaining encoder blocks. The period read-outs and the classifier see only the pooled latent.</p>
+      <p>Lomb-Scargle is one point in the layer's parameter space: one channel equal to the weighted centred brightness, and the reader replaced by the argmax. The layer starts near there (channel 0 is initialised to the brightness) and training moves it away. During pre-training a small auxiliary loss (weight 0.5) asks the reader's scores to point at the bin of the catalogue period; at inference no catalogue value enters. The table says where the two differ.</p>
+      <div class="tablewrap"><table>
+        <tr><th></th><th>Lomb-Scargle</th><th>spectral layer</th></tr>
+        <tr><td>what is summed</td><td>the brightness, weighted by 1/σ²</td><td>8 learned numbers per observation, from brightness, error, band and context</td></tr>
+        <tr><td>frequency grid</td><td>uniform, set per run</td><td>fixed log grid of 20,260 bins, 0.02 to 500 days</td></tr>
+        <tr><td>signal model</td><td>one sinusoid per frequency</td><td>none; the reader learns what a peak and its harmonics mean</td></tr>
+        <tr><td>output</td><td>one power per frequency, in [0, 1]</td><td>8 powers per frequency at f, 2f and f/2, then a score per bin and a summary vector</td></tr>
+        <tr><td>aliases and harmonics</td><td>handled afterwards by rules</td><td>seen by the reader, learned from data</td></tr>
+        <tr><td>what is learned</td><td>nothing</td><td>the 8-channel map, the reader, and the encoder blocks before it (the loss flows through the spectrum)</td></tr>
+        <tr><td>cost per window</td><td>points × frequencies</td><td>points × frequencies × 8, a few milliseconds per batch on the GPU</td></tr>
+      </table></div>
+      <p>So the layer is a learned periodogram, not a new way to find periodicity. Its value is that the rest of the encoder is trained to make features that fold well, and that the pooled latent carries the period at the grid's resolution. The rows below are the encoders tried; the spectral layer is the one encoder-side change that moved the period.</p>
+    </div>
   </section>
 
   <section>

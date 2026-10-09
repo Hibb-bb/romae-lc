@@ -324,7 +324,7 @@ below the RBF GP's.
 | `period_head.py`, `token_head.py` | evals (negative, kept) | a period head on a fixed Lomb-Scargle spectrum (rejected: not a raw-curve network) and a per-token read-out of the period |
 | `anomaly.py` | M2 | the anomaly test on the frozen pipeline: injected events scored by the predictor's density, its mean prediction and two no-model yardsticks |
 | `eval/ls_benchmark.py` | evals | the model-seeded search against Lomb-Scargle (ours on the GPU and the collaborator's astropy search) at equal budgets of trial frequencies; crossing budget, per-class tables, heat maps |
-| `eval/period_report.py` | evals | the all-star period report: hits within 20 / 10 / 1 / 0.1 / 0.01 %, hit rate against the true period, the predicted / true ratio against the period, fold demos, `better_than_catalogue.csv` |
+| `eval/period_report.py` | evals | the all-star period report: hits within 20 / 10 / 1 / 0.1 / 0.01 %, hit rate against the true period, the predicted / true ratio against the period, fold demos, `model_fine_search.csv` |
 | `eval/period_sensitivity.py` | evals | the smallest period change the latent can tell apart (shifted-template windows) |
 | `eval/runtime.py` | evals | wall-clock per star of the model path (tokens, encoder, read-out, fine search) against Lomb-Scargle |
 | `tests/` | | CPU tests on the toy simulator (`test_project.py`, `test_predictor.py`, `test_gate.py`, `test_bottleneck.py`, `test_encoder_loading.py`, and one test per later script) |
@@ -423,7 +423,7 @@ sbatch project/jobs/ls_benchmark.sh project/runs/mae_w250/mae.pt project/results
 # and alias-tolerant, per class) for the read-out alone, after the fine search, after the candidate search (top-k bins,
 # double, half; the fold picks), our GPU Lomb-Scargle at 200k/500k trials and the collaborator's astropy multiband
 # search at 100k; hit rate against the true period (hit_vs_period.png), predicted/true ratio against the period
-# (scatter_bend.png, the long-period bend), fold demos with the fitted wave, and better_than_catalogue.csv.
+# (scatter_bend.png, the long-period bend), fold demos with the fitted wave, and model_fine_search.csv.
 sbatch project/jobs/period_report.sh project/runs/maew_spec/latents100k.pt project/results/period_maew_spec_silu project/results/period_maew_spec_relu project/results/period_report_spec
 # Runtime per star (project.eval.runtime): the model path step by step (windows + tokens on CPU, encoder forward per
 # star and batched on GPU, pooling + read-out MLP, fine search) against our GPU Lomb-Scargle and the collaborator's

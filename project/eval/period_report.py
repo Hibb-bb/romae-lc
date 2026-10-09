@@ -22,7 +22,7 @@ scores the whole validation split, whole light curves:
 Hits within 20, 10, 1, 0.1 and 0.01 % (strict and alias-tolerant), overall
 and per superclass; hit rate against the true period (line plot); predicted
 against true period with the binned median ratio (the "bend"); phase-fold
-demos with the fitted wave; and ``better_than_catalogue.csv``: the stars
+demos with the fitted wave; and ``model_fine_search.csv``: the stars
 whose best model period folds clearly better than the catalogue's. The
 reference there is the catalogue period SHARPENED by the same fine search
 within 0.2 % of it (a catalogue value that is off in the fifth digit folds
@@ -389,7 +389,7 @@ def run(args):
     kinds = np.array([alias_kind(float(x)) if np.isfinite(x) else "?" for x in ratio])
     verdict = np.where(gain_sharp > args.gain, "different period", "catalogue imprecise")
     verdict = np.where(kinds == "same period, sharper", "catalogue imprecise", verdict)
-    with open(out / "better_than_catalogue.csv", "w", newline="") as f:
+    with open(out / "model_fine_search.csv", "w", newline="") as f:
         wtr = csv.writer(f)
         wtr.writerow(["ztf_id", "val_index", "class", "superclass", "verdict", "kind", "p_catalogue_d", "p_catalogue_sharp_d", "p_model_d", "p_best_d",
                       "best_over_catalogue", "r2_catalogue", "r2_catalogue_sharp", "r2_best", "gain", "gain_over_sharp", "n_points", "baseline_d"])  # fmt: skip
@@ -430,7 +430,7 @@ def run(args):
               f"Of these, {b['n_catalogue_imprecise']} are the catalogue period made sharp (the same fine search within {args.cat_rel:.1%} of the catalogue value folds as well) and "
               f"{b['n_different']} are a DIFFERENT period that beats even the sharpened catalogue by more than {args.gain:g} "
               f"(by kind: " + ", ".join(f"{k}: {v}" for k, v in b["by_kind_different"].items()) + f"). {worse} stars fold worse than the sharpened catalogue by the same margin. "
-              f"Sharpening alone improves {b['catalogue_sharpening']['improved_by_gain']} catalogue folds by more than {args.gain:g}. See better_than_catalogue.csv (column verdict).")
+              f"Sharpening alone improves {b['catalogue_sharpening']['improved_by_gain']} catalogue folds by more than {args.gain:g}. See model_fine_search.csv (column verdict).")
     (out / "tables.md").write_text("\n".join(md) + "\n")
 
     # --- figures
