@@ -125,6 +125,35 @@ def sample_queries(positions, pad, band, k: int, delta_days: float, time_scale: 
     return t_q, band.gather(1, pick)
 
 
+def sample_queries_cycles(positions, pad, band, k: int, period, lo_cycles: float, cap_cycles: float, time_scale: float,
+                          random_share: float = 0.2, generator=None):
+    """``k`` query times per row, their distance from a random real token
+    drawn in CYCLES of the row's ``period [B]`` (days): log-uniform between
+    ``lo_cycles`` and ``cap_cycles``, either sign, clipped to the window.
+    A ``random_share`` of the ``k`` queries is instead uniform over the
+    window, so the layout of the queries does not give the period away.
+    Rows without a period (NaN or <= 0) get offsets as if the period were
+    one day; their targets are NaN anyway and are padded out. Returns
+    ``(t_days [B, k], band [B, k])``."""
+    b, n = pad.shape
+    real = ~pad
+    t = (positions[:, 0].float() - 1.0) * time_scale
+    w = real.float() + (~real.any(1, keepdim=True)).float()  # a row with no real token draws anything (its targets are NaN anyway)
+    pick = torch.multinomial(w.cpu(), k, replacement=True, generator=generator).to(pad.device)  # k random real tokens, repeats allowed
+    t_pick = t.gather(1, pick)
+    per = torch.nan_to_num(period.to(t.device).float(), nan=1.0)
+    per = torch.where(per > 0, per, torch.ones_like(per))
+    lo, hi = math.log(max(lo_cycles, 1e-6)), math.log(max(cap_cycles, lo_cycles * 1.0001))
+    cycles = torch.exp(lo + (hi - lo) * torch.rand(b, k, generator=generator).to(pad.device))
+    sign = torch.where(torch.rand(b, k, generator=generator).to(pad.device) < 0.5, -1.0, 1.0)
+    t_max = (t * real).max(1, keepdim=True).values
+    t_q = (t_pick + sign * cycles * per[:, None]).clamp(min=torch.zeros_like(t_max), max=t_max)
+    n_rand = int(round(random_share * k))
+    if n_rand > 0:
+        t_q[:, :n_rand] = torch.rand(b, n_rand, generator=generator).to(pad.device) * t_max
+    return t_q, band.gather(1, pick)
+
+
 def augment_with_queries(values, positions, pad, mask, target, weight, t_q, band_q, target_q, spec):
     """Append the query tokens as hidden tokens: zero brightness, the row's
     median error channel, positions from the query times and bands, masked

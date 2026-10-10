@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -456,6 +458,44 @@ def _mae_head(enc_cfg: TransformerConfig, enc_layout, dec_cfg, target_channels: 
     return decoder, decoder_rope, encoder_to_decoder, mask_token, head
 
 
+class PhasorFeatures(nn.Module):
+    """Sine and cosine of every decoder token's time at the encoder's OWN
+    period estimate (the soft peak of the spectral layer's reader over its
+    frequency bins) and ``harmonics`` multiples of it, through a linear map
+    that starts at zero (so a warm-started decoder is unchanged at step 0).
+    Gives the decoder the phase of every hidden or query token as a lookup
+    instead of modular arithmetic it would have to invent; the loss flows
+    back into the period estimate. Nothing outside the observations enters
+    (label-free at inference)."""
+
+    def __init__(self, harmonics: int, d_model: int):
+        super().__init__()
+        self.harmonics = int(harmonics)
+        self.proj = nn.Linear(2 * self.harmonics, d_model)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+        self.last_freq: torch.Tensor | None = None
+
+    def frequency(self, spectral) -> torch.Tensor:
+        """``[B]`` cycles per day from the spectral layer's last logits (soft
+        bin position, differentiable)."""
+        logits = spectral.last_logits
+        if logits is None:
+            raise RuntimeError("the spectral layer has not run yet")
+        p = torch.softmax(logits.float(), -1)
+        coord = (p * torch.arange(p.shape[-1], device=p.device, dtype=torch.float32)).sum(-1)
+        return torch.exp(spectral.log_f0 + spectral.step * coord)
+
+    def forward(self, x: torch.Tensor, t_days: torch.Tensor, spectral) -> torch.Tensor:
+        """``x [B, L, d]`` + the features of ``t_days [B, L]``."""
+        f = self.frequency(spectral)
+        self.last_freq = f.detach()
+        k = torch.arange(1, self.harmonics + 1, device=x.device, dtype=torch.float32)
+        ph = (2 * math.pi) * t_days.float()[..., None] * f[:, None, None] * k  # [B, L, H]
+        feats = torch.cat([torch.cos(ph), torch.sin(ph)], -1)
+        return x + self.proj(feats).to(x.dtype)
+
+
 def _mae_forward(
     encoder: RoMAEBase,
     parts,
@@ -507,6 +547,11 @@ def _mae_forward(
     x = torch.cat([x, parts.mask_token.expand(b, k, -1).to(x.dtype)], dim=1)
     pos = torch.cat([v_pos, m_pos], dim=2)
     pad = torch.cat([v_pad, m_pad], dim=1)
+    phasor = getattr(parts, "phasor", None)
+    if phasor is not None:
+        if getattr(encoder, "spectral", None) is None:
+            raise RuntimeError("phasor features need the encoder's spectral layer")
+        x = phasor(x, (pos[:, 0].float() - 1.0) * encoder.spectral.time_scale, encoder.spectral)
     x = parts.decoder(x, parts.decoder_rope.prepare(pos), attention_mask(pad))
     pred = parts.head(x[:, -k:])
 
@@ -542,6 +587,7 @@ class RoMAEForPreTraining(RoMAEBase):
         decoder: str | dict | TransformerConfig = "tiny-shallow",
         mask_ratio: float = 0.5,
         target_channels: int = 1,
+        phasor: int = 0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -556,6 +602,10 @@ class RoMAEForPreTraining(RoMAEBase):
             self.mask_token,
             self.head,
         ) = _mae_head(self.cfg, self.rope_layout, self.dec_cfg, target_channels)
+        # decoder tokens carry the phase at the encoder's own period estimate (see PhasorFeatures)
+        if phasor and self.spectral is None:
+            raise ValueError("phasor features need the spectral layer")
+        self.phasor = PhasorFeatures(phasor, self.dec_cfg.d_model) if phasor else None
 
     def _decoder_layout(self) -> list[dict]:
         """The encoder's layout rescaled to the decoder head dimension, see

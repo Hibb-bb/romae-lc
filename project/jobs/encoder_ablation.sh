@@ -110,6 +110,12 @@ for v in ${@:-block mix range both}; do
         longspecwtpl2) run_long longspecwtpl2 --size wide --spectral --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --target template --template-fit record --template-periods project/results/period_table_spec/periods.csv --query-extra 128 --query-delta 0.5 30 ;;   # whole-record templates on the table's periods
         jepainit)  run jepainit single --size wide --spectral --jepa --jepa-proj 32 --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --jepa-init project/runs/maew_spec/mae.pt ;;
         jepahyb)   run jepahyb single --size wide --spectral --jepa --jepa-proj 32 --mask-mode blockplus --mask-ratio 0.5 --mask-block-share 0.5 --jepa-recon-weight 0.5 ;;
+        # the cycle curriculum (docs/PLAN.md items A-D): warm start from the 250-day wide spectral MAE (its aux loss kept),
+        # whole-record templates on the table's periods, 128 queries per window drawn in CYCLES of the star's period
+        # (log-uniform 0.1..cap, cap ramped 5 -> 300 over 60 % of the steps, a fifth at random times), random masks;
+        # cycph adds the phasor features at the model's own spectral-peak period on every decoder token
+        cyc)   run cyc single --size wide --spectral --spectral-aux 0.5 --init project/runs/maew_spec/mae.pt --target template --template-fit record --template-periods project/results/period_table_spec/periods.csv --query-extra 128 --query-cycles 5 300 --query-random-share 0.2 ;;
+        cycph) run cycph single --size wide --spectral --spectral-aux 0.5 --init project/runs/maew_spec/mae.pt --target template --template-fit record --template-periods project/results/period_table_spec/periods.csv --query-extra 128 --query-cycles 5 300 --query-random-share 0.2 --phasor 4 ;;
         long)  run_long long ;;
         hidden)   run_long hidden --mask-mode blockplus --mask-ratio 0.25 --mask-block-share 0.5 ;;
         hiddensp) run_long hiddensp --mask-mode blockplus --mask-ratio 0.25 --mask-block-share 0.5 --spectral --spectral-aux 0.5 ;;

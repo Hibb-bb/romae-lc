@@ -38,20 +38,20 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
   of the queries at random times in the window, so the query layout does not reveal the period
   (the shortcut to guard against: the largest offset in a window would otherwise be about cap
   times the period). The day-based `--query-delta` stays as a flag but is no longer the plan.
-  Status: alive, to build.
+  Status: built 2026-10-09 (`--query-cycles`, `--query-cycles-min`, `--query-random-share`; `templates.sample_queries_cycles`).
 - **B. Warm start for the masked autoencoder.** `--init project/runs/maew_spec/mae.pt`: start
   from the encoder that already knows the period, keep its spectral auxiliary loss (weight 0.5)
-  so the period is not forgotten while the cap is low. Status: alive, to build.
+  so the period is not forgotten while the cap is low. Status: built 2026-10-09 (`--init`, `common.warm_start`).
 - **C. Phasor features at the model's own period.** The spectral layer's soft peak gives a
   period estimate from the observations alone; every hidden and query token gets sine and
   cosine of its time at that frequency and a few harmonics, so "copy the right phase point" is
   a lookup rather than modular arithmetic the decoder has to invent. Label-free at inference.
-  Status: alive, to build.
+  Status: built 2026-10-09 (`--phasor H`, `romae_lc.model.PhasorFeatures`, zero-initialised map; the checkpoint carries it).
 - **D. The experiment.** 250-day setting (where the encoder works), warm start + cycle
   queries, with and without the phasor features; the period probe at every eval shows whether
   the period is kept and sharpened; the explained variance of the template against the
   distance in cycles (the replay of 2026-10-09) is the learning curve to watch.
-  Status: alive, to run after A to C.
+  Status: submitted 2026-10-09 evening on ghx4 as `cyc` (job 3351435, probe 3351436) and `cycph` (job 3351437, probe 3351438): random masks, cap 5 -> 300 cycles, 50k steps; results in `project/results/period_enc_cyc[ph]`, training logs in `project/runs/enc_cyc[ph]/log.jsonl` (`query_cap_cycles` per eval).
 - **E. Fall back to the observations where the template is poor.** Rotators and long-period
   variables are only roughly periodic; a fixed wave is a bad target for them (the model
   explains only 0.2 of their targets even within half a cycle). Use the template's R2 as the
@@ -70,8 +70,8 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
 | maespec50 | 250-day wide spectral MAE at 50k with the block-plus mask, the control for the JEPA runs | alive |
 | jepainit, jepahyb | token JEPA warm-started from maew_spec; JEPA plus a reconstruction head | alive (the JEPA comparison the PIs asked for) |
 | gruode | the collaborators' GRU-ODE encoder in our pipeline, same objective and probes | alive |
-| jepaclean, jepacleanshort | denoising JEPA with template targets, queries in days (30 d and 2 d) | superseded in design by A to C; user decides whether to keep or cancel |
-| longspecwtpl2 | whole-curve template run on the table's periods, queries in days | superseded by A to C and parked by G; user decides |
+| cyc, cycph | the cycle curriculum pair (item D) | alive, submitted 2026-10-09 |
+| jepaclean, jepacleanshort, longspecwtpl2 | template runs with queries in days | cancelled 2026-10-09 (superseded by A to C) |
 
 ## Other open items
 

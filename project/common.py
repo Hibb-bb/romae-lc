@@ -987,6 +987,19 @@ def wm_state(
     )
 
 
+def warm_start(model, ckpt: dict, skip_prefixes: Sequence[str] = ()) -> dict:
+    """Copy every tensor of ``ckpt["state_dict"]`` whose name and shape match
+    ``model``'s, leave the rest as initialised, and return the counts
+    (``copied``, ``left``, ``left_names``). ``skip_prefixes`` are names not
+    to copy (e.g. a head of another width)."""
+    sd = ckpt["state_dict"]
+    own = model.state_dict()
+    picked = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape and not any(k.startswith(p) for p in skip_prefixes)}
+    left = [k for k in own if k not in picked]
+    model.load_state_dict(picked, strict=False)
+    return dict(copied=len(picked), left=len(left), left_names=left)
+
+
 def mae_state(
     model: RoMAEForPreTraining, spec, cfg, ladder, classes, args, step, metrics=None
 ):
@@ -1001,6 +1014,7 @@ def mae_state(
             decoder=asdict(model.dec_cfg),
             mask_ratio=model.mask_ratio,
             target_channels=model.target_channels,
+            phasor=0 if getattr(model, "phasor", None) is None else model.phasor.harmonics,
         ),
         spec=spec.to_dict(),
         frames=asdict(cfg),

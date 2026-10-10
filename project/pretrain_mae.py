@@ -225,6 +225,14 @@ def add_train_args(parser) -> None:
     g.add_argument("--query-delta", type=float, nargs=2, default=[0.5, 30.0], metavar=("START", "END"),
                    help="days around a random real token the queries are drawn from, ramped linearly from START to END over --query-ramp of the steps")
     g.add_argument("--query-ramp", type=float, default=0.6, help="share of the steps over which the query distance ramps")
+    g.add_argument("--query-cycles", type=float, nargs=2, default=None, metavar=("START", "END"),
+                   help="draw the query distance in CYCLES of the star's template period instead of days: log-uniform between "
+                        "--query-cycles-min and a cap that ramps geometrically from START to END over --query-ramp of the steps "
+                        "(needs --template-fit record)")
+    g.add_argument("--query-cycles-min", type=float, default=0.1, help="the smallest query distance in cycles")
+    g.add_argument("--query-random-share", type=float, default=0.2, help="share of the queries at uniform random times in the window (so their layout does not reveal the period)")
+    g.add_argument("--phasor", type=int, default=0, help="decoder tokens get sine/cosine features of their time at the spectral layer's own peak frequency and this many harmonics (0 = off; needs --spectral)")
+    g.add_argument("--init", default=None, help="warm start the autoencoder from this mae.pt (every tensor whose name and shape match; a fresh optimiser)")
     g.add_argument("--encoder", choices=["transformer", "gruode"], default="transformer",
                    help="gruode: the collaborators' GRU-ODE encoder (project.gruode) in place of the transformer, everything else the same")
     g.add_argument("--rnn-band", choices=["centre", "percentiles"], default="centre", help="gruode: the band as its central wavelength or its 10/50/90 %% filter wavelengths")
@@ -475,7 +483,18 @@ def main(argv=None):
             spectral=dict(time_scale=ladder.time_scale, p_min=args.spectral_p[0], p_max=args.spectral_p[1], rel=args.spectral_rel,
                           channels=args.spectral_channels, reader=args.spectral_reader, depth=args.spectral_depth,
                           after_layer=args.spectral_after) if args.spectral else None,  # fmt: skip
+            phasor=args.phasor,
         )
+        if args.init:
+            from project.common import warm_start
+
+            w = warm_start(model, torch.load(args.init, map_location="cpu", weights_only=False))
+            print(f"warm start from {args.init}: {w['copied']} tensors copied, {w['left']} left as initialised"
+                  f"{' (' + ', '.join(w['left_names'][:6]) + ('...' if w['left'] > 6 else '') + ')' if w['left'] else ''}", flush=True)
+    if args.phasor and not args.spectral:
+        parser.error("--phasor needs --spectral")
+    if args.query_cycles and args.template_fit != "record":
+        parser.error("--query-cycles needs --template-fit record (the template period of every star)")
     model = model.to(dev)
     encoder = FrameEncoder(PooledEncoder(model))
     sizes = dict(
@@ -608,17 +627,27 @@ def main(argv=None):
                 from romae_lc.model import gen_mask
 
                 frac = min(step_now / max(args.query_ramp * args.steps, 1), 1.0)
-                delta = args.query_delta[0] + (args.query_delta[1] - args.query_delta[0]) * frac
                 if mask is None:
                     mask = gen_mask(args.mask_ratio, pad)
-                t_q, band_q = sample_queries(positions, pad, last["band"], args.query_extra, delta, spec.tokenize["time_scale"])
+                if args.query_cycles and use_record:
+                    from project.templates import sample_queries_cycles
+
+                    lo_c, hi_c = args.query_cycles
+                    cap = lo_c * (hi_c / lo_c) ** frac  # geometric ramp of the cap, in cycles
+                    t_q, band_q = sample_queries_cycles(positions, pad, last["band"], args.query_extra, record_templates.period[index_rows.to(record_templates.period.device)],
+                                                        args.query_cycles_min, cap, spec.tokenize["time_scale"], args.query_random_share)  # fmt: skip
+                    delta = cap
+                    aux_stats.setdefault("query_cap_cycles", []).append(float(cap))
+                else:
+                    delta = args.query_delta[0] + (args.query_delta[1] - args.query_delta[0]) * frac
+                    t_q, band_q = sample_queries(positions, pad, last["band"], args.query_extra, delta, spec.tokenize["time_scale"])
+                    aux_stats.setdefault("query_delta_days", []).append(float(delta))
                 if use_record:
                     t_abs_q = start_rows.to(t_q.device)[:, None].double() + t_q.double()
                     target_q = bounded(record_templates.eval(index_rows, t_abs_q, band_q), last["y"], last["real"])
                 else:
                     target_q = bounded(template_eval(last["beta"], last["period"], t_q, band_q, args.template_harmonics), last["y"], last["real"])
                 values, positions, pad, mask, target_values, weight = augment_with_queries(values, positions, pad, mask, target_values, weight, t_q, band_q, target_q, spec)
-                aux_stats.setdefault("query_delta_days", []).append(float(delta))
         out = model(values, positions, pad, mask, weight, target_values=target_values)
         loss = out.loss
         if aux and periods_rows is not None:
