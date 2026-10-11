@@ -61,8 +61,10 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
   size; variants plain / phasor at the model's own frequency / oracle phasor at the true frequency, plus regular
   sampling, a second harmonic, noise, and no label in the spectral auxiliary loss. Answers two questions:
   how far in cycles the decoder can predict, and the shortest period the model recovers (with the peak width
-  in grid steps next to it). Status: queued on the interactive chain right after the cyc probe; results in
-  `project/results/sine_test/<variant>/`.
+  in grid steps next to it). Status: first pass done 2026-10-11 (plain = copier, 0 beyond 2 cycles with the frequency found; phasor at the model's
+  own frequency = 0.86 at 30 to 100 cycles and 0.64 at 100 to 300, every period from 0.12 d; the limit at both ends is the
+  grid step; the transition to using the feature was late or missing in 4 of 5 phasor runs with a zero-start map ->
+  map now starts small, 10k-step rerun queued as `sine_test10k`).
 - **I. Short periods and the grid.** Model alone within 10 %: 0.82 to 0.87 for 0.2 to 0.5 d, 0.11 to 0.28
   below 0.2 d (46 stars; the misses are not aliases). Peak width below one grid step under 0.125 d, and only
   200 delta Scuti in training. Fix: `--spectral-rel 2e-4` (twice the cost) and the 800k set. Status: parked.
