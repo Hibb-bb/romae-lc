@@ -56,6 +56,16 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
   variables are only roughly periodic; a fixed wave is a bad target for them (the model
   explains only 0.2 of their targets even within half a cycle). Use the template's R2 as the
   gate (`--target mix --template-min-r2`), not the model's error. Status: alive, to decide.
+- **H. The sine test (2026-10-11).** `project/sine_test.py` + `jobs/sine_test.sh`: clean sinusoids (random or
+  regular sampling, log-uniform periods 0.05 to 50 d), the same encoder, block masking and decoder at a small
+  size; variants plain / phasor at the model's own frequency / oracle phasor at the true frequency, plus regular
+  sampling, a second harmonic, noise, and no label in the spectral auxiliary loss. Answers two questions:
+  how far in cycles the decoder can predict, and the shortest period the model recovers (with the peak width
+  in grid steps next to it). Status: queued on the interactive chain right after the cyc probe; results in
+  `project/results/sine_test/<variant>/`.
+- **I. Short periods and the grid.** Model alone within 10 %: 0.82 to 0.87 for 0.2 to 0.5 d, 0.11 to 0.28
+  below 0.2 d (46 stars; the misses are not aliases). Peak width below one grid step under 0.125 d, and only
+  200 delta Scuti in training. Fix: `--spectral-rel 2e-4` (twice the cost) and the 800k set. Status: parked.
 - **F. Artifact to-do.** Push the search budget below 772 trials per star (narrower windows,
   coarser grid) to find where model + fine search breaks. Status: alive, not started.
 - **G. Whole-curve windows.** The 2,000-day window loses the period even with observed targets
