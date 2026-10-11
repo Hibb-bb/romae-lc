@@ -19,7 +19,8 @@ set -uo pipefail
 export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1
 source .venv/bin/activate
 STEPS=${STEPS:-3000}
-run() { local name=$1; shift; echo "#### $name: $*"; [ -f "project/results/sine_test/$name/results.json" ] || python -m project.sine_test --device cuda --steps "$STEPS" --out "project/results/sine_test/$name" "$@"; }
+ROOT=${ROOT:-project/results/sine_test}   # e.g. ROOT=project/results/sine_test10k STEPS=10000
+run() { local name=$1; shift; echo "#### $name: $*"; [ -f "$ROOT/$name/results.json" ] || python -m project.sine_test --device cuda --steps "$STEPS" --out "$ROOT/$name" "$@"; }
 run plain          --variant plain
 run phasor         --variant phasor
 run oracle         --variant oracle

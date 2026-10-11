@@ -55,10 +55,10 @@ def test_phasor_features_run_and_train_the_period_estimate():
     out = model(values, positions, pad, mask)
     assert torch.isfinite(out.loss)
     assert model.phasor.last_freq.shape == (3,) and (model.phasor.last_freq > 0).all()
-    # at step 0 the zero-initialised map leaves the decoder unchanged ...
+    # the map starts small: the decoder's output is close to the plain model's ...
     plain = _spectral_model(0)
     plain.load_state_dict({k: v for k, v in model.state_dict().items() if not k.startswith("phasor.")})
-    assert torch.allclose(plain(values, positions, pad, mask).loss, out.loss, atol=1e-6)
+    assert abs(float(plain(values, positions, pad, mask).loss) - float(out.loss)) < 0.2 * float(out.loss)
     # ... and the loss reaches the map and, through it, the spectral reader (the period estimate)
     out.loss.backward()
     assert model.phasor.proj.weight.grad.abs().sum() > 0

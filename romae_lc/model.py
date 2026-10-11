@@ -462,7 +462,7 @@ class PhasorFeatures(nn.Module):
     """Sine and cosine of every decoder token's time at the encoder's OWN
     period estimate (the soft peak of the spectral layer's reader over its
     frequency bins) and ``harmonics`` multiples of it, through a linear map
-    that starts at zero (so a warm-started decoder is unchanged at step 0).
+    with a small random start.
     Gives the decoder the phase of every hidden or query token as a lookup
     instead of modular arithmetic it would have to invent; the loss flows
     back into the period estimate. Nothing outside the observations enters
@@ -472,7 +472,9 @@ class PhasorFeatures(nn.Module):
         super().__init__()
         self.harmonics = int(harmonics)
         self.proj = nn.Linear(2 * self.harmonics, d_model)
-        nn.init.zeros_(self.proj.weight)
+        # a small random start, not zero: with a zero map the decoder has to grow the map and learn to compare
+        # the features at the same time, and in the sine test that transition came late or not at all
+        nn.init.trunc_normal_(self.proj.weight, std=0.02)
         nn.init.zeros_(self.proj.bias)
         self.last_freq: torch.Tensor | None = None
         self.override: torch.Tensor | None = None  # ``[B]`` frequencies to use instead of the estimate (tests: the true one)
