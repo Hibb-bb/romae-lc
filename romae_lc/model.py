@@ -475,10 +475,13 @@ class PhasorFeatures(nn.Module):
         nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
         self.last_freq: torch.Tensor | None = None
+        self.override: torch.Tensor | None = None  # ``[B]`` frequencies to use instead of the estimate (tests: the true one)
 
     def frequency(self, spectral) -> torch.Tensor:
         """``[B]`` cycles per day from the spectral layer's last logits (soft
-        bin position, differentiable)."""
+        bin position, differentiable), or ``override`` when set."""
+        if self.override is not None:
+            return self.override.float()
         logits = spectral.last_logits
         if logits is None:
             raise RuntimeError("the spectral layer has not run yet")
