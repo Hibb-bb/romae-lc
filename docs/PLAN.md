@@ -47,11 +47,16 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
   cosine of its time at that frequency and a few harmonics, so "copy the right phase point" is
   a lookup rather than modular arithmetic the decoder has to invent. Label-free at inference.
   Status: built 2026-10-09 (`--phasor H`, `romae_lc.model.PhasorFeatures`, zero-initialised map; the checkpoint carries it).
+- **C2. The phase rope (2026-10-12).** cycph came out identical to cyc: its phasor map was pulled to zero by weight
+  decay before the decoder found a use for it. Two fixes: the map now has no weight decay and a settable start
+  (`--phasor-init`), and the stronger mechanism `--phase-rope H` puts the phase in cycles at the encoder's own
+  frequency on a rotary axis of the decoder, so same-phase tokens line up in attention with nothing to learn.
+  Both are being compared on the sine test (`sine_test10k_rope`) before a real-data run.
 - **D. The experiment.** 250-day setting (where the encoder works), warm start + cycle
   queries, with and without the phasor features; the period probe at every eval shows whether
   the period is kept and sharpened; the explained variance of the template against the
   distance in cycles (the replay of 2026-10-09) is the learning curve to watch.
-  Status: submitted 2026-10-09 evening on ghx4 as `cyc` (job 3351435, probe 3351436) and `cycph` (job 3351437, probe 3351438): random masks, cap 5 -> 300 cycles, 50k steps; results in `project/results/period_enc_cyc[ph]`, training logs in `project/runs/enc_cyc[ph]/log.jsonl` (`query_cap_cycles` per eval).
+  Status: cyc done (reach ~20 cycles on real stars, probe 0.808/0.733); cycph done but inert (see C2); next real-data run = the winner of the sine comparison. Originally submitted 2026-10-09 evening on ghx4 as `cyc` (job 3351435, probe 3351436) and `cycph` (job 3351437, probe 3351438): random masks, cap 5 -> 300 cycles, 50k steps; results in `project/results/period_enc_cyc[ph]`, training logs in `project/runs/enc_cyc[ph]/log.jsonl` (`query_cap_cycles` per eval).
 - **E. Fall back to the observations where the template is poor.** Rotators and long-period
   variables are only roughly periodic; a fixed wave is a bad target for them (the model
   explains only 0.2 of their targets even within half a cycle). Use the template's R2 as the
