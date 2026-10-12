@@ -464,8 +464,8 @@ class PhasorFeatures(nn.Module):
     frequency bins) and ``harmonics`` multiples of it, through a linear map
     with a small random start.
     Gives the decoder the phase of every hidden or query token as a lookup
-    instead of modular arithmetic it would have to invent; the loss flows
-    back into the period estimate. Nothing outside the observations enters
+    instead of modular arithmetic it would have to invent. The estimate is
+    detached (see ``frequency``). Nothing outside the observations enters
     (label-free at inference)."""
 
     def __init__(self, harmonics: int, d_model: int):
@@ -487,7 +487,10 @@ class PhasorFeatures(nn.Module):
         logits = spectral.last_logits
         if logits is None:
             raise RuntimeError("the spectral layer has not run yet")
-        p = torch.softmax(logits.float(), -1)
+        # no gradient into the estimate through the features: d(cos 2 pi f t k)/df grows with t x k (thousands over a
+        # 250-day window), and in the sine test that gradient collapsed the decoder to a constant output while the
+        # oracle (a detached true frequency) was perfect; the spectral peak is trained by its own auxiliary loss
+        p = torch.softmax(logits.detach().float(), -1)
         coord = (p * torch.arange(p.shape[-1], device=p.device, dtype=torch.float32)).sum(-1)
         return torch.exp(spectral.log_f0 + spectral.step * coord)
 
