@@ -108,6 +108,10 @@ class GRUODEForPreTraining(RoMAEForPreTraining):
         t = (positions[:, 0, 1:].float() - 1.0) * self.rnn_cfg["time_scale"] / self.rnn_cfg["time_unit"]
         with torch.autocast(device_type=x.device.type, enabled=False):
             outputs, h = self.rnn(feats.float(), t.float(), real, reverse=True)
+        # their forward walks the tokens from the last to the first and stacks the states in that order without
+        # flipping them back, so flip here: token i's feature is the state right after it was consumed (the
+        # run of 2026-10-12 before this fix fed the decoder the states in reverse order, padding first)
+        outputs = outputs.flip(1)
         return torch.cat([h[:, None], outputs], 1).to(x.dtype if x.is_floating_point() else torch.float32)
 
     @property
