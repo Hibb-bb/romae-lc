@@ -81,7 +81,7 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
 |---|---|---|
 | maespec50 | 250-day wide spectral MAE at 50k with the block-plus mask, the control for the JEPA runs | alive |
 | jepainit, jepahyb | token JEPA warm-started from maew_spec; JEPA plus a reconstruction head | alive (the JEPA comparison the PIs asked for) |
-| gruode | the collaborators' GRU-ODE encoder in our pipeline, same objective and probes | alive |
+| gruode | the collaborators' GRU-ODE encoder (RNNODEEncoderV2) in our pipeline, same objective and probes | alive; moved to the head of the interactive chain 2026-10-11 (user); its throughput benchmark (`project/eval/runtime.py --ckpt project/runs/enc_gruode/mae.pt --batch-sweep`) comes after the probe |
 | cyc, cycph | the cycle curriculum pair (item D) | alive, submitted 2026-10-09 |
 | jepaclean, jepacleanshort, longspecwtpl2 | template runs with queries in days | cancelled 2026-10-09 (superseded by A to C) |
 
