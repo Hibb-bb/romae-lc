@@ -105,7 +105,7 @@ def test_phase_rope_runs_and_the_oracle_frequency_changes_the_output():
     assert not torch.allclose(out.pred, out2.pred)
     model.phase_override = None
     out.loss.backward()
-    assert model.decoder.layers[0].attn.qkv.weight.grad is not None if hasattr(model.decoder, "layers") else True
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.decoder.parameters())
     # the checkpoint carries the setting
     from dataclasses import asdict
     state = dict(state_dict=model.state_dict(), backbone=dict(model.hparams, encoder=asdict(model.cfg)),
