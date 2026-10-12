@@ -20,7 +20,8 @@ export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1
 source .venv/bin/activate
 STEPS=${STEPS:-3000}
 ROOT=${ROOT:-project/results/sine_test}   # e.g. ROOT=project/results/sine_test10k STEPS=10000
-run() { local name=$1; shift; echo "#### $name: $*"; [ -f "$ROOT/$name/results.json" ] || python -m project.sine_test --device cuda --steps "$STEPS" --out "$ROOT/$name" "$@"; }
+ONLY=${ONLY:-}   # space-separated variant names to run (default: all)
+run() { local name=$1; shift; [ -n "$ONLY" ] && [[ " $ONLY " != *" $name "* ]] && return 0; echo "#### $name: $*"; [ -f "$ROOT/$name/results.json" ] || python -m project.sine_test --device cuda --steps "$STEPS" --out "$ROOT/$name" "$@"; }
 run plain          --variant plain
 run phasor         --variant phasor
 run oracle         --variant oracle
