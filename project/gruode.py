@@ -29,6 +29,16 @@ import torch.nn as nn
 
 from romae_lc.model import RoMAEForPreTraining
 
+# torch 2.14 routes some eager ops (bmm outer products, hit in the GRU cell's backward) to triton kernels; the
+# compute nodes cannot build triton's driver (no C compiler headers), which killed every GRU-ODE link in
+# 7 minutes. Keep the plain aten kernels for those ops.
+try:
+    from torch._native.registry import deregister_op_overrides as _dereg
+
+    _dereg(disable_dsl_names="triton")
+except Exception:  # older torch without the native registry
+    pass
+
 TFM_ROOT = os.environ.get("TFM_ROOT", "/projects/bfrf/hibb/Transient-Foundation-Model-1.1.1")
 
 #: approximate 10 / 50 / 90 % cumulative-throughput wavelengths of the ZTF filters, microns (published filter curves)
