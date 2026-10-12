@@ -87,3 +87,29 @@ def test_warm_start_copies_matching_tensors_only():
     assert w["copied"] == len(src.state_dict()) and all(k.startswith("phasor.") for k in w["left_names"])
     assert torch.equal(dst.transformer.state_dict()["layers.0.attn.qkv.weight"] if "layers.0.attn.qkv.weight" in dst.transformer.state_dict() else next(iter(dst.transformer.parameters())),
                        src.transformer.state_dict()["layers.0.attn.qkv.weight"] if "layers.0.attn.qkv.weight" in src.transformer.state_dict() else next(iter(src.transformer.parameters())))
+
+
+def test_phase_rope_runs_and_the_oracle_frequency_changes_the_output():
+    torch.manual_seed(0)
+    model = RoMAEForPreTraining(decoder=dict(d_model=48, nhead=2, depth=1), encoder=dict(d_model=16, nhead=2, depth=2),
+                                n_channels=2, target_channels=1, phase_rope=2,
+                                spectral=dict(time_scale=10.0, p_min=0.5, p_max=50.0, rel=0.05, channels=2, reader=8, depth=1, after_layer=1))
+    assert model.decoder_rope.n_axes == 3 and model.decoder_rope.dims[-1] == 4
+    positions, pad, band, t = _window()
+    values = torch.randn(3, 40, 2)
+    mask = gen_mask(0.5, pad, torch.Generator().manual_seed(2))
+    out = model(values, positions, pad, mask)
+    assert torch.isfinite(out.loss)
+    model.phase_override = torch.tensor([0.3, 0.5, 2.0])
+    out2 = model(values, positions, pad, mask)
+    assert not torch.allclose(out.pred, out2.pred)
+    model.phase_override = None
+    out.loss.backward()
+    assert model.decoder.layers[0].attn.qkv.weight.grad is not None if hasattr(model.decoder, "layers") else True
+    # the checkpoint carries the setting
+    from dataclasses import asdict
+    state = dict(state_dict=model.state_dict(), backbone=dict(model.hparams, encoder=asdict(model.cfg)),
+                 mae=dict(decoder=asdict(model.dec_cfg), mask_ratio=model.mask_ratio, target_channels=model.target_channels, phasor=0, phase_rope=2))
+    rebuilt = RoMAEForPreTraining(**state["mae"], **state["backbone"])
+    rebuilt.load_state_dict(state["state_dict"])
+    assert rebuilt.phase_rope == 2 and torch.allclose(rebuilt(values, positions, pad, mask).loss, out.loss, atol=1e-6)

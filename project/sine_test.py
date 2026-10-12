@@ -8,8 +8,11 @@ noise unless ``--noise``. The same encoder (with the spectral layer), the
 same block masking and the same decoder as the real runs, at a small size.
 Variants: ``plain`` (the decoder as it is), ``phasor`` (sine/cosine of time
 at the spectral layer's own frequency estimate on every decoder token,
-``--phasor`` harmonics), ``oracle`` (the same features at the TRUE frequency:
-the ceiling of what the decoder can do with the right coordinate).
+``--phasor`` harmonics; no weight decay on the map), ``oracle`` (the same
+features at the TRUE frequency: the ceiling of what the decoder can do with
+the right coordinate), ``phaserope`` (the phase at the estimated frequency as
+a rotary axis of the decoder, so same-phase tokens line up in attention with
+nothing to learn) and ``phaserope_oracle`` (the rope at the true frequency).
 
 The report (``results.json``, ``summary.png``) answers two questions on
 fresh samples: (1) explained variance of the hidden points by the distance
@@ -69,7 +72,16 @@ def build(a) -> RoMAEForPreTraining:
     spectral = dict(time_scale=1.0, p_min=a.p_range[0] / 2, p_max=a.p_range[1] * 2, rel=a.spectral_rel, channels=4, reader=16, depth=2, after_layer=min(2, a.depth))
     return RoMAEForPreTraining(decoder=dec, mask_ratio=a.mask_ratio, target_channels=1, encoder=enc, n_channels=2, n_axes=2,
                                rope=layout(head_dim, a.p_range[0] / 2, a.p_range[1] * 4), spectral=spectral,
-                               phasor=a.phasor if a.variant in ("phasor", "oracle") else 0)
+                               phasor=a.phasor if a.variant in ("phasor", "oracle") else 0, phasor_init=a.phasor_init,
+                               phase_rope=a.phasor if a.variant in ("phaserope", "phaserope_oracle") else 0)
+
+
+def set_override(model, a, period, dev):
+    """The oracle variants use the true frequency."""
+    f = (1.0 / period).to(dev) if a.variant in ("oracle", "phaserope_oracle") else None
+    if model.phasor is not None:
+        model.phasor.override = f
+    model.phase_override = f
 
 
 def mask_for(a, positions, generator):
@@ -89,8 +101,7 @@ def evaluate(a, model, dev, n_batches: int, seed: int) -> dict:
     for _ in range(n_batches):
         values, positions, period, t, y = sample(a.batch, a.n_points, a.window, a.p_range, a.sampling, a.shape, a.noise, g)
         mask, pad = mask_for(a, positions, g)
-        if a.variant == "oracle":
-            model.phasor.override = (1.0 / period).to(dev)
+        set_override(model, a, period, dev)
         out = model(values.to(dev), positions.to(dev), pad.to(dev), mask.to(dev))
         se = ((out.pred.float() - out.target.float()) ** 2)[..., 0].cpu()  # [B, k] in mask order
         tgt = out.target[..., 0].float().cpu()
@@ -107,8 +118,7 @@ def evaluate(a, model, dev, n_batches: int, seed: int) -> dict:
         f_peak = torch.exp(sp.log_f0 + sp.step * sp.last_logits.argmax(-1).float()).cpu()
         f_true = 1.0 / period
         rows["ferr_soft"].append((f_soft / f_true - 1).abs()); rows["ferr_peak"].append((f_peak / f_true - 1).abs()); rows["per_s"].append(period)
-    if a.variant == "oracle":
-        model.phasor.override = None
+    set_override(model, argparse.Namespace(variant="plain"), None, dev)
     R = {k: torch.cat(v) for k, v in rows.items()}
     cyc_edges = [0, 0.1, 0.5, 2, 5, 10, 30, 100, 300, 1e9]
     by_cycles = []
@@ -151,11 +161,12 @@ def plot(res: dict, path: Path, title: str):
     fig.suptitle(title); fig.tight_layout(); fig.savefig(path, dpi=120); plt.close(fig)
 
 
-def main(argv=None):
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--variant", choices=["plain", "phasor", "oracle"], default="plain")
-    ap.add_argument("--phasor", type=int, default=4)
+    ap.add_argument("--variant", choices=["plain", "phasor", "oracle", "phaserope", "phaserope_oracle"], default="plain")
+    ap.add_argument("--phasor", type=int, default=4, help="harmonics of the phasor features or of the phase rope")
+    ap.add_argument("--phasor-init", type=float, default=0.02)
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--n-points", type=int, default=256)
@@ -179,22 +190,27 @@ def main(argv=None):
     ap.add_argument("--eval-batches", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
-    a = ap.parse_args(argv)
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    a = parse_args(argv)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(a.seed)
     dev = torch.device(a.device)
     model = build(a).to(dev)
     n_par = sum(p.numel() for p in model.parameters())
     print(f"{a.variant}: {n_par / 1e6:.2f}M parameters, spectral grid {model.spectral.n_bins} bins, {a.sampling} sampling, periods {a.p_range}", flush=True)
-    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0.05)
+    ph = [p for n, p in model.named_parameters() if n.startswith("phasor.")]
+    rest = [p for n, p in model.named_parameters() if not n.startswith("phasor.")]
+    opt = torch.optim.AdamW([dict(params=rest), dict(params=ph, weight_decay=0.0)] if ph else rest, lr=a.lr, weight_decay=0.05)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, s / 100) * 0.5 * (1 + math.cos(math.pi * min(s / a.steps, 1.0))))
     g = torch.Generator().manual_seed(a.seed + 1)
     log, t0 = [], time.time()
     for step in range(1, a.steps + 1):
         values, positions, period, t, y = sample(a.batch, a.n_points, a.window, a.p_range, a.sampling, a.shape, a.noise, g)
         mask, pad = mask_for(a, positions, g)
-        if a.variant == "oracle":
-            model.phasor.override = (1.0 / period).to(dev)
+        set_override(model, a, period, dev)
         out_ = model(values.to(dev), positions.to(dev), pad.to(dev), mask.to(dev))
         loss = out_.loss
         if a.spectral_aux > 0:

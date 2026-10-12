@@ -1015,6 +1015,8 @@ def mae_state(
             mask_ratio=model.mask_ratio,
             target_channels=model.target_channels,
             phasor=0 if getattr(model, "phasor", None) is None else model.phasor.harmonics,
+            phase_rope=int(getattr(model, "phase_rope", 0)),
+            phasor_init=float(getattr(model, "phasor_init", 0.02)),
         ),
         spec=spec.to_dict(),
         frames=asdict(cfg),

@@ -232,6 +232,8 @@ def add_train_args(parser) -> None:
     g.add_argument("--query-cycles-min", type=float, default=0.1, help="the smallest query distance in cycles")
     g.add_argument("--query-random-share", type=float, default=0.2, help="share of the queries at uniform random times in the window (so their layout does not reveal the period)")
     g.add_argument("--phasor", type=int, default=0, help="decoder tokens get sine/cosine features of their time at the spectral layer's own peak frequency and this many harmonics (0 = off; needs --spectral)")
+    g.add_argument("--phasor-init", type=float, default=0.02, help="start scale of the phasor map")
+    g.add_argument("--phase-rope", type=int, default=0, help="the phase at the spectral layer's own frequency as a rotary axis of the decoder, this many harmonics (0 = off; needs --spectral)")
     g.add_argument("--init", default=None, help="warm start the autoencoder from this mae.pt (every tensor whose name and shape match; a fresh optimiser)")
     g.add_argument("--encoder", choices=["transformer", "gruode"], default="transformer",
                    help="gruode: the collaborators' GRU-ODE encoder (project.gruode) in place of the transformer, everything else the same")
@@ -484,6 +486,8 @@ def main(argv=None):
                           channels=args.spectral_channels, reader=args.spectral_reader, depth=args.spectral_depth,
                           after_layer=args.spectral_after) if args.spectral else None,  # fmt: skip
             phasor=args.phasor,
+            phase_rope=args.phase_rope,
+            phasor_init=args.phasor_init,
         )
         if args.init:
             from project.common import warm_start
@@ -491,8 +495,8 @@ def main(argv=None):
             w = warm_start(model, torch.load(args.init, map_location="cpu", weights_only=False))
             print(f"warm start from {args.init}: {w['copied']} tensors copied, {w['left']} left as initialised"
                   f"{' (' + ', '.join(w['left_names'][:6]) + ('...' if w['left'] > 6 else '') + ')' if w['left'] else ''}", flush=True)
-    if args.phasor and not args.spectral:
-        parser.error("--phasor needs --spectral")
+    if (args.phasor or args.phase_rope) and not args.spectral:
+        parser.error("--phasor and --phase-rope need --spectral")
     if args.query_cycles and args.template_fit != "record":
         parser.error("--query-cycles needs --template-fit record (the template period of every star)")
     model = model.to(dev)
@@ -658,7 +662,10 @@ def main(argv=None):
         f"params: encoder {sizes['params_encoder'] / 1e6:.2f}M, "
         f"total {sizes['params_total'] / 1e6:.2f}M"
     )
-    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad] + [p for m in aux_modules for p in m.parameters()], lr=args.lr, weight_decay=args.wd)
+    # the phasor map gets no weight decay: with nothing using it yet, decay shrank it to nothing (cycph, 2026-10-12)
+    ph = [p for n, p in model.named_parameters() if n.startswith("phasor.") and p.requires_grad]
+    rest = [p for n, p in model.named_parameters() if not n.startswith("phasor.") and p.requires_grad] + [p for m in aux_modules for p in m.parameters()]
+    opt = torch.optim.AdamW([dict(params=rest), dict(params=ph, weight_decay=0.0)] if ph else rest, lr=args.lr, weight_decay=args.wd)
     sched = LambdaLR(opt, cosine_schedule(args.steps, args.warmup))
     step, epoch, elapsed, last_metrics = 0, 0, 0.0, None
     if ckpt is not None:

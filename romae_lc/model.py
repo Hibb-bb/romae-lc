@@ -458,6 +458,38 @@ def _mae_head(enc_cfg: TransformerConfig, enc_layout, dec_cfg, target_channels: 
     return decoder, decoder_rope, encoder_to_decoder, mask_token, head
 
 
+def spectral_frequency(spectral, override: torch.Tensor | None = None) -> torch.Tensor:
+    """``[B]`` cycles per day: the soft peak of the spectral layer's last
+    logits (detached: see :class:`PhasorFeatures`), or ``override``."""
+    if override is not None:
+        return override.float()
+    logits = spectral.last_logits
+    if logits is None:
+        raise RuntimeError("the spectral layer has not run yet")
+    p = torch.softmax(logits.detach().float(), -1)
+    coord = (p * torch.arange(p.shape[-1], device=p.device, dtype=torch.float32)).sum(-1)
+    return torch.exp(spectral.log_f0 + spectral.step * coord)
+
+
+def phase_rope_layout(layout: list[dict], harmonics: int, axis: int) -> list[dict]:
+    """The decoder layout with ``2 * harmonics`` channels of the time block
+    given to a new axial block on position axis ``axis`` (the phase in
+    cycles at the encoder's own frequency estimate): angle ``2 pi k phase``
+    for ``k = 1..harmonics``, so tokens at the same phase of the star's
+    cycle line up in attention without anything to learn."""
+    out = [dict(b) for b in layout]
+    d = 2 * int(harmonics)
+    out[0]["dim"] -= d
+    if out[0]["dim"] < 4:
+        raise ValueError("the time block is too small for the phase rope")
+    if out[0].get("timescales") is not None:
+        ts = out[0]["timescales"]
+        if len(ts) > out[0]["dim"] // 2:
+            out[0]["timescales"] = rope_lib.resample_ladder(ts, out[0]["dim"] // 2)
+    out.append({"kind": "axial", "axes": [axis], "dim": d, "timescales": [1.0 / (2 * math.pi * k) for k in range(1, harmonics + 1)]})
+    return out
+
+
 class PhasorFeatures(nn.Module):
     """Sine and cosine of every decoder token's time at the encoder's OWN
     period estimate (the soft peak of the spectral layer's reader over its
@@ -468,31 +500,20 @@ class PhasorFeatures(nn.Module):
     detached (see ``frequency``). Nothing outside the observations enters
     (label-free at inference)."""
 
-    def __init__(self, harmonics: int, d_model: int):
+    def __init__(self, harmonics: int, d_model: int, init_std: float = 0.02):
         super().__init__()
         self.harmonics = int(harmonics)
         self.proj = nn.Linear(2 * self.harmonics, d_model)
         # a small random start, not zero: with a zero map the decoder has to grow the map and learn to compare
         # the features at the same time, and in the sine test that transition came late or not at all
-        nn.init.trunc_normal_(self.proj.weight, std=0.02)
+        nn.init.trunc_normal_(self.proj.weight, std=init_std)
         nn.init.zeros_(self.proj.bias)
         self.last_freq: torch.Tensor | None = None
         self.override: torch.Tensor | None = None  # ``[B]`` frequencies to use instead of the estimate (tests: the true one)
 
     def frequency(self, spectral) -> torch.Tensor:
-        """``[B]`` cycles per day from the spectral layer's last logits (soft
-        bin position, differentiable), or ``override`` when set."""
-        if self.override is not None:
-            return self.override.float()
-        logits = spectral.last_logits
-        if logits is None:
-            raise RuntimeError("the spectral layer has not run yet")
-        # no gradient into the estimate through the features: d(cos 2 pi f t k)/df grows with t x k (thousands over a
-        # 250-day window), and in the sine test that gradient collapsed the decoder to a constant output while the
-        # oracle (a detached true frequency) was perfect; the spectral peak is trained by its own auxiliary loss
-        p = torch.softmax(logits.detach().float(), -1)
-        coord = (p * torch.arange(p.shape[-1], device=p.device, dtype=torch.float32)).sum(-1)
-        return torch.exp(spectral.log_f0 + spectral.step * coord)
+        """``[B]`` cycles per day (see :func:`spectral_frequency`)."""
+        return spectral_frequency(spectral, self.override)
 
     def forward(self, x: torch.Tensor, t_days: torch.Tensor, spectral) -> torch.Tensor:
         """``x [B, L, d]`` + the features of ``t_days [B, L]``."""
@@ -560,6 +581,11 @@ def _mae_forward(
         if getattr(encoder, "spectral", None) is None:
             raise RuntimeError("phasor features need the encoder's spectral layer")
         x = phasor(x, (pos[:, 0].float() - 1.0) * encoder.spectral.time_scale, encoder.spectral)
+    if getattr(parts, "phase_rope", 0):
+        # the phase in cycles at the encoder's own frequency as one more position axis of the decoder's rotary encoding
+        f = spectral_frequency(encoder.spectral, getattr(parts, "phase_override", None))
+        t_days = (pos[:, 0].float() - 1.0) * encoder.spectral.time_scale
+        pos = torch.cat([pos, (f[:, None] * t_days)[:, None].to(pos.dtype)], 1)
     x = parts.decoder(x, parts.decoder_rope.prepare(pos), attention_mask(pad))
     pred = parts.head(x[:, -k:])
 
@@ -596,6 +622,8 @@ class RoMAEForPreTraining(RoMAEBase):
         mask_ratio: float = 0.5,
         target_channels: int = 1,
         phasor: int = 0,
+        phase_rope: int = 0,
+        phasor_init: float = 0.02,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -611,9 +639,14 @@ class RoMAEForPreTraining(RoMAEBase):
             self.head,
         ) = _mae_head(self.cfg, self.rope_layout, self.dec_cfg, target_channels)
         # decoder tokens carry the phase at the encoder's own period estimate (see PhasorFeatures)
-        if phasor and self.spectral is None:
-            raise ValueError("phasor features need the spectral layer")
-        self.phasor = PhasorFeatures(phasor, self.dec_cfg.d_model) if phasor else None
+        if (phasor or phase_rope) and self.spectral is None:
+            raise ValueError("phasor features and the phase rope need the spectral layer")
+        self.phasor = PhasorFeatures(phasor, self.dec_cfg.d_model, phasor_init) if phasor else None
+        self.phasor_init = float(phasor_init)
+        # the phase at the encoder's own frequency as a rotary axis of the decoder (see phase_rope_layout)
+        self.phase_rope, self.phase_override = int(phase_rope), None
+        if phase_rope:
+            self.decoder_rope = BlockRope(self.dec_cfg.head_dim, self.dec_cfg.nhead, phase_rope_layout(self._decoder_layout(), phase_rope, self.n_axes))
 
     def _decoder_layout(self) -> list[dict]:
         """The encoder's layout rescaled to the decoder head dimension, see

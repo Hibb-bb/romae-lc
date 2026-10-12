@@ -31,4 +31,11 @@ run phasor_shape   --variant phasor --shape 0.3
 run phasor_noise   --variant phasor --noise 0.2
 run plain_nolabel  --variant plain --spectral-aux 0
 run phasor_nolabel --variant phasor --spectral-aux 0
+# the phase as a rotary axis of the decoder (2026-10-12), against the phasor map without weight decay
+run phaserope          --variant phaserope
+run phaserope_oracle   --variant phaserope_oracle
+run phaserope_shape    --variant phaserope --shape 0.3
+run phaserope_noise    --variant phaserope --noise 0.2
+run phaserope_nolabel  --variant phaserope --spectral-aux 0
+run phasor_nowd        --variant phasor --phasor-init 0.1
 echo "all done"
