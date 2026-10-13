@@ -144,7 +144,7 @@ def rope(out: Path):
     dim(ax, 15.3, y - 1.0, "depends on the time gap t_i − t_j only")
     # notes, in two columns below the row
     ax.text(8.1, 2.35, "τ_1 … τ_21 is a log ladder of timescales. Every head of every layer\ngets its own band of the ladder: 756 distinct rungs over the model,\nperiods 0.022 d → 500 d. A rung of timescale τ turns once per lag 2π τ.", ha="left", va="top", fontsize=FS["note"], color=GREY)
-    ax.text(14.2, 2.35, "No absolute clock: the ladder spans lags from minutes to the\nfull window, so attention can match points any number of days\napart, and the same weights serve any window start.", ha="left", va="top", fontsize=FS["note"], color=GREY)
+    ax.text(8.1, 1.45, "No absolute clock: the ladder spans lags from minutes to the full window, so attention can match\npoints any number of days apart, and the same weights serve any window start.", ha="left", va="top", fontsize=FS["note"], color=GREY)
     # ladder sketch, bottom left
     xs = np.logspace(np.log10(0.022), np.log10(500), 36)
     for xv in xs:
@@ -155,7 +155,7 @@ def rope(out: Path):
         ax.text(xx, 0.8, lab, ha="center", va="top", fontsize=FS["note"] - 1, color=GREY)
     ax.text(3.85, 1.4, "the 36 head-ladders tile the period range (log axis)", ha="center", va="bottom", fontsize=FS["note"], color=GREY)
     ax.text(0.2, 6.35, "Continuous rotary positions (RoPE) on irregular times and bands", ha="left", va="top", fontsize=FS["big"], color=INK, fontweight="bold")
-    ax.text(8.1, 0.45, "no positional vector is added to the tokens: time enters only as a rotation of the query and key channels,\nso every attention score sees relative time at 756 fixed frequencies", ha="left", va="center", fontsize=FS["note"], color=GREY)
+    ax.text(8.1, 0.55, "No positional vector is added to the tokens: time enters only as a rotation of the query and key channels,\nso every attention score sees relative time at 756 fixed frequencies.", ha="left", va="center", fontsize=FS["note"], color=GREY)
     fig.savefig(out / "diagram_rope.png", dpi=150, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
