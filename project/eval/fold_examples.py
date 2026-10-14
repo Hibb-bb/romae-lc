@@ -64,7 +64,7 @@ def draw_row(axes, r, row, fs, cat_name="catalogue", extra=()):
         ax.set_xlabel("phase (shown twice)", fontsize=fs["label"], color=INK2)
 
 
-def chen_rows(chen_dir: str, n: int, seed: int, per_class: int = 2, min_points: int = 400):
+def chen_rows(chen_dir: str, n: int, seed: int, per_class: int = 2, min_points: int = 400, exclude=(), min_r2: float = 0.8):
     """Rows in the same shape as the report's list, from the finished Chen shards: the model's candidate
     period against Chen's listed period, where the model's fold is clean and Chen's is not."""
     rows = []
@@ -76,7 +76,9 @@ def chen_rows(chen_dir: str, n: int, seed: int, per_class: int = 2, min_points: 
                 continue
             if not (np.isfinite(r2m) and np.isfinite(r2c) and np.isfinite(pc) and pc > 0) or int(r["n_points"]) < min_points:
                 continue
-            if min_points and (r2m < 0.8 or r2m - r2c < 0.5 or pm > 100.0):  # beyond ~100 d a 6-harmonic wave fits almost any slow curve: no evidence
+            if r["sourceid"] in exclude:
+                continue
+            if min_points and (r2m < min_r2 or r2m - r2c < 0.5 or pm > 100.0):  # beyond ~100 d a 6-harmonic wave fits almost any slow curve: no evidence
                 continue
             rows.append(dict(ztf_id=r["sourceid"], shard=r["shard"], **{"class": r["class_chen"]}, verdict="catalogue imprecise" if r["kind"] == "same period, sharper" else "different period",
                              p_catalogue_d=pc, p_best_d=pm, best_over_catalogue=pm / pc, r2_catalogue=r2c, r2_best=r2m, gain=r2m - r2c, n_points=r["n_points"]))
@@ -118,11 +120,13 @@ def main(argv=None):
     ap.add_argument("--ls-budget", type=int, default=0, help="also run the collaborator's astropy multiband Lomb-Scargle at this many trials on each star and draw its fold as a middle column")
     ap.add_argument("--ls-p-min", type=float, default=0.02)
     ap.add_argument("--ids", nargs="*", default=None, help="draw exactly these star ids (Chen sourceids or ZTF ids) instead of a random draw")
+    ap.add_argument("--exclude", nargs="*", default=(), help="ids already shown elsewhere")
+    ap.add_argument("--min-r2", type=float, default=0.8, help="the model's fold must reach this")
     a = ap.parse_args(argv)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     fs = dict(title=14, label=13, tick=12)
     if a.chen:
-        rows = chen_rows(a.chen, a.n, a.seed) if not a.ids else chen_rows(a.chen, 10**6, a.seed, per_class=10**6, min_points=0)
+        rows = chen_rows(a.chen, a.n, a.seed, exclude=set(a.exclude), min_r2=a.min_r2) if not a.ids else chen_rows(a.chen, 10**6, a.seed, per_class=10**6, min_points=0)
         if a.ids:
             by = {r["ztf_id"]: r for r in rows}
             rows = [by[i] for i in a.ids if i in by]
