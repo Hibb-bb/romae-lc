@@ -49,10 +49,11 @@ def pick(rows, n, per_class=2, min_points=400, seed=0, min_gain=0.5):
     return out
 
 
-def draw_row(axes, r, row, fs, cat_name="catalogue"):
+def draw_row(axes, r, row, fs, cat_name="catalogue", extra=()):
+    """One row: the catalogue period, any ``extra`` (period, title, r2) panels, the model's period."""
     cat = (float(row["p_catalogue_d"]), f"{cat_name} period", float(row["r2_catalogue"]))
     mod = (float(row["p_best_d"]), "model period" + (f" ({float(row['best_over_catalogue']):.3g} × the {cat_name})" if row["verdict"] == "different period" else " (same, sharpened)"), float(row["r2_best"]))
-    for ax, (p, title, r2) in zip(axes, (cat, mod)):
+    for ax, (p, title, r2) in zip(axes, (cat, *extra, mod)):
         fold_panel(ax, r, p, title, r2, template=False)
         ax.set_title(f"{title}\nP = {p:.6g} d, fold R2 {r2:.2f}", fontsize=fs["title"], color=INK, loc="left")
         ax.tick_params(labelsize=fs["tick"])
@@ -75,7 +76,7 @@ def chen_rows(chen_dir: str, n: int, seed: int, per_class: int = 2, min_points: 
                 continue
             if not (np.isfinite(r2m) and np.isfinite(r2c) and np.isfinite(pc) and pc > 0) or int(r["n_points"]) < min_points:
                 continue
-            if r2m < 0.8 or r2m - r2c < 0.5 or pm > 100.0:  # beyond ~100 d a 6-harmonic wave fits almost any slow curve: no evidence
+            if min_points and (r2m < 0.8 or r2m - r2c < 0.5 or pm > 100.0):  # beyond ~100 d a 6-harmonic wave fits almost any slow curve: no evidence
                 continue
             rows.append(dict(ztf_id=r["sourceid"], shard=r["shard"], **{"class": r["class_chen"]}, verdict="catalogue imprecise" if r["kind"] == "same period, sharper" else "different period",
                              p_catalogue_d=pc, p_best_d=pm, best_over_catalogue=pm / pc, r2_catalogue=r2c, r2_best=r2m, gain=r2m - r2c, n_points=r["n_points"]))
@@ -114,11 +115,17 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--chen", default=None, help="a period_chen results folder: draw Chen-set stars instead (model against Chen's listed period)")
     ap.add_argument("--chen-root", default="/work/hdd/bfrf/hibb/chen20_ztf_dr24")
+    ap.add_argument("--ls-budget", type=int, default=0, help="also run the collaborator's astropy multiband Lomb-Scargle at this many trials on each star and draw its fold as a middle column")
+    ap.add_argument("--ls-p-min", type=float, default=0.02)
+    ap.add_argument("--ids", nargs="*", default=None, help="draw exactly these star ids (Chen sourceids or ZTF ids) instead of a random draw")
     a = ap.parse_args(argv)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     fs = dict(title=14, label=13, tick=12)
     if a.chen:
-        rows = chen_rows(a.chen, a.n, a.seed)
+        rows = chen_rows(a.chen, a.n, a.seed) if not a.ids else chen_rows(a.chen, 10**6, a.seed, per_class=10**6, min_points=0)
+        if a.ids:
+            by = {r["ztf_id"]: r for r in rows}
+            rows = [by[i] for i in a.ids if i in by]
         recs = chen_records(rows, a.chen_root)
         get, cat_name = (lambda row: recs[row["ztf_id"]]), "Chen"
     else:
@@ -126,16 +133,28 @@ def main(argv=None):
         _, meta = load_encoder(a.ckpt, "cpu")
         val = load_data(data_args_from(meta.args), splits=("validation",))["validation"]
         get, cat_name = (lambda row: val[int(row["val_index"])]), "catalogue"
-    fig, axes = plt.subplots(len(rows), 2, figsize=(12, 3.6 * len(rows)), dpi=140, squeeze=False)
+    ncol = 3 if a.ls_budget else 2
+    fig, axes = plt.subplots(len(rows), ncol, figsize=(6 * ncol, 3.6 * len(rows)), dpi=140, squeeze=False)
     fig.patch.set_facecolor(SURFACE)
     for ax_row, row in zip(axes, rows):
         r = get(row)
-        draw_row(ax_row, r, row, fs, cat_name)
-        f2, ax2 = plt.subplots(1, 2, figsize=(12, 4.2), dpi=140)
+        extra = ()
+        if a.ls_budget:
+            from project import fold
+            from project.eval.ls_benchmark import astropy_search, star_inputs
+
+            p_ls, _ = astropy_search(r, a.ls_budget, True, a.ls_p_min)
+            t, y, err, band, _ = star_inputs(r)
+            r2_ls = fold.fold_r2(t, y, err, band, p_ls, 6) if np.isfinite(p_ls) else float("nan")
+            extra = ((p_ls, f"Lomb-Scargle on today's data, {a.ls_budget // 1000}k trials ({p_ls / float(row['p_catalogue_d']):.3g} × the {cat_name})", r2_ls),)
+            row["p_ls_d"], row["r2_ls"] = p_ls, r2_ls
+        draw_row(ax_row, r, row, fs, cat_name, extra)
+        f2, ax2 = plt.subplots(1, ncol, figsize=(6 * ncol, 4.2), dpi=140)
         f2.patch.set_facecolor(SURFACE)
-        draw_row(ax2, r, row, fs, cat_name)
+        draw_row(ax2, r, row, fs, cat_name, extra)
         f2.tight_layout(); f2.savefig(out / f"fold_{row['class'].replace('/', '-')}_{row['ztf_id']}.png", facecolor=SURFACE); plt.close(f2)
-        print(f"{row['class']:10s} {row['ztf_id']}  verdict {row['verdict']:20s} catalogue {float(row['p_catalogue_d']):.5g} d (R2 {float(row['r2_catalogue']):.2f}) -> model {float(row['p_best_d']):.5g} d (R2 {float(row['r2_best']):.2f}), {row['n_points']} points")
+        ls_txt = f" | LS {row['p_ls_d']:.5g} d (R2 {row['r2_ls']:.2f})" if "p_ls_d" in row else ""
+        print(f"{row['class']:10s} {row['ztf_id']}  verdict {row['verdict']:20s} catalogue {float(row['p_catalogue_d']):.5g} d (R2 {float(row['r2_catalogue']):.2f}){ls_txt} -> model {float(row['p_best_d']):.5g} d (R2 {float(row['r2_best']):.2f}), {row['n_points']} points")
     fig.suptitle(f"Stars where the model's period folds the light curve more cleanly than the {cat_name}{'' if cat_name == 'Chen' else chr(39) + 's'} period", fontsize=fs["title"] + 2, color=INK, x=0.01, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.985))
     fig.savefig(out / "folds_all.png", facecolor=SURFACE)

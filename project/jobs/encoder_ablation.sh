@@ -115,6 +115,7 @@ for v in ${@:-block mix range both}; do
         # (log-uniform 0.1..cap, cap ramped 5 -> 300 over 60 % of the steps, a fifth at random times), random masks;
         # cycph adds the phasor features at the model's own spectral-peak period on every decoder token
         cyc)   run cyc single --size wide --spectral --spectral-aux 0.5 --init project/runs/maew_spec/mae.pt --target template --template-fit record --template-periods project/results/period_table_spec/periods.csv --query-extra 128 --query-cycles 5 300 --query-random-share 0.2 ;;
+        cycrope) run cycrope single --size wide --spectral --spectral-aux 0.5 --init project/runs/maew_spec/mae.pt --target template --template-fit record --template-periods project/results/period_table_spec/periods.csv --query-extra 128 --query-cycles 5 300 --query-random-share 0.2 --phase-rope 4 ;;   # the phase rope: the winner of the sine comparison (0.98 at 30-100 cycles, no collapse)
         cycph) run cycph single --size wide --spectral --spectral-aux 0.5 --init project/runs/maew_spec/mae.pt --target template --template-fit record --template-periods project/results/period_table_spec/periods.csv --query-extra 128 --query-cycles 5 300 --query-random-share 0.2 --phasor 4 ;;
         long)  run_long long ;;
         hidden)   run_long hidden --mask-mode blockplus --mask-ratio 0.25 --mask-block-share 0.5 ;;
