@@ -146,7 +146,7 @@ def main(argv=None):
             p_ls, _ = astropy_search(r, a.ls_budget, True, a.ls_p_min)
             t, y, err, band, _ = star_inputs(r)
             r2_ls = fold.fold_r2(t, y, err, band, p_ls, 6) if np.isfinite(p_ls) else float("nan")
-            extra = ((p_ls, f"Lomb-Scargle on today's data, {a.ls_budget // 1000}k trials ({p_ls / float(row['p_catalogue_d']):.3g} × the {cat_name})", r2_ls),)
+            extra = ((p_ls, f"Lomb-Scargle today, {a.ls_budget // 1000}k trials ({p_ls / float(row['p_catalogue_d']):.3g} ×)", r2_ls),)
             row["p_ls_d"], row["r2_ls"] = p_ls, r2_ls
         draw_row(ax_row, r, row, fs, cat_name, extra)
         f2, ax2 = plt.subplots(1, ncol, figsize=(6 * ncol, 4.2), dpi=140)
