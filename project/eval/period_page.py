@@ -89,9 +89,10 @@ def fig_scatter_two(p_true, preds: dict, sup):
 
 
 def fig_bars_by_class(M, ls, groups, counts, key, label):
-    """Grouped bars: the hit rate per class for every method at one tolerance."""
-    methods = [("model alone", "model", C["model"], None), ("model + fine search", "model_refined", C["refined"], None), ("model candidates + search", "model_cands", C["cands"], None),
-               ("Lomb-Scargle", ls, C["ls"], "//"), ("Lomb-Scargle, double and half accepted", ls, C["ls_alias"], "..")]
+    """Grouped bars: the hit rate per class for every method at one tolerance (the Lomb-Scargle bars at the largest budget in M)."""
+    trials = f"{int(ls.split('@')[1]) // 1000}k trials"
+    methods = [("model alone", "model", C["model"], None), ("model → LS", "model_refined", C["refined"], None), ("(model + aliases) → LS", "model_cands", C["cands"], None),
+               (f"Lomb-Scargle, {trials}", ls, C["ls"], "//"), (f"Lomb-Scargle, {trials}, double and half accepted", ls, C["ls_alias"], "..")]
     fig, ax = plt.subplots(figsize=(9.2, 3.8), dpi=150)
     fig.patch.set_facecolor(SURFACE)
     style(ax)
@@ -365,7 +366,8 @@ def main():
     table5 += [f"<tr><td>Lomb-Scargle, {b:,} trials (CPU)</td><td class=n>{1e3 * S[f'astropy_mb@{b}']['median']:.0f}</td></tr>" for b in rt_budgets]
 
     # ---- 4. analysis: bars by class, hit rate against the period per threshold, heat maps
-    f_bars = [fig_bars_by_class(M, ls, groups, counts, key, label) for key, _, label in thresholds]
+    ls_big = max((m for m in M if m.startswith("astropy_mb@") and "by_superclass" in M[m]), key=lambda m: int(m.split("@")[1]))
+    f_bars = [fig_bars_by_class(M, ls_big, groups, counts, key, label) for key, _, label in thresholds]
     series = {"model alone": (pm, *STY["model alone"], False), "model + fine search": (pr, *STY["model + fine search"], False), "model candidates + search": (pc, *STY["model candidates + search"], False),
               f"Lomb-Scargle, {ls_budget:,} trials": (pl, *STY["Lomb-Scargle"], False), "Lomb-Scargle, double and half accepted": (pl, *STY["Lomb-Scargle, double and half accepted"], True)}
     f_hvp = [fig_hit_vs_period_one(p_true, sup, series, tol, label) for _, tol, label in thresholds]
@@ -438,7 +440,7 @@ def main():
   <section>
     <div class="text">
       <h2>Analysis</h2>
-      <p>Hit rate by class, at three tolerances.</p>
+      <p>Hit rate by class, at three tolerances. "Model → LS" is the model's period sharpened by the fine fold search on the full light curve; "(model + aliases) → LS" also sharpens the read-out's other top bins and the double and the half, and the fold decides.</p>
     </div>
     {img(f_bars[0], "Bar chart of the hit rate within 10 percent per class for every method")}
     {img(f_bars[1], "Bar chart of the hit rate within 1 percent per class for every method")}
