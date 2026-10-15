@@ -21,6 +21,11 @@ from project.eval.period_report import rel_error
 from project.plot_period_examples import INK, INK2, SURFACE, style
 from romae_lc.data import load_pc
 
+# slide text: dark and large (points at the figure's own size; the figure fills most of a slide)
+FS = dict(title=26, label=24, tick=22, legend=20)
+
+FS = dict(title=17, label=15, tick=13, legend=13)  # points at the figure's own size; a slide shows the figure near full width
+
 C = dict(model="#6baed6", refined="#2171b5", cands="#08306b", ls="#e6550d", ls_alias="#fd8d3c")
 BAND = {0: ("g", "#2a9d3f"), 1: ("r", "#d6452a"), 2: ("i", "#7b3fb8")}
 CLS = {"ECL": "eclipsing", "RR": "RR Lyrae", "ROT": "rotation", "CEP": "Cepheid", "DSCT": "δ Scuti", "LPV": "long-period"}
@@ -30,7 +35,7 @@ def raw_light_curve(out: Path, cls: str = "RRAB", min_points: int = 800, min_spa
     recs = load_pc(DATA_ROOT, "validation", label_field="class_str", classes=(cls,), max_rows=4000)
     recs = [r for r in recs if r.t.size >= min_points and r.t.max() - r.t.min() >= min_span]
     r = min(recs, key=lambda r: abs(r.t.size - 1200))  # a typical star, not the densest
-    fig, (ax, az) = plt.subplots(1, 2, figsize=(12, 3.4), gridspec_kw=dict(width_ratios=[2.6, 1]))
+    fig, (ax, az) = plt.subplots(1, 2, figsize=(13, 4.2), gridspec_kw=dict(width_ratios=[2.6, 1]))
     fig.patch.set_facecolor(SURFACE)
     for a in (ax, az):
         style(a)
@@ -44,16 +49,17 @@ def raw_light_curve(out: Path, cls: str = "RRAB", min_points: int = 800, min_spa
     for b in np.unique(r.band):
         m = r.band == b
         name, col = BAND.get(int(b), (str(b), INK2))
-        ax.errorbar(t[m], -r.y[m], yerr=r.err[m], fmt="o", ms=2, color=col, ecolor=col, elinewidth=0.5, alpha=0.75, label=f"ZTF {name}")
+        ax.errorbar(t[m], -r.y[m], yerr=r.err[m], fmt="o", ms=3, color=col, ecolor=col, elinewidth=0.7, alpha=0.8, label=f"ZTF {name}")
         mz = m & (t >= lo) & (t < lo + zoom_days)
-        az.errorbar(t[mz], -r.y[mz], yerr=r.err[mz], fmt="o", ms=3.5, color=col, ecolor=col, elinewidth=0.7, alpha=0.9)
+        az.errorbar(t[mz], -r.y[mz], yerr=r.err[mz], fmt="o", ms=5, color=col, ecolor=col, elinewidth=0.9, alpha=0.9)
     for a in (ax, az):
         a.invert_yaxis()
-        a.set_xlabel("days since the first observation", fontsize=9)
-    ax.set_ylabel("magnitude", fontsize=9)
-    ax.set_title(f"one ZTF light curve: {r.meta.get('class_str')}, {r.t.size} points over {t.max() - t.min():.0f} days, period {r.period:.4f} d", fontsize=9.5, loc="left", color=INK)
-    az.set_title(f"{zoom_days:.0f} days, from day {lo:.0f}", fontsize=9.5, loc="left", color=INK)
-    ax.legend(fontsize=8, frameon=False, loc="lower right")
+        a.tick_params(labelsize=FS["tick"])
+        a.set_xlabel("days since the first observation", fontsize=FS["label"])
+    ax.set_ylabel("magnitude", fontsize=FS["label"])
+    ax.set_title(f"one ZTF light curve: {r.meta.get('class_str')}, {r.t.size} points over {t.max() - t.min():.0f} days, period {r.period:.4f} d", fontsize=FS["title"], loc="left", color=INK)
+    az.set_title(f"{zoom_days:.0f} days, from day {lo:.0f}", fontsize=FS["title"], loc="left", color=INK)
+    ax.legend(fontsize=FS["legend"], frameon=False, loc="lower right", markerscale=2)
     fig.tight_layout()
     fig.savefig(out / "raw_light_curve.png", dpi=160, facecolor=SURFACE)
     return r
@@ -70,7 +76,7 @@ def bars_by_class(out: Path, report: str, ls_extra: str, tol: float = 1e-4, labe
                ("Lomb-Scargle, 500k trials, double and half accepted", e["p_astropy_mb@500000"], C["ls_alias"], "..", True)]
     groups = [g for g in CLS if (sup == g).sum() >= 20]
     counts = {g: int((sup == g).sum()) for g in groups}
-    fig, ax = plt.subplots(figsize=(9.6, 3.9), dpi=150)
+    fig, ax = plt.subplots(figsize=(12, 5.2), dpi=150)
     fig.patch.set_facecolor(SURFACE)
     style(ax)
     x = np.arange(len(groups))
@@ -79,11 +85,12 @@ def bars_by_class(out: Path, report: str, ls_extra: str, tol: float = 1e-4, labe
         hit = np.where(np.isfinite(p), rel_error(p, p_true, alias) < tol, False)
         ax.bar(x + (i - len(methods) / 2) * w + w / 2, [hit[sup == g].mean() for g in groups], w, color=col, hatch=hatch, edgecolor=SURFACE if hatch else col, lw=0.5, label=name)
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{CLS[g]}\n({counts[g]})" for g in groups], fontsize=8)
+    ax.set_xticklabels([f"{CLS[g]}\n({counts[g]})" for g in groups], fontsize=FS["tick"])
     ax.set_ylim(0, 1.0)
-    ax.set_ylabel("share of the stars", fontsize=8.5, color=INK2)
-    ax.set_title(f"Period within {label} of the catalogue, by class ({len(p_true):,} validation stars)", fontsize=10, color=INK, loc="left")
-    ax.legend(fontsize=7, frameon=False, ncol=3, loc="upper right", labelcolor=INK2)
+    ax.tick_params(labelsize=FS["tick"])
+    ax.set_ylabel("share of the stars", fontsize=FS["label"], color=INK2)
+    ax.set_title(f"Period within {label} of the catalogue, by class ({len(p_true):,} validation stars)", fontsize=FS["title"], color=INK, loc="left")
+    ax.legend(fontsize=FS["legend"] - 1, frameon=False, ncol=2, loc="upper right", labelcolor=INK2)
     fig.tight_layout()
     fig.savefig(out / f"bars_by_class_{tol:g}.png", facecolor=SURFACE)
 
