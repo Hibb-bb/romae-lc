@@ -52,6 +52,11 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
   (`--phasor-init`), and the stronger mechanism `--phase-rope H` puts the phase in cycles at the encoder's own
   frequency on a rotary axis of the decoder, so same-phase tokens line up in attention with nothing to learn.
   Both are being compared on the sine test (`sine_test10k_rope`) before a real-data run.
+- **C3. The estimator (2026-10-16).** cycrope on real stars: the rope works exactly as on sines wherever the
+  frequency it gets is within 0.05 % (0.97 to 20 cycles, 0.88 at 20 to 100), and the soft-peak estimate reached
+  that on only 3 % of windows. The local centroid around the argmax reaches it on 66 % (median error 0.011 %).
+  `--phase-freq local`; cycrope2 queued. The remaining ~30 % of windows pick an alias or harmonic as the top
+  peak: the next estimator step is a fold check among the top peaks inside the model.
 - **D. The experiment.** 250-day setting (where the encoder works), warm start + cycle
   queries, with and without the phasor features; the period probe at every eval shows whether
   the period is kept and sharpened; the explained variance of the template against the
