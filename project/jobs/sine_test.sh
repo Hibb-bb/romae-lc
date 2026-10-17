@@ -41,7 +41,7 @@ run phasor_nowd        --variant phasor --phasor-init 0.1
 # the template rung (2026-10-16): the real stars' templates at uniform random times with a real-ish noise level
 TPL="--signal template --p-range 0.05 50 --noise-range 0.05 0.4"
 run tpl_plain          --variant plain $TPL
-run tpl_rope           --variant phaserope $TPL
+run tpl_rope           --variant phaserope --phase-freq local $TPL
 run tpl_rope_oracle    --variant phaserope_oracle $TPL
-run tpl_rope_clean     --variant phaserope --signal template --p-range 0.05 50
+run tpl_rope_clean     --variant phaserope --phase-freq local --signal template --p-range 0.05 50
 echo "all done"
