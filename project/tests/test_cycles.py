@@ -113,3 +113,19 @@ def test_phase_rope_runs_and_the_oracle_frequency_changes_the_output():
     rebuilt = RoMAEForPreTraining(**state["mae"], **state["backbone"])
     rebuilt.load_state_dict(state["state_dict"])
     assert rebuilt.phase_rope == 2 and torch.allclose(rebuilt(values, positions, pad, mask).loss, out.loss, atol=1e-6)
+
+
+def test_frequency_estimators_agree_on_a_clean_peak():
+    import math
+    from romae_lc.model import spectral_frequency
+
+    class Sp:  # a stand-in spectral layer: 1000 bins, a clean peak at bin 400.3 and a smaller one at bin 700
+        log_f0, step = math.log(1.0 / 50.0), 5e-4
+        idx = torch.arange(1000, dtype=torch.float32)
+        last_logits = (-0.5 * ((idx - 400.3) / 1.5) ** 2 * 1.0 + 8.0)[None].clone()
+    Sp.last_logits[0, 700] = 7.0  # a second, lower peak (an alias)
+    f_soft, f_peak, f_loc = (spectral_frequency(Sp, None, m) for m in ("soft", "peak", "local"))
+    truth = math.exp(Sp.log_f0 + Sp.step * 400.3)
+    assert abs(f_loc.item() / truth - 1) < 1e-4  # sub-bin, unaffected by the alias
+    assert abs(f_peak.item() / truth - 1) < 1e-3  # within a bin
+    assert abs(f_soft.item() / truth - 1) > 1e-3  # the expectation is pulled toward the alias

@@ -235,6 +235,7 @@ def add_train_args(parser) -> None:
     g.add_argument("--input", choices=["obs", "template"], default="obs",
                    help="template: the encoder sees the template value at every real observation time plus Gaussian noise at the window's residual level, in place of the observed brightness (everything real except the non-periodic part; needs --target template --template-fit record)")
     g.add_argument("--phasor-init", type=float, default=0.02, help="start scale of the phasor map")
+    g.add_argument("--phase-freq", choices=["soft", "peak", "local"], default="soft", help="how the phase rope / phasor read the frequency off the spectral logits: the softmax expectation, the argmax bin, or the centroid within 5 bins of the argmax")
     g.add_argument("--phase-rope", type=int, default=0, help="the phase at the spectral layer's own frequency as a rotary axis of the decoder, this many harmonics (0 = off; needs --spectral)")
     g.add_argument("--init", default=None, help="warm start the autoencoder from this mae.pt (every tensor whose name and shape match; a fresh optimiser)")
     g.add_argument("--encoder", choices=["transformer", "gruode"], default="transformer",
@@ -490,6 +491,7 @@ def main(argv=None):
             phasor=args.phasor,
             phase_rope=args.phase_rope,
             phasor_init=args.phasor_init,
+            phase_freq=args.phase_freq,
         )
         if args.init:
             from project.common import warm_start

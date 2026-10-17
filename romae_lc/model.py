@@ -458,16 +458,33 @@ def _mae_head(enc_cfg: TransformerConfig, enc_layout, dec_cfg, target_channels: 
     return decoder, decoder_rope, encoder_to_decoder, mask_token, head
 
 
-def spectral_frequency(spectral, override: torch.Tensor | None = None) -> torch.Tensor:
-    """``[B]`` cycles per day: the soft peak of the spectral layer's last
-    logits (detached: see :class:`PhasorFeatures`), or ``override``."""
+def spectral_frequency(spectral, override: torch.Tensor | None = None, mode: str = "soft", local: int = 5) -> torch.Tensor:
+    """``[B]`` cycles per day from the spectral layer's last logits
+    (detached: see :class:`PhasorFeatures`), or ``override``. ``mode``:
+    ``soft`` = the expectation of the softmax over all bins (blurred when
+    the true peak, its aliases and harmonics are all lit); ``peak`` = the
+    argmax bin; ``local`` = the softmax centroid within ``local`` bins of
+    the argmax (sub-bin, and immune to the other peaks)."""
     if override is not None:
         return override.float()
     logits = spectral.last_logits
     if logits is None:
         raise RuntimeError("the spectral layer has not run yet")
-    p = torch.softmax(logits.detach().float(), -1)
-    coord = (p * torch.arange(p.shape[-1], device=p.device, dtype=torch.float32)).sum(-1)
+    lg = logits.detach().float()
+    idx = torch.arange(lg.shape[-1], device=lg.device, dtype=torch.float32)
+    if mode == "soft":
+        p = torch.softmax(lg, -1)
+        coord = (p * idx).sum(-1)
+    else:
+        am = lg.argmax(-1)
+        if mode == "peak":
+            coord = am.float()
+        else:
+            k = int(local)
+            offs = torch.arange(-k, k + 1, device=lg.device)
+            pos = (am[:, None] + offs[None]).clamp(0, lg.shape[-1] - 1)  # [B, 2k+1]
+            w = torch.softmax(lg.gather(1, pos), -1)
+            coord = (w * pos.float()).sum(-1)
     return torch.exp(spectral.log_f0 + spectral.step * coord)
 
 
@@ -513,7 +530,7 @@ class PhasorFeatures(nn.Module):
 
     def frequency(self, spectral) -> torch.Tensor:
         """``[B]`` cycles per day (see :func:`spectral_frequency`)."""
-        return spectral_frequency(spectral, self.override)
+        return spectral_frequency(spectral, self.override, getattr(self, "mode", "soft"))
 
     def forward(self, x: torch.Tensor, t_days: torch.Tensor, spectral) -> torch.Tensor:
         """``x [B, L, d]`` + the features of ``t_days [B, L]``."""
@@ -583,7 +600,7 @@ def _mae_forward(
         x = phasor(x, (pos[:, 0].float() - 1.0) * encoder.spectral.time_scale, encoder.spectral)
     if getattr(parts, "phase_rope", 0):
         # the phase in cycles at the encoder's own frequency as one more position axis of the decoder's rotary encoding
-        f = spectral_frequency(encoder.spectral, getattr(parts, "phase_override", None))
+        f = spectral_frequency(encoder.spectral, getattr(parts, "phase_override", None), getattr(parts, "phase_freq", "soft"))
         t_days = (pos[:, 0].float() - 1.0) * encoder.spectral.time_scale
         pos = torch.cat([pos, (f[:, None] * t_days)[:, None].to(pos.dtype)], 1)
     x = parts.decoder(x, parts.decoder_rope.prepare(pos), attention_mask(pad))
@@ -624,6 +641,7 @@ class RoMAEForPreTraining(RoMAEBase):
         phasor: int = 0,
         phase_rope: int = 0,
         phasor_init: float = 0.02,
+        phase_freq: str = "soft",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -645,6 +663,7 @@ class RoMAEForPreTraining(RoMAEBase):
         self.phasor_init = float(phasor_init)
         # the phase at the encoder's own frequency as a rotary axis of the decoder (see phase_rope_layout)
         self.phase_rope, self.phase_override = int(phase_rope), None
+        self.phase_freq = str(phase_freq)  # how the rope / the phasor read the frequency off the spectral logits
         if phase_rope:
             self.decoder_rope = BlockRope(self.dec_cfg.head_dim, self.dec_cfg.nhead, phase_rope_layout(self._decoder_layout(), phase_rope, self.n_axes))
 

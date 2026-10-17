@@ -103,7 +103,7 @@ def build(a) -> RoMAEForPreTraining:
     return RoMAEForPreTraining(decoder=dec, mask_ratio=a.mask_ratio, target_channels=1, encoder=enc, n_channels=2, n_axes=2,
                                rope=layout(head_dim, a.p_range[0] / 2, a.p_range[1] * 4), spectral=spectral,
                                phasor=a.phasor if a.variant in ("phasor", "oracle") else 0, phasor_init=a.phasor_init,
-                               phase_rope=a.phasor if a.variant in ("phaserope", "phaserope_oracle") else 0)
+                               phase_rope=a.phasor if a.variant in ("phaserope", "phaserope_oracle") else 0, phase_freq=a.phase_freq)
 
 
 def set_override(model, a, period, dev):
@@ -197,6 +197,7 @@ def parse_args(argv=None):
     ap.add_argument("--variant", choices=["plain", "phasor", "oracle", "phaserope", "phaserope_oracle"], default="plain")
     ap.add_argument("--phasor", type=int, default=4, help="harmonics of the phasor features or of the phase rope")
     ap.add_argument("--phasor-init", type=float, default=0.02)
+    ap.add_argument("--phase-freq", choices=["soft", "peak", "local"], default="soft")
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--n-points", type=int, default=256)
