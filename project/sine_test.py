@@ -47,18 +47,48 @@ def layout(head_dim: int, p_lo: float, p_hi: float, band_dim: int = 8) -> list[d
     return [{"kind": "axial", "axes": [0], "dim": head_dim - band_dim, "timescales": ts}, {"kind": "axial", "axes": [1], "dim": band_dim}]
 
 
-def sample(b: int, n: int, window: float, p_range, sampling: str, shape: float, noise: float, generator: torch.Generator):
-    """``(values [B, N, 2], positions [B, 2, N], period [B], t [B, N], y [B, N])``."""
-    lo, hi = math.log(p_range[0]), math.log(p_range[1])
-    period = torch.exp(lo + (hi - lo) * torch.rand(b, generator=generator))
-    phase = 2 * math.pi * torch.rand(b, generator=generator)
+TEMPLATES = {}  # set by main() for --signal template: the real stars' whole-record templates
+
+
+def load_templates(path: str, p_range, min_r2: float = 0.8):
+    """The usable templates: one band per star (its best fit), period inside ``p_range``."""
+    from project.templates import RecordTemplates
+
+    fitted = torch.load(path, map_location="cpu", weights_only=False)
+    T = RecordTemplates(fitted, "cpu")
+    r2 = torch.nan_to_num(T.r2, nan=-1.0)
+    best_r2, best_band = r2.max(1)
+    ok = (T.harmonics > 0) & (T.period > p_range[0]) & (T.period < p_range[1]) & (best_r2 >= min_r2)
+    TEMPLATES.update(T=T, rows=torch.nonzero(ok).flatten(), band=best_band)
+    return int(ok.sum())
+
+
+def sample(b: int, n: int, window: float, p_range, sampling: str, shape: float, noise: float, generator: torch.Generator, signal: str = "sine", noise_range=None):
+    """``(values [B, N, 2], positions [B, 2, N], period [B], t [B, N], y [B, N])``.
+    ``signal == "template"``: a real star's template (its best band) at the sampled times, shifted by a random
+    phase; ``noise_range`` draws a noise level per sample, log-uniform, in place of ``noise``."""
     if sampling == "regular":
         t = torch.linspace(0, window, n)[None].expand(b, n).clone()
     else:
         t = torch.sort(torch.rand(b, n, generator=generator) * window, 1).values
-    arg = 2 * math.pi * t / period[:, None] + phase[:, None]
-    y = torch.sin(arg) + shape * torch.sin(2 * arg)
-    if noise > 0:
+    if signal == "template":
+        T, rows, band = TEMPLATES["T"], TEMPLATES["rows"], TEMPLATES["band"]
+        pick = rows[torch.randint(len(rows), (b,), generator=generator)]
+        period = T.period[pick].float()
+        shift = torch.rand(b, generator=generator) * period  # a random phase
+        y = T.eval(pick, (t + shift[:, None]).double(), band[pick][:, None].expand(b, n)).float()
+        y = y - y.mean(1, keepdim=True)
+    else:
+        lo, hi = math.log(p_range[0]), math.log(p_range[1])
+        period = torch.exp(lo + (hi - lo) * torch.rand(b, generator=generator))
+        phase = 2 * math.pi * torch.rand(b, generator=generator)
+        arg = 2 * math.pi * t / period[:, None] + phase[:, None]
+        y = torch.sin(arg) + shape * torch.sin(2 * arg)
+    if noise_range:
+        lo_n, hi_n = math.log(noise_range[0]), math.log(noise_range[1])
+        sigma = torch.exp(lo_n + (hi_n - lo_n) * torch.rand(b, generator=generator))
+        y = y + sigma[:, None] * torch.randn(b, n, generator=generator)
+    elif noise > 0:
         y = y + noise * torch.randn(b, n, generator=generator)
     values = torch.stack([y, torch.zeros_like(y)], -1)
     positions = torch.stack([t + 1.0, torch.full_like(t, 0.6)], 1)
@@ -99,7 +129,7 @@ def evaluate(a, model, dev, n_batches: int, seed: int) -> dict:
     g = torch.Generator().manual_seed(seed)
     rows = dict(se=[], tv=[], cyc=[], per=[], ferr_soft=[], ferr_peak=[], per_s=[])
     for _ in range(n_batches):
-        values, positions, period, t, y = sample(a.batch, a.n_points, a.window, a.p_range, a.sampling, a.shape, a.noise, g)
+        values, positions, period, t, y = sample(a.batch, a.n_points, a.window, a.p_range, a.sampling, a.shape, a.noise, g, a.signal, a.noise_range)
         mask, pad = mask_for(a, positions, g)
         set_override(model, a, period, dev)
         out = model(values.to(dev), positions.to(dev), pad.to(dev), mask.to(dev))
@@ -175,6 +205,9 @@ def parse_args(argv=None):
     ap.add_argument("--sampling", choices=["random", "regular"], default="random")
     ap.add_argument("--shape", type=float, default=0.0, help="amplitude of a second harmonic (0 = pure sine)")
     ap.add_argument("--noise", type=float, default=0.0)
+    ap.add_argument("--noise-range", type=float, nargs=2, default=None, help="draw the noise level per sample, log-uniform between these")
+    ap.add_argument("--signal", choices=["sine", "template"], default="sine", help="template: the real stars' whole-record templates (one band each) at the sampled times")
+    ap.add_argument("--templates", default="project/runs/enc_cyc/templates.pt")
     ap.add_argument("--mask", choices=["random", "block", "blockplus"], default="blockplus")
     ap.add_argument("--mask-ratio", type=float, default=0.5)
     ap.add_argument("--block-share", type=float, default=0.5)
@@ -198,6 +231,8 @@ def main(argv=None):
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(a.seed)
     dev = torch.device(a.device)
+    if a.signal == "template":
+        print(f"templates: {load_templates(a.templates, a.p_range)} usable stars", flush=True)
     model = build(a).to(dev)
     n_par = sum(p.numel() for p in model.parameters())
     print(f"{a.variant}: {n_par / 1e6:.2f}M parameters, spectral grid {model.spectral.n_bins} bins, {a.sampling} sampling, periods {a.p_range}", flush=True)
@@ -208,7 +243,7 @@ def main(argv=None):
     g = torch.Generator().manual_seed(a.seed + 1)
     log, t0 = [], time.time()
     for step in range(1, a.steps + 1):
-        values, positions, period, t, y = sample(a.batch, a.n_points, a.window, a.p_range, a.sampling, a.shape, a.noise, g)
+        values, positions, period, t, y = sample(a.batch, a.n_points, a.window, a.p_range, a.sampling, a.shape, a.noise, g, a.signal, a.noise_range)
         mask, pad = mask_for(a, positions, g)
         set_override(model, a, period, dev)
         out_ = model(values.to(dev), positions.to(dev), pad.to(dev), mask.to(dev))

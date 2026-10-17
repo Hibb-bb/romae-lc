@@ -232,6 +232,8 @@ def add_train_args(parser) -> None:
     g.add_argument("--query-cycles-min", type=float, default=0.1, help="the smallest query distance in cycles")
     g.add_argument("--query-random-share", type=float, default=0.2, help="share of the queries at uniform random times in the window (so their layout does not reveal the period)")
     g.add_argument("--phasor", type=int, default=0, help="decoder tokens get sine/cosine features of their time at the spectral layer's own peak frequency and this many harmonics (0 = off; needs --spectral)")
+    g.add_argument("--input", choices=["obs", "template"], default="obs",
+                   help="template: the encoder sees the template value at every real observation time plus Gaussian noise at the window's residual level, in place of the observed brightness (everything real except the non-periodic part; needs --target template --template-fit record)")
     g.add_argument("--phasor-init", type=float, default=0.02, help="start scale of the phasor map")
     g.add_argument("--phase-rope", type=int, default=0, help="the phase at the spectral layer's own frequency as a rotary axis of the decoder, this many harmonics (0 = off; needs --spectral)")
     g.add_argument("--init", default=None, help="warm start the autoencoder from this mae.pt (every tensor whose name and shape match; a fresh optimiser)")
@@ -499,6 +501,8 @@ def main(argv=None):
         parser.error("--phasor and --phase-rope need --spectral")
     if args.query_cycles and args.template_fit != "record":
         parser.error("--query-cycles needs --template-fit record (the template period of every star)")
+    if args.input == "template" and (args.target == "obs" or args.template_fit != "record"):
+        parser.error("--input template needs --target template/mix with --template-fit record")
     model = model.to(dev)
     encoder = FrameEncoder(PooledEncoder(model))
     sizes = dict(
@@ -621,6 +625,18 @@ def main(argv=None):
             if use_record:
                 target_values, share = record_targets(record_templates, index_rows, start_rows, values, positions, pad, spec, args.target, args.template_min_r2)
                 last = record_targets.last
+                if args.input == "template":
+                    # the template as the input too, with noise at the window's own residual level
+                    y0 = values[..., 0].float()
+                    real = ~pad
+                    tv = target_values.float()
+                    have = torch.isfinite(tv) & real & (tv != y0)
+                    resid = torch.where(have, y0 - tv, torch.zeros_like(y0))
+                    n_have = have.float().sum(1, keepdim=True).clamp_min(1.0)
+                    sigma = (resid.pow(2).sum(1, keepdim=True) / n_have).sqrt()
+                    noisy = tv + sigma * torch.randn_like(y0)
+                    values = values.clone()
+                    values[..., 0] = torch.where(have, noisy, y0).to(values.dtype)
             else:
                 target_values, share = smooth_targets(values, positions, pad, template_rows, spec, args.template_harmonics, args.template_min_r2,
                                                       args.template_min_points, args.target)  # fmt: skip
