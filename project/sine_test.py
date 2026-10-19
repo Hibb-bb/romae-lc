@@ -59,6 +59,9 @@ def load_templates(path: str, p_range, min_r2: float = 0.8):
     r2 = torch.nan_to_num(T.r2, nan=-1.0)
     best_r2, best_band = r2.max(1)
     ok = (T.harmonics > 0) & (T.period > p_range[0]) & (T.period < p_range[1]) & (best_r2 >= min_r2)
+    # drop templates whose wave is wild (a few stars have badly scaled fits that would dominate a pooled score)
+    amp = T.coef[torch.arange(len(T.period)), best_band][:, 1:].abs().sum(-1)
+    ok &= amp < 6.0
     TEMPLATES.update(T=T, rows=torch.nonzero(ok).flatten(), band=best_band)
     return int(ok.sum())
 
@@ -149,6 +152,7 @@ def evaluate(a, model, dev, n_batches: int, seed: int) -> dict:
         f_true = 1.0 / period
         rows["ferr_soft"].append((f_soft / f_true - 1).abs()); rows["ferr_peak"].append((f_peak / f_true - 1).abs()); rows["per_s"].append(period)
     set_override(model, argparse.Namespace(variant="plain"), None, dev)
+    per_sample = torch.stack([1 - (s_ ** 2).mean() / t_.var() if t_.numel() > 2 else torch.tensor(float("nan")) for s_, t_ in zip(rows["se"], rows["tv"])]) if rows["se"] else torch.tensor([])
     R = {k: torch.cat(v) for k, v in rows.items()}
     cyc_edges = [0, 0.1, 0.5, 2, 5, 10, 30, 100, 300, 1e9]
     by_cycles = []
@@ -170,7 +174,7 @@ def evaluate(a, model, dev, n_batches: int, seed: int) -> dict:
                               freq_within_1pct=float((R["ferr_peak"][ms] < 0.01).float().mean()) if ms.any() else None,
                               peak_width_in_grid_steps=float(math.sqrt(lo * hi) / a.window / a.spectral_rel)))
     model.train()
-    return dict(explained_all=explained(R["se"], R["tv"]), by_cycles=by_cycles, by_period=by_period)
+    return dict(explained_all=explained(R["se"], R["tv"]), explained_median_per_sample=float(per_sample.nanmedian()) if per_sample.numel() else float("nan"), by_cycles=by_cycles, by_period=by_period)
 
 
 def plot(res: dict, path: Path, title: str):
@@ -260,7 +264,7 @@ def main(argv=None):
         if step % a.eval_every == 0 or step == a.steps:
             r = evaluate(a, model, dev, a.eval_batches, seed=1000)
             r["step"] = step; log.append(r)
-            print(f"  eval {step}: explained all {r['explained_all']:.3f} | by cycles " + ", ".join(f"{x['lo']:g}-{x['hi'] if x['hi'] < 1e8 else 'inf'}: {x['explained']:.2f}" for x in r["by_cycles"]), flush=True)
+            print(f"  eval {step}: explained all {r['explained_all']:.3f} (median per sample {r['explained_median_per_sample']:.3f}) | by cycles " + ", ".join(f"{x['lo']:g}-{x['hi'] if x['hi'] < 1e8 else 'inf'}: {x['explained']:.2f}" for x in r["by_cycles"]), flush=True)
     final = log[-1]
     final["args"] = vars(a); final["history"] = [dict(step=r["step"], explained_all=r["explained_all"]) for r in log]
     json.dump(final, open(out / "results.json", "w"), indent=1)
