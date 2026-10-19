@@ -57,6 +57,7 @@ def parse_args(argv=None):
     p.add_argument("--n-bad", type=int, default=3)
     p.add_argument("--far-cycles", type=float, default=0.0, help="if > 0, the time view starts this many cycles into the hidden stretch instead of at its start")
     p.add_argument("--exclude", nargs="*", default=(), help="star ids not to pick again")
+    p.add_argument("--per-figure", type=int, default=4, help="stars per figure")
     p.add_argument("--out", required=True)
     p.add_argument("--seed", type=int, default=0)
     add_device_arg(p)
@@ -111,9 +112,17 @@ def main(argv=None):
         picks = good + bad
     n_bands = len(spec.tokenize["band_wavelengths"])
     ts = spec.tokenize["time_scale"]
-    fig, axes = plt.subplots(len(picks), 2, figsize=(13, 2.6 * len(picks)), gridspec_kw=dict(width_ratios=[2.2, 1]))
-    fig.patch.set_facecolor(SURFACE)
-    for row, i in enumerate(picks):
+    from project import fold as _fold
+    from project.eval.ls_benchmark import star_inputs
+    from project.eval.period_report import fold_panel
+
+    chunks = [picks[k:k + a.per_figure] for k in range(0, len(picks), a.per_figure)]
+    figs = [plt.subplots(len(c), 3, figsize=(17, 2.8 * len(c)), gridspec_kw=dict(width_ratios=[2.2, 1, 1]), squeeze=False) for c in chunks]
+    for fig, _ in figs:
+        fig.patch.set_facecolor(SURFACE)
+    for gi, i in enumerate(picks):
+        fig, axes = figs[gi // a.per_figure]
+        row = gi % a.per_figure
         r = val[i]
         period = float(lookup[str(r.meta["id"])])
         fitted = fit_record_templates([r], np.array([period]), n_bands=n_bands, workers=1, log=lambda *x: None)
@@ -143,8 +152,11 @@ def main(argv=None):
         target_q = bounded(T.eval(rows, (start + t_q).double(), band_q), values[..., 0].float(), ~pad)
         v2, p2, pad2, mask2, tv2, _ = augment_with_queries(values, positions, pad, mask, tv, None, t_q, band_q, target_q, spec)
         n = values.shape[1]
-        ax_t, ax_f = axes[row]
+        ax_t, ax_f, ax_w = axes[row]
         style(ax_t); style(ax_f)
+        t_, y_, e_, b_, _ = star_inputs(r)
+        fold_panel(ax_w, r, period, "whole light curve on the table period", _fold.fold_r2(t_, y_, e_, b_, period, 6), template=False)
+        ax_w.tick_params(labelsize=7)
         y = values[0, :, 0].numpy()
         for b in np.unique(band[0].numpy()):
             m = (band[0].numpy() == b) & ~pad[0].numpy()
@@ -179,32 +191,14 @@ def main(argv=None):
         ax_t.set_title(f"{r.meta.get('class_str')}  P = {period:.5g} d  window start day {start:.0f}{est}; hidden points explained: " + ", ".join(titles), fontsize=8, loc="left", color=INK)
         ax_t.set_xlabel("days in the window", fontsize=8); ax_f.set_xlabel("phase of the hidden points (whole hidden stretch)", fontsize=8)
         ax_t.tick_params(labelsize=7); ax_f.tick_params(labelsize=7)
-    axes[0, 0].legend(fontsize=6.5, ncol=4, loc="upper left"); axes[0, 1].legend(fontsize=6.5, loc="upper left")
-    fig.tight_layout()
-    fig.savefig(out / "forecast_demo.png", dpi=130, facecolor=SURFACE)
-    print(f"wrote {out / 'forecast_demo.png'}")
-    # the companion: the whole light curve of every star folded on the table period, same row order
-    from project import fold as _fold
-    from project.eval.ls_benchmark import star_inputs
-    from project.eval.period_report import fold_panel
-
-    ncol = 2
-    nrow = (len(picks) + ncol - 1) // ncol
-    f2, ax2 = plt.subplots(nrow, ncol, figsize=(13, 3.2 * nrow), dpi=130, squeeze=False)
-    f2.patch.set_facecolor(SURFACE)
-    for k, i in enumerate(picks):
-        r = val[i]
-        period = float(lookup[str(r.meta["id"])])
-        t_, y_, e_, b_, _ = star_inputs(r)
-        r2 = _fold.fold_r2(t_, y_, e_, b_, period, 6)
-        est = f", spectral estimate off by {100 * r.meta['f_err']:.3g} %" if "f_err" in r.meta else ""
-        fold_panel(ax2[k // ncol, k % ncol], r, period, f"{r.meta.get('class_str')} {r.meta.get('id')}{est}", r2, template=False)
-    for k in range(len(picks), nrow * ncol):
-        ax2[k // ncol, k % ncol].axis("off")
-    f2.suptitle("The same stars: the whole light curve folded on the table period (two cycles)", fontsize=10, color=INK, x=0.01, ha="left")
-    f2.tight_layout(rect=(0, 0, 1, 0.975))
-    f2.savefig(out / "folded.png", dpi=130, facecolor=SURFACE)
-    print(f"wrote {out / 'folded.png'}; stars: " + " ".join(str(val[i].meta.get("id")) for i in picks))
+    for k, (fig, axes) in enumerate(figs, 1):
+        axes[0, 0].legend(fontsize=6.5, ncol=4, loc="upper left"); axes[0, 1].legend(fontsize=6.5, loc="upper left")
+        fig.tight_layout()
+        name = "forecast_demo.png" if len(figs) == 1 else f"forecast_demo_{k}.png"
+        fig.savefig(out / name, dpi=130, facecolor=SURFACE)
+        plt.close(fig)
+        print(f"wrote {out / name}")
+    print("stars: " + " ".join(str(val[i].meta.get("id")) for i in picks))
 
 
 if __name__ == "__main__":
