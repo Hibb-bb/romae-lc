@@ -151,6 +151,11 @@ def load_data(args, splits: Sequence[str] = ("train", "validation")) -> Data:
         out = {s: [normalize(records[i], ref_days=nd) for i in parts[s]] for s in splits}
         wl = {i: s.wavelength_nm for i, s in enumerate(DEFAULT_SURVEYS)}
         return Data(out, CLASSES, wl)
+    from project.chen_data import is_cache, load_chen
+
+    if is_cache(args.data):  # the 800k-star Chen cache (project.chen_data): our periods, splits by id hash
+        out, classes = load_chen(args.data, splits, args.max_rows, args.min_points)
+        return Data(out, classes, wavelengths_for(PC_BANDS))
     classes = class_vocabulary(args.data)
     keep = None if not args.classes else set(args.classes)
     if keep and not keep <= set(classes):
