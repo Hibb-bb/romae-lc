@@ -165,7 +165,7 @@ def main(argv=None):
             ax_t.plot(t_win[m & mask[0].numpy()], y[m & mask[0].numpy()], "o", ms=3.5, mfc="none", color=BAND_COLOUR.get(int(b), INK2), alpha=0.9, label=f"hidden, band {b}" if row == 0 else None)
         tt = torch.linspace(zoom_lo, zoom_hi, 600)
         tpl = T.eval(rows, (start + tt)[None].double(), torch.full((1, 600), main_band, dtype=torch.long))[0]
-        ax_t.plot(tt, tpl, "-", color=INK2, lw=0.9, alpha=0.6, label="template" if row == 0 else None)
+        ax_t.plot(tt, tpl, "-", color=INK2, lw=0.9, alpha=0.6, label="template, smooth fit" if row == 0 else None)
         ax_t.axvline(t_hide, color=INK2, lw=0.8, ls=":")
         titles = []
         phase_hid = ((start + hid_t.double()) / period) % 1.0
@@ -180,7 +180,7 @@ def main(argv=None):
             tm = ((p2[0, 0].float() - 1.0) * ts)[mask2[0]]
             real = ~pad2[0][mask2[0]]
             pq, tq_ = pred[isq & real], tm[isq & real]
-            ax_t.plot(tq_, pq, "-", color=colour_of(name, k), lw=1.4, alpha=ALPHA, label=name if row == 0 else None)
+            ax_t.plot(tq_, pq, "-", color=colour_of(name, k), lw=1.4, alpha=ALPHA, label=f"{name} at dense query times" if row == 0 else None)
             ph, th = pred[~isq & real], tm[~isq & real]
             tpl_h = tv2[0][mask2[0]][~isq & real]
             ev = 1 - float(((ph - tpl_h) ** 2).mean() / tpl_h.var()) if tpl_h.numel() > 2 else float("nan")
@@ -189,7 +189,7 @@ def main(argv=None):
         ax_t.set_xlim(zoom_lo, zoom_hi)
         est = f"; spectral estimate off by {100 * r.meta['f_err']:.3g} %" if "f_err" in r.meta else ""
         ax_t.set_title(f"{r.meta.get('class_str')}  P = {period:.5g} d  window start day {start:.0f}{est}; hidden points explained: " + ", ".join(titles), fontsize=8, loc="left", color=INK)
-        ax_t.set_xlabel("days in the window", fontsize=8); ax_f.set_xlabel("phase of the hidden points (whole hidden stretch)", fontsize=8)
+        ax_t.set_xlabel("days in the window (lines: dense curves; dots: observations)", fontsize=8); ax_f.set_xlabel("phase of the hidden points (whole hidden stretch)", fontsize=8)
         ax_t.tick_params(labelsize=7); ax_f.tick_params(labelsize=7)
     for k, (fig, axes) in enumerate(figs, 1):
         axes[0, 0].legend(fontsize=6.5, ncol=4, loc="upper left"); axes[0, 1].legend(fontsize=6.5, loc="upper left")
