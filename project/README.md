@@ -45,8 +45,10 @@ python -m project.pretrain_mae --data sim --n-sim 256 --size light --window 250 
 python -m project.pretrain_mae --data sim --n-sim 20000 --size light --window 250 --n-frames 1 \
     --min-tokens 16 --max-tokens 256 --steps 20000 --batch-size 64 --workers 8 \
     --eval-every 2500 --ckpt-every 500 --out project/runs/sim_mae
-#    the best encoder on ZTF adds the spectral layer and its auxiliary loss:
-#    --size wide --spectral --spectral-aux 0.5
+#    the best encoder on ZTF (project/runs/maew_spec, 100k steps, about 15 GPU hours as 2 h links) was trained with
+#    the chain script, which adds the window, token and optimiser defaults:
+#    sbatch --job-name=mae-wspec --export=ALL,OUT=project/runs/maew_spec project/jobs/pretrain_mae.sh \
+#        --size wide --steps 100000 --batch-size 128 --eval-every 10000 --spectral --spectral-aux 0.5
 
 # 3. encode every window of every star once (the frozen latents)
 python -m project.cache_latents --ckpt project/runs/sim_mae/mae.pt --out project/runs/sim_mae/latents.pt --workers 8
