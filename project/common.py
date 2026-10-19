@@ -1296,13 +1296,18 @@ def probe_metrics(
     of the class probe (fit and score; ``n_class_excluded`` counts them) and
     kept in every period metric."""
     y_tr, y_va = (np.array([r.label for r in rs]) for rs in (r_tr, r_va))
-    p_tr, p_va = (np.log10([r.period for r in rs]) for rs in (r_tr, r_va))
+    # records without a period (the Chen set: no clean fold) stay out of the period metrics; unlabelled ones out of the class probe
+    p_tr, p_va = (np.log10(np.array([float(r.period) if r.period and r.period > 0 else np.nan for r in rs])) for rs in (r_tr, r_va))
     k_tr, k_va = (
-        np.array([fine_class(r) not in ANOMALY_CLASSES for r in rs], dtype=bool)
+        np.array([fine_class(r) not in ANOMALY_CLASSES and r.label >= 0 for r in rs], dtype=bool)
         for rs in (r_tr, r_va)
     )
     out = linear_probe(z_tr[k_tr], y_tr[k_tr], z_va[k_va], y_va[k_va], n_classes)
     out["n_class_excluded"] = int((~k_tr).sum() + (~k_va).sum())
+    f_tr, f_va = np.isfinite(p_tr), np.isfinite(p_va)
+    z_tr, p_tr, r_tr = z_tr[f_tr], p_tr[f_tr], [r for r, f in zip(r_tr, f_tr) if f]
+    z_va, p_va, r_va = z_va[f_va], p_va[f_va], [r for r, f in zip(r_va, f_va) if f]
+    out["n_period"] = int(f_va.sum())
     out["r2"] = ridge_r2(z_tr, p_tr, z_va, p_va)
     g_tr, g_va = (np.array([superclass(r) for r in rs]) for rs in (r_tr, r_va))
     means = {g: float(p_tr[g_tr == g].mean()) for g in set(g_tr.tolist())}
