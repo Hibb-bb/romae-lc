@@ -28,7 +28,7 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
 | 2 | a bottleneck so the pooled latent must carry period and phase | parked until step 1 works; the stage-1 bottleneck of 2026-09-28 never learned a period |
 | 3 | a student that infers its own period, distilled on the teacher's outputs | alive, after step 1 |
 | 4 | the world model conditioned on the time gap (copy the right phase point forward) | alive, after step 3 |
-| 5 | scale to the 800k-star Chen set (`/projects/bfrf/data/chen`): our own period table first (label-free pretraining with model periods); the Chen labels only as a weak check | alive, plan only, no coding yet |
+| 5 | scale to the 800k-star Chen set: our own period table (done, 712,278 stars), then pretraining with the auxiliary loss on our own periods | started 2026-10-19: cache job + 9 links of the base recipe (`chen_spec`) on the chain; the rope/cycle fine-tune follows from that checkpoint |
 
 ## Items added 2026-10-09 (step 1, the revised recipe)
 
