@@ -56,6 +56,7 @@ def parse_args(argv=None):
     p.add_argument("--n-good", type=int, default=3)
     p.add_argument("--n-bad", type=int, default=3)
     p.add_argument("--far-cycles", type=float, default=0.0, help="if > 0, the time view starts this many cycles into the hidden stretch instead of at its start")
+    p.add_argument("--exclude", nargs="*", default=(), help="star ids not to pick again")
     p.add_argument("--out", required=True)
     p.add_argument("--seed", type=int, default=0)
     add_device_arg(p)
@@ -88,7 +89,7 @@ def main(argv=None):
         from project.mae_data import make_mask as _mm
 
         first = next(iter(models.values()))
-        cand = [i for i, r in enumerate(val) if r.t.size >= a.min_points and str(r.meta.get("id")) in lookup and r.period and r.period < 20]
+        cand = [i for i, r in enumerate(val) if r.t.size >= a.min_points and str(r.meta.get("id")) in lookup and r.period and r.period < 20 and str(r.meta.get("id")) not in set(a.exclude)]
         rng.shuffle(cand)
         good, bad = [], []
         for i in cand:
@@ -182,6 +183,28 @@ def main(argv=None):
     fig.tight_layout()
     fig.savefig(out / "forecast_demo.png", dpi=130, facecolor=SURFACE)
     print(f"wrote {out / 'forecast_demo.png'}")
+    # the companion: the whole light curve of every star folded on the table period, same row order
+    from project import fold as _fold
+    from project.eval.ls_benchmark import star_inputs
+    from project.eval.period_report import fold_panel
+
+    ncol = 2
+    nrow = (len(picks) + ncol - 1) // ncol
+    f2, ax2 = plt.subplots(nrow, ncol, figsize=(13, 3.2 * nrow), dpi=130, squeeze=False)
+    f2.patch.set_facecolor(SURFACE)
+    for k, i in enumerate(picks):
+        r = val[i]
+        period = float(lookup[str(r.meta["id"])])
+        t_, y_, e_, b_, _ = star_inputs(r)
+        r2 = _fold.fold_r2(t_, y_, e_, b_, period, 6)
+        est = f", spectral estimate off by {100 * r.meta['f_err']:.3g} %" if "f_err" in r.meta else ""
+        fold_panel(ax2[k // ncol, k % ncol], r, period, f"{r.meta.get('class_str')} {r.meta.get('id')}{est}", r2, template=False)
+    for k in range(len(picks), nrow * ncol):
+        ax2[k // ncol, k % ncol].axis("off")
+    f2.suptitle("The same stars: the whole light curve folded on the table period (two cycles)", fontsize=10, color=INK, x=0.01, ha="left")
+    f2.tight_layout(rect=(0, 0, 1, 0.975))
+    f2.savefig(out / "folded.png", dpi=130, facecolor=SURFACE)
+    print(f"wrote {out / 'folded.png'}; stars: " + " ".join(str(val[i].meta.get("id")) for i in picks))
 
 
 if __name__ == "__main__":
