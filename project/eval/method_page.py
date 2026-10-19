@@ -184,7 +184,7 @@ flowchart LR
         <tr><td>maew_spec</td><td>base encoder, observed targets, 100k steps</td><td class=n>0.790 / 0.724</td><td>decoder copies within half a cycle</td></tr>
         <tr><td>cyc</td><td>warm start, templates, queries in cycles</td><td class=n>0.808 / 0.733</td><td>about 20 cycles</td></tr>
         <tr><td>cycrope</td><td>cyc + phase rope, soft estimate</td><td class=n>0.770 / 0.664</td><td>far for the 3 % of windows with a precise estimate</td></tr>
-        <tr><td>cycrope2</td><td>cyc + phase rope, local-centroid estimate</td><td class=n>0.751 / 0.230 (pooled read-out)</td><td>far for the 66 % with a precise estimate; see the figure below</td></tr>
+        <tr><td>cycrope2</td><td>cyc + phase rope, local-centroid estimate</td><td class=n>0.751 / 0.230 (pooled read-out)</td><td>0.83 to 0.94 explained at 20 to 100 cycles for the 56 % of windows with a clean peak, 0.6 to 0.9 beyond 100; about 0.2 for the rest</td></tr>
       </table></div>
       <p class="note">With the rope the decoder reads the fine frequency straight from the spectral scores, so the pooled vector stops carrying it and the read-out on the pooled vector loses precision. The period should then be read from the spectral peak itself; that probe is being added.</p>
     </div>
@@ -213,7 +213,7 @@ flowchart LR
       <h3>What the tests established</h3>
       <ul>
         <li>Without an explicit phase coordinate every decoder is a copier, on sines and on real stars; the cycle curriculum alone stretches that to about 20 cycles.</li>
-        <li>With the coordinate at the true frequency the decoder is perfect 300 cycles out; at the model's own frequency it is as good as the estimate is precise: 0.97 explained to 20 cycles and 0.88 at 20 to 100 for windows within 0.05 %.</li>
+        <li>With the coordinate at the true frequency the decoder is perfect 300 cycles out; at the model's own frequency it is as good as the estimate is precise. With the local-centroid estimate (cycrope2) the real-data reach is 0.83 to 0.94 explained at 20 to 100 cycles and 0.6 to 0.9 beyond 100 for the 56 % of windows whose peak is the true one, against 0.06 for the same decoder without the rope.</li>
         <li>The pooled vector holds no phase in any encoder; the decoder reads it from the tokens.</li>
         <li>The auxiliary loss on the period bin is what makes the estimate sharp; without it the far reach is gone.</li>
       </ul>
