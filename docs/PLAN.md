@@ -118,3 +118,23 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
 - The observed-target twin of the whole-curve run: cancelled 2026-10-08.
 - Token JEPA alone as the way to period precision: run 1 reached 0.63 within 10 % and 0.13
   within 1 %; the objective is satisfied by a rough period. Kept only as a comparison.
+
+## Clean-up of the repository (started 2026-10-19)
+
+Order agreed with the user: record first, remove later; no code moves while
+the 800k pretraining chain runs from this working tree.
+
+1. **done 2026-10-19** — the record: `docs/EXPERIMENTS.md` (one row per run
+   and result folder with recipe, headline number and verdict) and
+   `docs/CODE-MAP.md` (one line per file with a proposed status); git tag
+   `pre-cleanup-2026-10-19`.
+2. open — secure the paper's evidence: copy the checkpoints and result
+   folders listed in the ledger's section 5 to one archive under `/work`
+   with a manifest; list the rest for the user before anything is removed.
+3. open — move the world-model line and the rejected ideas to
+   `project/archive/` (code, jobs, tests), in a separate checkout, merged
+   between chain links; delete after a month if nothing missed them.
+4. open — make it usable by others: one entry README with the commands that
+   reproduce the main table, data and output roots behind one config, CPU
+   tests in GitHub Actions.
+5. open — split `project/common.py` last.
