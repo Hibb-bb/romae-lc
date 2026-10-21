@@ -17,7 +17,6 @@ ap.add_argument("--label", default="")
 a = ap.parse_args()
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 _, meta = load_encoder(a.ckpts[0], "cpu")
-cfg, spec = meta.cfg, meta.spec
 dargs = data_args_from(meta.args)
 if a.data:
     dargs.data = a.data
@@ -38,9 +37,6 @@ if a.chen_csv:
                 pass
     truths["Chen sharpened"] = np.array([m.get(str(r.meta.get("id")), np.nan) for r in recs])
 print(f"[{a.label}] {len(val)} validation stars with a period, {len(recs)} probed, device {dev}", flush=True)
-ds = WindowDataset([("validation", recs, list(idx))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)
-loader = DataLoader(ds, 256, shuffle=False, num_workers=0, collate_fn=make_collate(spec))
-off = ds.offsets[0]
 TOL = (0.1, 0.01, 0.001, 1e-4)
 
 def hits(p_hat, p):
@@ -52,7 +48,14 @@ def hits(p_hat, p):
 
 for ck in a.ckpts:
     step = torch.load(ck, map_location="cpu", weights_only=False).get("step", "?")
-    enc, _ = load_encoder(ck, dev)
+    enc, meta = load_encoder(ck, dev)
+    # every checkpoint gets tokens built with its own spec (time scale, error stats) and
+    # its own window; the first version used the first checkpoint's for all of them
+    cfg, spec = meta.cfg, meta.spec
+    ds = WindowDataset([("validation", recs, list(idx))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)
+    loader = DataLoader(ds, 256, shuffle=False, num_workers=0, collate_fn=make_collate(spec))
+    off = ds.offsets[0]
+    print(f"[{a.label}] {ck}: window {cfg.window} d, max_tokens {cfg.max_tokens}, time_scale {spec.tokenize.time_scale:.5f}, {ds.total} windows", flush=True)
     model = enc.backbone.model if hasattr(enc.backbone, "model") else enc.backbone
     f_all = torch.empty(ds.total)
     n_tok = torch.empty(ds.total, dtype=torch.long)

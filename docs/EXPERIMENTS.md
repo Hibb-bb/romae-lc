@@ -46,7 +46,7 @@ rotary ladder unless stated. "light" = 192 wide x 6 blocks (3 heads), "wide"
 | `mae_spec50` | 10-05 | light, spectral + aux 0.5 | 50k / 64 | 0.76 / 0.35 | PAPER (size row) |
 | **`maew_spec`** | 10-05 to 10-08 | **wide, spectral + aux 0.5, random masks, 100k steps: the paper's encoder** | 100k / 128 | **0.79 / 0.72** (pooled read-out); spectral peak alone 0.82 / 0.81 / 0.80 / 0.71 within 10 / 1 / 0.1 / 0.01 % | PAPER |
 | `enc_maespec50` | 10-16 | wide, spectral, NO aux, stretch + random masks | 50k / 64 | 0.72 / 0.19 | PAPER (the aux loss gives the precision) |
-| `chen_spec` | 10-19, running | wide, spectral + aux 0.5 on OUR periods, 800k-star Chen set, 100k steps | 31k of 100k / 128 | in-training probe R2 0.87 at 30k | open (step 5 of the plan) |
+| `chen_spec` | 10-19 to 10-20 | wide, spectral + aux 0.5 on OUR periods, 800k-star Chen set, 100k steps (14.9 GPU h) | 100k / 128 | spectral peak, 1000 held-out stars each: Chen val vs Chen's sharpened period 0.77 / 0.75 / 0.74 / 0.68 within 10 / 1 / 0.1 / 0.01 % (alias-tolerant 0.82 / 0.79); ZTFxPC val 0.82 / 0.81 / 0.80 / 0.71 (alias-tolerant 0.88 / 0.86), the same as `maew_spec` there | open (ZTFxPC val may overlap Chen's training shards) |
 
 Command of the paper's encoder (the chain script adds window, token and
 optimiser defaults):
@@ -86,8 +86,9 @@ the ones marked "results only" were removed earlier; the probe results stay.
 |---|---|---|---|
 | `enc_jepa` | token-level JEPA (EMA target, no reconstruction, no aux) | 0.63 / 0.13 | ABLATION |
 | `enc_jepainit` | JEPA warm-started from `maew_spec` | 0.73 / 0.58 | ABLATION |
-| `enc_jepahyb` | JEPA + reconstruction weight (queued, at 39.3k of 50k) | pending | open |
-| `enc_longspecwtpl` | whole curve as one window, wide + spectral, template targets on the catalogue period | 0.60 / 0.11 | DEAD |
+| `enc_jepahyb` | JEPA + reconstruction weight 0.5, blockplus masks, no aux | 0.72 / 0.48 | ABLATION (better 1 % than the no-aux baseline `enc_maespec50`, below `enc_jepainit`) |
+| `enc_longspecwtpl` | whole curve as one window, wide + spectral, template targets on the catalogue period, batch 32 (an eighth of the tokens per step) | 0.60 / 0.11 | DEAD (unmatched; see `enc_wholecurve`) |
+| `enc_wholecurve` | 10-21, running | whole curve as one 2000 d window, 1024 random points, batch 256 (tokens per step = `maew_spec`), spectral + aux 0.5, observed targets, random masks, 50k steps | pending | open (decides whether the 250 d window can go) |
 | `enc_gruode` | GRU-ODE encoder, 768 wide, ODE 256 (2.2 M), stopped at 16.9k of 30k | 0.38 / 0.06 | ABLATION (baseline row; 744 ms per star single, 24 ms batched) |
 
 ## 2. The decoder line (warm start from `maew_spec`, 50k steps, batch 64)
