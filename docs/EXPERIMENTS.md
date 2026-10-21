@@ -46,7 +46,7 @@ rotary ladder unless stated. "light" = 192 wide x 6 blocks (3 heads), "wide"
 | `mae_spec50` | 10-05 | light, spectral + aux 0.5 | 50k / 64 | 0.76 / 0.35 | PAPER (size row) |
 | **`maew_spec`** | 10-05 to 10-08 | **wide, spectral + aux 0.5, random masks, 100k steps: the paper's encoder** | 100k / 128 | **0.79 / 0.72** (pooled read-out); spectral peak alone 0.82 / 0.81 / 0.80 / 0.71 within 10 / 1 / 0.1 / 0.01 % | PAPER |
 | `enc_maespec50` | 10-16 | wide, spectral, NO aux, stretch + random masks | 50k / 64 | 0.72 / 0.19 | PAPER (the aux loss gives the precision) |
-| `chen_spec` | 10-19 to 10-20 | wide, spectral + aux 0.5 on OUR periods, 800k-star Chen set, 100k steps (14.9 GPU h) | 100k / 128 | spectral peak, 1000 held-out stars each: Chen val vs Chen's sharpened period 0.77 / 0.75 / 0.74 / 0.68 within 10 / 1 / 0.1 / 0.01 % (alias-tolerant 0.82 / 0.79); ZTFxPC val 0.82 / 0.81 / 0.80 / 0.71 (alias-tolerant 0.88 / 0.86), the same as `maew_spec` there | open (ZTFxPC val may overlap Chen's training shards) |
+| `chen_spec` | 10-19 to 10-20 | wide, spectral + aux 0.5 on OUR periods, 800k-star Chen set, 100k steps (14.9 GPU h) | 100k / 128 | spectral peak, 1000 held-out stars each: Chen val vs Chen's sharpened period 0.77 / 0.75 / 0.74 / 0.68 within 10 / 1 / 0.1 / 0.01 % (alias-tolerant 0.82 / 0.79); ZTFxPC val 0.82 / 0.81 / 0.80 / 0.71 (alias-tolerant 0.88 / 0.86), the same as `maew_spec` there | open (no overlap between the Chen set and ZTFxPC, per Dennis; same-star comparison with `maew_spec` queued) |
 
 Command of the paper's encoder (the chain script adds window, token and
 optimiser defaults):
