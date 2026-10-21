@@ -89,6 +89,7 @@ the ones marked "results only" were removed earlier; the probe results stay.
 | `enc_jepahyb` | JEPA + reconstruction weight 0.5, blockplus masks, no aux | 0.72 / 0.48 | ABLATION (better 1 % than the no-aux baseline `enc_maespec50`, below `enc_jepainit`) |
 | `enc_longspecwtpl` | whole curve as one window, wide + spectral, template targets on the catalogue period, batch 32 (an eighth of the tokens per step) | 0.60 / 0.11 | DEAD (unmatched; see `enc_wholecurve`) |
 | `enc_wholecurve` | 10-21, running | whole curve as one 2000 d window, 1024 random points, batch 256 (tokens per step = `maew_spec`), spectral + aux 0.5, observed targets, random masks, 50k steps | pending | open (decides whether the 250 d window can go) |
+| `enc_chenft` | 10-21, queued | `chen_spec` post-trained on ZTFxPC with the `maew_spec` recipe (warm start, fresh optimiser, 30k steps, aux on the ZTFxPC catalogue period; Chen's own periods are never a target) | pending | open (Dennis's plan: pretrain on 800k, post-train on ZTFxPC) |
 | `enc_gruode` | GRU-ODE encoder, 768 wide, ODE 256 (2.2 M), stopped at 16.9k of 30k | 0.38 / 0.06 | ABLATION (baseline row; 744 ms per star single, 24 ms batched) |
 
 ## 2. The decoder line (warm start from `maew_spec`, 50k steps, batch 64)
