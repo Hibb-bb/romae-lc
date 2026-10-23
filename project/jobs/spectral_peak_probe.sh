@@ -17,5 +17,7 @@
 export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1
 source .venv/bin/activate
 CK="${CK:-project/runs/chen_spec/mae.pt project/runs/maew_spec/mae.pt}"   # the data root is given explicitly on both lines: the default would be the FIRST checkpoint's
-python -m project.eval.spectral_peak_probe --ckpts $CK --data /work/hdd/bfrf/hibb/chen_cache --chen-csv project/results/period_chen/periods.csv --n 1000 --label chen-val
-python -m project.eval.spectral_peak_probe --ckpts $CK --data /projects/bfrf/data/PC_matches/ZTFxPC --n 1000 --label ztfxpc-val
+N="${N:-1000}"          # stars per set; a number above the set size scores every validation star
+CHEN="${CHEN:-1}"       # CHEN=0 skips the Chen set (its periods are not accurate; Dennis 10-23)
+[ "$CHEN" = 1 ] && python -m project.eval.spectral_peak_probe --ckpts $CK --data /work/hdd/bfrf/hibb/chen_cache --chen-csv project/results/period_chen/periods.csv --n $N --label chen-val
+python -m project.eval.spectral_peak_probe --ckpts $CK --data /projects/bfrf/data/PC_matches/ZTFxPC --n $N --label ztfxpc-val
