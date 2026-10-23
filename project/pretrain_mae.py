@@ -194,6 +194,19 @@ def add_train_args(parser) -> None:
         default=0.0,
         help="weight of the auxiliary cross-entropy of the layer's logits against the catalogue period's bin (target only); 0 = off",
     )
+    # the dynamic-state add-on (project.dyn): a per-token state advanced by a rotation at the spectral layer's own
+    # frequency, with a same-window contrastive term and SIGReg in time; label-free
+    g.add_argument("--dyn", type=int, default=0, help="rotation blocks K of the dynamic-state add-on (needs --spectral); 0 = off")
+    g.add_argument("--dyn-weight", type=float, default=1.0, help="weight of the add-on's loss in the total")
+    g.add_argument("--dyn-nce", type=float, default=0.2, help="weight of the same-window contrastive term")
+    g.add_argument("--dyn-sig", type=float, default=1.0, help="weight of SIGReg on the states centred per window")
+    g.add_argument("--dyn-mean", type=float, default=1.0, help="weight of the squared per-window mean state")
+    g.add_argument("--dyn-tau", type=float, default=1.0, help="temperature of the contrastive logits (squared distances)")
+    g.add_argument("--dyn-pairs", type=int, default=128, help="source-target pairs per window and step")
+    g.add_argument("--dyn-dt", type=float, nargs=2, default=(0.5, 60.0), metavar=("MIN", "MAX"),
+                   help="gap range in days; the largest gap ramps geometrically from MIN to MAX over --dyn-ramp of the steps")  # fmt: skip
+    g.add_argument("--dyn-ramp", type=float, default=0.6)
+    g.add_argument("--dyn-freq", choices=["soft", "peak", "local"], default="local", help="how the clock speed is read off the spectral logits")
     g.add_argument(
         "--abs-time",
         action="store_true",
@@ -528,7 +541,14 @@ def main(argv=None):
 
         fold_dec = PhaseDecoder(model.embed_dim, model.embed_dim, args.dec_width, args.dec_heads, args.dec_depth, args.fold_harm,
                                 len(spec.tokenize["band_wavelengths"]), latent_drop=0.0).to(dev)  # fmt: skip
-    aux_modules = [m for m in (phase_head, fold_dec) if m is not None]
+    dyn = None
+    if args.dyn > 0 and not args.bottleneck:
+        if not args.spectral:
+            parser.error("--dyn needs --spectral (the clock speed comes from the spectral layer)")
+        from project.dyn import DynHead
+
+        dyn = DynHead(model.embed_dim, args.dyn).to(dev)
+    aux_modules = [m for m in (phase_head, fold_dec, dyn) if m is not None]
     train_periods = torch.tensor([float(r.period or float("nan")) for r in train], dtype=torch.float64)
     smooth = args.target != "obs"
     record_templates = None
@@ -674,6 +694,19 @@ def main(argv=None):
         loss = out.loss
         if aux and periods_rows is not None:
             loss = loss + aux_losses(out, values, positions, pad, periods_rows)
+        if dyn is not None and model.training:
+            # the dynamic-state add-on on the visible-token outputs; the clock speed is the encoder's own estimate
+            from romae_lc.model import spectral_frequency
+
+            frac = min(step_now / max(args.dyn_ramp * args.steps, 1), 1.0)
+            dt_max = args.dyn_dt[0] * (args.dyn_dt[1] / args.dyn_dt[0]) ** frac
+            f = spectral_frequency(model.spectral, None, args.dyn_freq)
+            t_days = (out.enc_positions[:, 0, 1:].float() - 1.0) * spec.tokenize["time_scale"]
+            l_dyn, st = dyn(out.enc_tokens[:, 1:], out.enc_tokens[:, 0], out.enc_pad[:, 1:], t_days, f, dt_max, args.dyn_pairs,
+                            args.dyn_dt[0], args.dyn_tau, args.dyn_nce, args.dyn_sig, args.dyn_mean)  # fmt: skip
+            for k_, v_ in st.items():
+                aux_stats.setdefault(f"dyn_{k_}", []).append(v_)
+            loss = loss + args.dyn_weight * l_dyn
         return loss
 
     print(
@@ -688,7 +721,7 @@ def main(argv=None):
     step, epoch, elapsed, last_metrics = 0, 0, 0.0, None
     if ckpt is not None:
         model.load_state_dict(ckpt["state_dict"])
-        for name, m in (("phase_head", phase_head), ("fold_dec", fold_dec)):
+        for name, m in (("phase_head", phase_head), ("fold_dec", fold_dec), ("dyn", dyn)):
             if m is not None and name in ckpt.get("aux", {}):
                 m.load_state_dict(ckpt["aux"][name])
         opt.load_state_dict(ckpt["opt"])
@@ -716,7 +749,7 @@ def main(argv=None):
     def save(path, metrics, with_opt=True):
         state = state_fn(model, spec, cfg, ladder, data.classes, args, step, metrics)
         state.update(epoch=epoch, elapsed=elapsed, wandb_id=tracker.id,
-                     aux={n: m.state_dict() for n, m in (("phase_head", phase_head), ("fold_dec", fold_dec)) if m is not None})  # fmt: skip
+                     aux={n: m.state_dict() for n, m in (("phase_head", phase_head), ("fold_dec", fold_dec), ("dyn", dyn)) if m is not None})  # fmt: skip
         if with_opt:
             state.update(opt=opt.state_dict(), sched=sched.state_dict())
         save_atomic(state, path)
