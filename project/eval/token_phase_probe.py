@@ -85,16 +85,19 @@ def pick_windows(ds):
 
 
 @torch.no_grad()
-def embed(model, ds, spec, cfg, min_tokens):
-    """Per real token: h, the window's cls, psi, raw features, star and window ids."""
+def embed(model, ds, spec, cfg, min_tokens, dyn=None):
+    """Per real token: h, the window's cls, psi, raw features, star and window ids,
+    and the dynamic state s when the checkpoint trained the add-on (project.dyn)."""
     ts = spec.tokenize["time_scale"]
     loader = DataLoader(Subset(ds, pick_windows(ds)), 128, shuffle=False, num_workers=0, collate_fn=make_collate(spec))
-    H, CLS, PSI, RAW, STAR, WIN = [], [], [], [], [], []
+    H, CLS, PSI, RAW, STAR, WIN, S = [], [], [], [], [], [], []
     n_win = 0
     for b in loader:
         tok = b["tokens"]
         x, pad = model.encode(tok.values.to(dev), tok.positions.to(dev), tok.pad_mask.to(dev))
         x = x.float()
+        if dyn is not None:
+            S.append(dyn.states(x[:, 1:])[~pad[:, 1:] & (b["n_tokens"].to(dev) >= min_tokens)[:, None]].cpu())
         real = ~pad[:, 1:] & (b["n_tokens"].to(dev) >= min_tokens)[:, None]  # windows below the checkpoint's minimum drop out
         t_days = (tok.positions[:, 0].to(dev).float() - 1.0) * ts
         obj = b["obj"].numpy()  # position in recs (the subset list is recs itself)
@@ -119,7 +122,7 @@ def embed(model, ds, spec, cfg, min_tokens):
         STAR.append(torch.as_tensor(obj, device=dev)[:, None].expand_as(mag)[real].cpu())
         WIN.append(widx[real].cpu())
     return (torch.cat(H).numpy(), torch.cat(CLS).numpy(), torch.cat(PSI).numpy(), torch.cat(RAW).numpy(),
-            torch.cat(STAR).numpy(), torch.cat(WIN).numpy())
+            torch.cat(STAR).numpy(), torch.cat(WIN).numpy(), torch.cat(S).numpy() if S else None)
 
 
 def r2(y, p):
@@ -127,7 +130,7 @@ def r2(y, p):
     return [float(v) for v in 1 - ((y - p) ** 2).sum(0) / ((y - y.mean(0)) ** 2).sum(0)]
 
 
-def probes(h, cls_w, psi, raw, star, win):
+def probes(h, cls_w, psi, raw, star, win, s=None):
     from sklearn.linear_model import RidgeCV
     from sklearn.neural_network import MLPRegressor
     from sklearn.preprocessing import StandardScaler
@@ -157,6 +160,11 @@ def probes(h, cls_w, psi, raw, star, win):
     hc = np.concatenate([h, c_tok], 1)
     out["h+cls | mlp"], p_hc = mlp(hc, with_pred=True)
     out["cls | mlp (control)"] = mlp(c_tok)
+    if s is not None:  # the trained dynamic state of the add-on (project.dyn): 2K numbers per token
+        s = s.astype(np.float32)
+        out["s | ridge"] = ridge(s)
+        out["s | mlp"] = mlp(s)
+        out["s+cls | mlp"] = mlp(np.concatenate([s, c_tok], 1))
     # shuffle control: targets permuted among the tokens of the same star
     Ysh = Y.copy()
     for s in np.unique(star):
@@ -184,7 +192,16 @@ for k, ck in enumerate(a.ckpts):
     model = enc.backbone.model
     cfg, spec = meta.cfg, meta.spec
     ds = WindowDataset([("validation", recs, list(range(len(recs))))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)
-    variants = [(ck, model)]
+    dyn = None
+    dyn_sd = torch.load(ck, map_location="cpu", weights_only=False).get("aux", {}).get("dyn")
+    if dyn_sd is not None:
+        from project.dyn import DynHead
+
+        dyn = DynHead(dyn_sd["s_head.weight"].shape[1], dyn_sd["s_head.weight"].shape[0] // 2).to(dev)
+        dyn.load_state_dict(dyn_sd)
+        dyn.eval()
+        print(f"[{a.label}] {ck}: dynamic-state head found (K = {dyn.K}), its state s is probed too", flush=True)
+    variants = [(ck, model, dyn)]
     if k == 0 and a.random_init:
         import copy
         m2 = copy.deepcopy(model)
@@ -192,10 +209,10 @@ for k, ck in enumerate(a.ckpts):
         for mod in m2.modules():
             if hasattr(mod, "reset_parameters"):
                 mod.reset_parameters(); n_re += 1
-        variants.append((f"{ck} [random init: {n_re} layers re-initialised]", m2.to(dev).eval()))
-    for name, m in variants:
+        variants.append((f"{ck} [random init: {n_re} layers re-initialised]", m2.to(dev).eval(), None))
+    for name, m, dh in variants:
         t0 = time.time()
-        feats = embed(m, ds, spec, cfg, cfg.min_tokens)
+        feats = embed(m, ds, spec, cfg, cfg.min_tokens, dh)
         res = probes(*feats)
         res["seconds"] = round(time.time() - t0)
         results[name] = res

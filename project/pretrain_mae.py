@@ -207,6 +207,9 @@ def add_train_args(parser) -> None:
                    help="gap range in days; the largest gap ramps geometrically from MIN to MAX over --dyn-ramp of the steps")  # fmt: skip
     g.add_argument("--dyn-ramp", type=float, default=0.6)
     g.add_argument("--dyn-freq", choices=["soft", "peak", "local"], default="local", help="how the clock speed is read off the spectral logits")
+    g.add_argument("--dyn-freeze", action="store_true",
+                   help="freeze the encoder (needs --init or a resume): only the state head and the predictor train, on the full window "
+                        "without masking and without the reconstruction loss; tells whether the phase is already in the frozen tokens")  # fmt: skip
     g.add_argument(
         "--abs-time",
         action="store_true",
@@ -548,7 +551,25 @@ def main(argv=None):
         from project.dyn import DynHead
 
         dyn = DynHead(model.embed_dim, args.dyn).to(dev)
+        if args.dyn_freeze:
+            if not args.init and ckpt is None:
+                parser.error("--dyn-freeze needs --init (a trained encoder to freeze) or a resume")
+            model.requires_grad_(False)
+            print("encoder frozen: only the dynamic-state head and predictor train", flush=True)
     aux_modules = [m for m in (phase_head, fold_dec, dyn) if m is not None]
+
+    def dyn_term(tok, cl, pd, t_days, step_now):
+        """The add-on's loss on token outputs ``tok [R, N, D]`` (no CLS), ``cl [R, D]``, padding ``pd [R, N]``,
+        ``t_days [R, N]``; the clock speed is the spectral layer's own estimate from the same forward."""
+        from romae_lc.model import spectral_frequency
+
+        frac = min(step_now / max(args.dyn_ramp * args.steps, 1), 1.0)
+        dt_max = args.dyn_dt[0] * (args.dyn_dt[1] / args.dyn_dt[0]) ** frac
+        f = spectral_frequency(model.spectral, None, args.dyn_freq)
+        l_dyn, st = dyn(tok, cl, pd, t_days, f, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau, args.dyn_nce, args.dyn_sig, args.dyn_mean)
+        for k_, v_ in st.items():
+            aux_stats.setdefault(f"dyn_{k_}", []).append(v_)
+        return args.dyn_weight * l_dyn
     train_periods = torch.tensor([float(r.period or float("nan")) for r in train], dtype=torch.float64)
     smooth = args.target != "obs"
     record_templates = None
@@ -631,6 +652,12 @@ def main(argv=None):
         if isinstance(model, BottleneckAE):
             return model(fuse_tokens(frames)).loss
         values, positions, pad = fuse_frames(frames)
+        if dyn is not None and args.dyn_freeze and model.training:
+            # frozen encoder: the full window, no masking, no reconstruction; only the add-on's loss
+            with torch.no_grad():
+                x, _ = model.encode(values, positions, pad)
+            t_days = (positions[:, 0].float() - 1.0) * spec.tokenize["time_scale"]
+            return dyn_term(x[:, 1:].float(), x[:, 0].float(), pad, t_days, step_now)
         mode = args.mask_mode if mode is None else mode
         mask = None
         if mode != "random":
@@ -695,18 +722,9 @@ def main(argv=None):
         if aux and periods_rows is not None:
             loss = loss + aux_losses(out, values, positions, pad, periods_rows)
         if dyn is not None and model.training:
-            # the dynamic-state add-on on the visible-token outputs; the clock speed is the encoder's own estimate
-            from romae_lc.model import spectral_frequency
-
-            frac = min(step_now / max(args.dyn_ramp * args.steps, 1), 1.0)
-            dt_max = args.dyn_dt[0] * (args.dyn_dt[1] / args.dyn_dt[0]) ** frac
-            f = spectral_frequency(model.spectral, None, args.dyn_freq)
+            # the dynamic-state add-on on the visible-token outputs of the same masked forward
             t_days = (out.enc_positions[:, 0, 1:].float() - 1.0) * spec.tokenize["time_scale"]
-            l_dyn, st = dyn(out.enc_tokens[:, 1:], out.enc_tokens[:, 0], out.enc_pad[:, 1:], t_days, f, dt_max, args.dyn_pairs,
-                            args.dyn_dt[0], args.dyn_tau, args.dyn_nce, args.dyn_sig, args.dyn_mean)  # fmt: skip
-            for k_, v_ in st.items():
-                aux_stats.setdefault(f"dyn_{k_}", []).append(v_)
-            loss = loss + args.dyn_weight * l_dyn
+            loss = loss + dyn_term(out.enc_tokens[:, 1:], out.enc_tokens[:, 0], out.enc_pad[:, 1:], t_days, step_now)
         return loss
 
     print(
