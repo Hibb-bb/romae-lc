@@ -16,6 +16,6 @@
 #SBATCH --error=project/logs/%x-%j.err
 export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1
 source .venv/bin/activate
-CK="${CK:-project/runs/chen_spec/mae.pt project/runs/maew_spec/mae.pt}"
-python -m project.eval.spectral_peak_probe --ckpts $CK --chen-csv project/results/period_chen/periods.csv --n 1000 --label chen-val
+CK="${CK:-project/runs/chen_spec/mae.pt project/runs/maew_spec/mae.pt}"   # the data root is given explicitly on both lines: the default would be the FIRST checkpoint's
+python -m project.eval.spectral_peak_probe --ckpts $CK --data /work/hdd/bfrf/hibb/chen_cache --chen-csv project/results/period_chen/periods.csv --n 1000 --label chen-val
 python -m project.eval.spectral_peak_probe --ckpts $CK --data /projects/bfrf/data/PC_matches/ZTFxPC --n 1000 --label ztfxpc-val

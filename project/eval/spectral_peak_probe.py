@@ -55,7 +55,7 @@ for ck in a.ckpts:
     ds = WindowDataset([("validation", recs, list(idx))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)
     loader = DataLoader(ds, 256, shuffle=False, num_workers=0, collate_fn=make_collate(spec))
     off = ds.offsets[0]
-    print(f"[{a.label}] {ck}: window {cfg.window} d, max_tokens {cfg.max_tokens}, time_scale {spec.tokenize.time_scale:.5f}, {ds.total} windows", flush=True)
+    print(f"[{a.label}] {ck}: window {cfg.window} d, max_tokens {cfg.max_tokens}, time_scale {spec.tokenize['time_scale']:.5f}, {ds.total} windows", flush=True)
     model = enc.backbone.model if hasattr(enc.backbone, "model") else enc.backbone
     f_all = torch.empty(ds.total)
     n_tok = torch.empty(ds.total, dtype=torch.long)
