@@ -96,12 +96,15 @@ Spectral-peak hit rates on the SAME held-out stars (`project/eval/spectral_peak_
 job peak-all 10-23; 1000 stars per set, seed 0; strict within 10 / 1 / 0.1 / 0.01 %;
 noise about 1.3 points). Chen truth = Chen's sharpened period.
 
-| encoder | ZTFxPC val (953 stars) | Chen val (1000 stars) |
-|---|---|---|
-| `maew_spec` (ZTFxPC only, 100k) | 0.842 / 0.829 / 0.814 / 0.724 | 0.720 / 0.688 / 0.662 / 0.596 |
-| `enc_chenft` (800k then ZTFxPC 30k) | 0.832 / 0.823 / 0.814 / 0.731 | 0.744 / 0.723 / 0.690 / 0.624 |
-| `chen_spec` (800k only, 100k) | 0.821 / 0.811 / 0.801 / 0.710 | 0.770 / 0.754 / 0.740 / 0.678 |
-| `enc_wholecurve` (one 2000 d window, 50k) | 0.807 / 0.778 / 0.769 / 0.700 | 0.694 / 0.628 / 0.610 / 0.563 |
+| encoder | ZTFxPC val, ALL 5199 stars (job peak-allval) | ZTFxPC val (953 stars) | Chen val (1000 stars; rough only, Chen's periods are not accurate) |
+|---|---|---|---|
+| `maew_spec` (ZTFxPC only, 100k) | **0.852 / 0.838 / 0.828 / 0.746** | 0.842 / 0.829 / 0.814 / 0.724 | 0.720 / 0.688 / 0.662 / 0.596 |
+| `enc_chenft` (800k then ZTFxPC 30k) | **0.849 / 0.836 / 0.826 / 0.749** | 0.832 / 0.823 / 0.814 / 0.731 | 0.744 / 0.723 / 0.690 / 0.624 |
+| `chen_spec` (800k only, 100k) | 0.834 / 0.824 / 0.817 / 0.731 | 0.821 / 0.811 / 0.801 / 0.710 | 0.770 / 0.754 / 0.740 / 0.678 |
+| `enc_wholecurve` (one 2000 d window, 50k) | 0.810 / 0.773 / 0.763 / 0.700 (5345 stars: its own span filter) | 0.807 / 0.778 / 0.769 / 0.700 | 0.694 / 0.628 / 0.610 / 0.563 |
+
+The all-star column is the paper's number (noise about 0.5 points). `maew_spec` and
+`enc_chenft` tie there; `chen_spec` is 2 points behind; the whole curve 4 to 6.
 
 Reading: 800k pretraining lifts Chen stars by 5 to 8 points and costs 2 points on
 ZTFxPC; the post-train gets the ZTFxPC points back and keeps half of the Chen gain;
