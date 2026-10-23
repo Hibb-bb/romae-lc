@@ -88,9 +88,25 @@ the ones marked "results only" were removed earlier; the probe results stay.
 | `enc_jepainit` | JEPA warm-started from `maew_spec` | 0.73 / 0.58 | ABLATION |
 | `enc_jepahyb` | JEPA + reconstruction weight 0.5, blockplus masks, no aux | 0.72 / 0.48 | ABLATION (better 1 % than the no-aux baseline `enc_maespec50`, below `enc_jepainit`) |
 | `enc_longspecwtpl` | whole curve as one window, wide + spectral, template targets on the catalogue period, batch 32 (an eighth of the tokens per step) | 0.60 / 0.11 | DEAD (unmatched; see `enc_wholecurve`) |
-| `enc_wholecurve` | 10-21, running | whole curve as one 2000 d window, 1024 random points, batch 256 (tokens per step = `maew_spec`), spectral + aux 0.5, observed targets, random masks, 50k steps | pending | open (decides whether the 250 d window can go) |
-| `enc_chenft` | 10-21, queued | `chen_spec` post-trained on ZTFxPC with the `maew_spec` recipe (warm start, fresh optimiser, 30k steps, aux on the ZTFxPC catalogue period; Chen's own periods are never a target) | pending | open (Dennis's plan: pretrain on 800k, post-train on ZTFxPC) |
+| `enc_wholecurve` | 10-21 | whole curve as one 2000 d window, 1024 random points, batch 256 (tokens per step = `maew_spec`), spectral + aux 0.5, observed targets, random masks, 50k steps, 0.30 s/step | spectral peak, same 1000 stars: ZTFxPC 0.81 / 0.78 / 0.77 / 0.70, Chen (sharpened) 0.69 / 0.63 / 0.61 / 0.56 | ABLATION (matched run, 1 to 3 points behind the 250 d window on ZTFxPC, 3 to 6 on Chen; the window stays) |
+| `enc_chenft` | 10-21 to 10-22 | `chen_spec` post-trained on ZTFxPC with the `maew_spec` recipe (warm start, fresh optimiser, 30k steps, aux on the ZTFxPC catalogue period; Chen's own periods are never a target) | spectral peak, same 1000 stars: ZTFxPC 0.83 / 0.82 / 0.81 / 0.73, Chen (sharpened) 0.74 / 0.72 / 0.69 / 0.62 | open (ties `maew_spec` on ZTFxPC, keeps half of the 800k gain on Chen) |
 | `enc_gruode` | GRU-ODE encoder, 768 wide, ODE 256 (2.2 M), stopped at 16.9k of 30k | 0.38 / 0.06 | ABLATION (baseline row; 744 ms per star single, 24 ms batched) |
+
+Spectral-peak hit rates on the SAME held-out stars (`project/eval/spectral_peak_probe.py`,
+job peak-all 10-23; 1000 stars per set, seed 0; strict within 10 / 1 / 0.1 / 0.01 %;
+noise about 1.3 points). Chen truth = Chen's sharpened period.
+
+| encoder | ZTFxPC val (953 stars) | Chen val (1000 stars) |
+|---|---|---|
+| `maew_spec` (ZTFxPC only, 100k) | 0.842 / 0.829 / 0.814 / 0.724 | 0.720 / 0.688 / 0.662 / 0.596 |
+| `enc_chenft` (800k then ZTFxPC 30k) | 0.832 / 0.823 / 0.814 / 0.731 | 0.744 / 0.723 / 0.690 / 0.624 |
+| `chen_spec` (800k only, 100k) | 0.821 / 0.811 / 0.801 / 0.710 | 0.770 / 0.754 / 0.740 / 0.678 |
+| `enc_wholecurve` (one 2000 d window, 50k) | 0.807 / 0.778 / 0.769 / 0.700 | 0.694 / 0.628 / 0.610 / 0.563 |
+
+Reading: 800k pretraining lifts Chen stars by 5 to 8 points and costs 2 points on
+ZTFxPC; the post-train gets the ZTFxPC points back and keeps half of the Chen gain;
+the whole curve is behind everywhere. The old `maew_spec` figure 0.82 / 0.81 / 0.80 / 0.71
+came from a different star set.
 
 ## 2. The decoder line (warm start from `maew_spec`, 50k steps, batch 64)
 
