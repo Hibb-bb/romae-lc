@@ -128,8 +128,11 @@ class DynHead(nn.Module):
             # torch.cdist takes a square root whose gradient is NaN at an exact zero distance, and a pair that
             # was masked out (dt = 0, no damping) predicts exactly its own source token (the smoke of 10-26)
             d2 = ((pred[:, :, None, :] - s[:, None, :, :]) ** 2).sum(-1)  # [R, P, N]
-            logits = (-d2 / tau).masked_fill(pad[:, None, :], float("-inf"))
+            # padded columns get a large finite penalty, not -inf: a training window can be empty (every token padding),
+            # its pairs are masked out, and an infinite cross-entropy times a zero mask is NaN (the smoke of 10-26)
+            logits = (-d2 / tau).masked_fill(pad[:, None, :], -1e4)
             ce = F.cross_entropy(logits.reshape(-1, N), j.reshape(-1), reduction="none")
+            ce = torch.where(ok.reshape(-1), ce, torch.zeros_like(ce))
             l_nce = (ce * m).sum() / n_ok
             # the state holds only what changes within the window
             rf = real.float()[..., None]
