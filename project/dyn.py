@@ -124,8 +124,10 @@ class DynHead(nn.Module):
             m = ok.reshape(-1).float()
             n_ok = m.sum().clamp(min=1)
             l_pred = (((pred - sj) ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
-            # the prediction must pick j among the window's real tokens
-            d2 = torch.cdist(pred, s).pow(2)  # [R, P, N]
+            # the prediction must pick j among the window's real tokens. Squared distances are formed directly:
+            # torch.cdist takes a square root whose gradient is NaN at an exact zero distance, and a pair that
+            # was masked out (dt = 0, no damping) predicts exactly its own source token (the smoke of 10-26)
+            d2 = ((pred[:, :, None, :] - s[:, None, :, :]) ** 2).sum(-1)  # [R, P, N]
             logits = (-d2 / tau).masked_fill(pad[:, None, :], float("-inf"))
             ce = F.cross_entropy(logits.reshape(-1, N), j.reshape(-1), reduction="none")
             l_nce = (ce * m).sum() / n_ok

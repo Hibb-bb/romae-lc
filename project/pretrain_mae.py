@@ -207,6 +207,9 @@ def add_train_args(parser) -> None:
                    help="gap range in days; the largest gap ramps geometrically from MIN to MAX over --dyn-ramp of the steps")  # fmt: skip
     g.add_argument("--dyn-ramp", type=float, default=0.6)
     g.add_argument("--dyn-freq", choices=["soft", "peak", "local"], default="local", help="how the clock speed is read off the spectral logits")
+    # LeJEPA's static part on the CLS (the "LeNEPA" variant): the CLS of a star's windows pulled together, SIGReg across the batch
+    g.add_argument("--cls-inv", type=float, default=0.0, help="weight of the variance of the CLS across a star's windows in the batch; 0 = off")
+    g.add_argument("--cls-sig", type=float, default=0.0, help="weight of SIGReg (LeJEPA) on the CLS across the batch; 0 = off")
     g.add_argument("--dyn-freeze", action="store_true",
                    help="freeze the encoder (needs --init or a resume): only the state head and the predictor train, on the full window "
                         "without masking and without the reconstruction loss; tells whether the phase is already in the frozen tokens")  # fmt: skip
@@ -725,6 +728,21 @@ def main(argv=None):
             # the dynamic-state add-on on the visible-token outputs of the same masked forward
             t_days = (out.enc_positions[:, 0, 1:].float() - 1.0) * spec.tokenize["time_scale"]
             loss = loss + dyn_term(out.enc_tokens[:, 1:], out.enc_tokens[:, 0], out.enc_pad[:, 1:], t_days, step_now)
+        if (args.cls_inv > 0 or args.cls_sig > 0) and model.training:
+            # LeJEPA's static part: fused rows are frame t of every star in rows t B .. (t + 1) B, so a star's windows are rows b, B + b, ...
+            from project.dyn import sigreg
+
+            z = out.enc_tokens[:, 0].float()
+            n_fr, n_b = len(frames), frames[0].values.shape[0]
+            zs = z.view(n_fr, n_b, -1)
+            if args.cls_inv > 0:
+                l_inv = (zs - zs.mean(0, keepdim=True)).pow(2).mean()
+                aux_stats.setdefault("cls_inv", []).append(float(l_inv.detach()))
+                loss = loss + args.cls_inv * l_inv
+            if args.cls_sig > 0:
+                l_sig = sigreg(z)
+                aux_stats.setdefault("cls_sig", []).append(float(l_sig.detach()))
+                loss = loss + args.cls_sig * l_sig
         return loss
 
     print(
@@ -922,6 +940,7 @@ def main(argv=None):
                     s_per_step=rate,
                     **perf,
                     **gpu,
+                    **{k: float(np.mean(v)) for k, v in aux_stats.items() if v},  # the auxiliary terms so far in this eval interval
                 )
                 tracker.log(
                     {
