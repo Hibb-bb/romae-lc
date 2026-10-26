@@ -138,3 +138,32 @@ the 800k pretraining chain runs from this working tree.
    reproduce the main table, data and output roots behind one config, CPU
    tests in GitHub Actions.
 5. open — split `project/common.py` last.
+
+## JEPA variants with the aux loss (proposed 2026-10-26)
+
+Facts behind the plan. The aux loss (cross-entropy of the spectral layer's
+logits on the catalogue period's bin, training only) is the biggest win in
+the ledger: 0.852 / 0.838 / 0.828 / 0.746 within 10 / 1 / 0.1 / 0.01 % on all
+validation stars, against 0.72 / 0.19 (pooled) without it. The JEPA runs never
+had it. No encoder holds the phase per token (token-phase probe 10-26: the
+context part of the phase is at 0.07 R2 at best). Dennis's synthetic test bed
+(lcjepa.py) shows what puts the phase into a state: a predictor told the time
+gap and the clock speed, targets that change within a star, and a same-star
+contrast; plain LeJEPA and masked latent prediction with SIGReg did not.
+
+Every variant keeps the wide encoder, the spectral layer, the aux loss at 0.5
+and 250 d windows, and is scored the same way: the spectral-peak hit rate on
+all validation stars (period), the per-token phase probe's sine column (the
+context part of the phase on real stars), and the predictor's own hit rate.
+
+| id | name | recipe | code | asks |
+|---|---|---|---|---|
+| J1 | JEPA + aux | token JEPA (EMA target), reconstruction 0.5, aux 0.5, 50k, batch 64 (the `enc_jepahyb` recipe plus the aux) | none | does the aux give JEPA the autoencoder's precision? |
+| J2 | NEPA on the autoencoder | `maew_spec` warm start + the dynamic-state add-on (`--dyn 8`: rotation predictor at the spectral clock, same-window contrast, SIGReg in time), 20k; frozen-encoder control first | done, queued (`enc_dynfz`, `enc_dyn`) | can the contrast put the phase into the tokens? |
+| J3 | NEPA on JEPA | J1 + `--dyn 8`, warm-started from J1, 20k | none | same, on a latent-prediction encoder |
+| J4 | LeNEPA | J3 + LeJEPA's static part: the CLS pulled together across a star's 8 windows and SIGReg on the CLS across the batch | about 20 lines (`--cls-inv`, `--cls-sig`) | does the static code get cleaner without losing the phase? |
+| J5 | SIGReg in place of the EMA | masked latent prediction regularised by SIGReg (the test bed's `mjepa`) | some | control only; it was the worst variant in the test bed, run only if J1 fails |
+| J6 | long gaps | pairs across a star's windows (gaps up to the span) | window starts in the batch | after J2 or J3 shows a phase |
+
+Order: J2 (in the queue), then J1, J3, J4. Each is 2 to 3 links of 2 h;
+about ten links in all.
