@@ -111,6 +111,31 @@ ZTFxPC; the post-train gets the ZTFxPC points back and keeps half of the Chen ga
 the whole curve is behind everywhere. The old `maew_spec` figure 0.82 / 0.81 / 0.80 / 0.71
 came from a different star set.
 
+### 1d. Per-token phase (probe `project/eval/token_phase_probe.py`, 10-26)
+
+Does the frozen encoder's token output know the observation's phase? 600
+ZTFxPC validation stars, 6 windows each, truth = phase from the catalogue
+period and the template's maximum light; R2 of cos / sin (on real stars the
+cosine is readable from the magnitude itself, the sine needs context). Ridge
+on the token output. Controls: raw inputs 0.10 / 0.01, untrained encoder
+0.08 / 0.03, CLS alone 0.00, shuffled 0.00. Results in
+`project/results/token_phase/`.
+
+| encoder | cos / sin R2 |
+|---|---|
+| `maew_spec` | 0.17 / 0.07 |
+| `enc_chenft` | 0.15 / 0.05 |
+| `enc_cycrope2` | 0.17 / 0.06 |
+| `chen_spec` | 0.13 / 0.06 |
+| `enc_jepahyb` | 0.14 / 0.06 |
+| `enc_jepainit` | 0.13 / 0.05 |
+| `enc_jepa` | 0.07 / 0.03 |
+
+Verdict: no encoder holds the phase per token (the sine column is at the
+untrained level). This is the baseline for the dynamic-state add-on
+(`project/dyn.py`, runs `enc_dynfz`, `enc_dyn`) and the JEPA + aux variants
+J1, J3, J4 of the plan (10-26, all queued).
+
 ## 2. The decoder line (warm start from `maew_spec`, 50k steps, batch 64)
 
 Targets = one whole-record Fourier template per star on the table period
