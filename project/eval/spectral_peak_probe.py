@@ -14,6 +14,7 @@ ap.add_argument("--data", default=None, help="data root; default = the first che
 ap.add_argument("--n", type=int, default=1000)
 ap.add_argument("--chen-csv", default=None, help="periods.csv of period_chen: adds Chen's sharpened period as a second truth")
 ap.add_argument("--label", default="")
+ap.add_argument("--save", default=None, help="npz with every probed star's validation index, true period and each checkpoint's estimate (NaN = none)")
 a = ap.parse_args()
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 _, meta = load_encoder(a.ckpts[0], "cpu")
@@ -21,7 +22,8 @@ dargs = data_args_from(meta.args)
 if a.data:
     dargs.data = a.data
 val = load_data(dargs, splits=("validation",))["validation"]
-val = [r for r in val if r.period is not None and np.isfinite(r.period)]
+val_index = np.array([i for i, r in enumerate(val) if r.period is not None and np.isfinite(r.period)])  # place in the full split
+val = [val[i] for i in val_index]
 rng = np.random.default_rng(0)
 idx = np.sort(rng.choice(len(val), min(a.n, len(val)), replace=False))
 recs = [val[i] for i in idx]
@@ -46,6 +48,7 @@ def hits(p_hat, p):
     rel_a = np.minimum(rel, np.minimum(np.abs(r / 2 - 1), np.abs(2 * r - 1)))
     return int(ok.sum()), [float(np.mean(rel < t)) for t in TOL], [float(np.mean(rel_a < t)) for t in TOL]
 
+saved = dict(index=val_index[idx], p_true=p_true, super=np.array([str(r.meta.get("superclass_str", "?")) for r in recs]))
 for ck in a.ckpts:
     step = torch.load(ck, map_location="cpu", weights_only=False).get("step", "?")
     enc, meta = load_encoder(ck, dev)
@@ -74,3 +77,7 @@ for ck in a.ckpts:
         n, s, al = hits(p_hat, p)
         fmt = lambda v: "/".join(f"{x:.3f}" for x in v)
         print(f"[{a.label}] {ck} (step {step}) vs {name}: n={n}  strict within 10/1/0.1/0.01 % = {fmt(s)}  |  alias-tolerant {fmt(al)}", flush=True)
+    saved["p_hat:" + ck] = p_hat
+if a.save:
+    np.savez(a.save, **saved)
+    print("saved", a.save, flush=True)

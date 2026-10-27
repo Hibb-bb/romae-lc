@@ -90,7 +90,7 @@ def embed(model, ds, spec, cfg, min_tokens, dyn=None):
     and the dynamic state s when the checkpoint trained the add-on (project.dyn)."""
     ts = spec.tokenize["time_scale"]
     loader = DataLoader(Subset(ds, pick_windows(ds)), 128, shuffle=False, num_workers=0, collate_fn=make_collate(spec))
-    H, CLS, PSI, RAW, STAR, WIN, S = [], [], [], [], [], [], []
+    H, CLS, PSI, RAW, STAR, WIN, S, PSIW = [], [], [], [], [], [], [], []
     n_win = 0
     for b in loader:
         tok = b["tokens"]
@@ -105,6 +105,10 @@ def embed(model, ds, spec, cfg, min_tokens, dyn=None):
         ref = torch.as_tensor(refs[obj], device=dev, dtype=torch.float64)
         t_abs = b["start"].to(dev).double()[:, None] + t_days.double()
         psi = torch.remainder(t_abs / P[:, None] - ref[:, None], 1.0).float()
+        # the "window clock": the phase counted from the WINDOW START, not from the star's reference. A token can get this
+        # from its rotary position alone (time since the window start) once the frequency is known, with no light-curve content;
+        # a state that scores high here and low on psi is a clock, not a phase (the add-on runs of 10-26)
+        psi_w = torch.remainder(t_days.double() / P[:, None], 1.0).float()
         mag = tok.values[..., 0].to(dev).float()
         err = tok.values[..., 1].to(dev).float() if tok.values.shape[-1] > 1 else torch.zeros_like(mag)
         rf = real.float()
@@ -118,11 +122,11 @@ def embed(model, ds, spec, cfg, min_tokens, dyn=None):
         widx = (torch.arange(x.shape[0], device=dev) + n_win)[:, None].expand_as(mag)  # row of CLS for every token
         n_win += x.shape[0]
         H.append(x[:, 1:][real].half().cpu()); CLS.append(x[:, 0].half().cpu())
-        PSI.append(psi[real].cpu()); RAW.append(raw[real].cpu())
+        PSI.append(psi[real].cpu()); RAW.append(raw[real].cpu()); PSIW.append(psi_w[real].cpu())
         STAR.append(torch.as_tensor(obj, device=dev)[:, None].expand_as(mag)[real].cpu())
         WIN.append(widx[real].cpu())
     return (torch.cat(H).numpy(), torch.cat(CLS).numpy(), torch.cat(PSI).numpy(), torch.cat(RAW).numpy(),
-            torch.cat(STAR).numpy(), torch.cat(WIN).numpy(), torch.cat(S).numpy() if S else None)
+            torch.cat(STAR).numpy(), torch.cat(WIN).numpy(), torch.cat(S).numpy() if S else None, torch.cat(PSIW).numpy())
 
 
 def r2(y, p):
@@ -130,7 +134,7 @@ def r2(y, p):
     return [float(v) for v in 1 - ((y - p) ** 2).sum(0) / ((y - y.mean(0)) ** 2).sum(0)]
 
 
-def probes(h, cls_w, psi, raw, star, win, s=None):
+def probes(h, cls_w, psi, raw, star, win, s=None, psi_w=None):
     from sklearn.linear_model import RidgeCV
     from sklearn.neural_network import MLPRegressor
     from sklearn.preprocessing import StandardScaler
@@ -165,6 +169,11 @@ def probes(h, cls_w, psi, raw, star, win, s=None):
         out["s | ridge"] = ridge(s)
         out["s | mlp"] = mlp(s)
         out["s+cls | mlp"] = mlp(np.concatenate([s, c_tok], 1))
+    if psi_w is not None:  # the window clock (see embed): high here and low on psi = a clock, not a phase
+        Yw = np.stack([np.cos(2 * np.pi * psi_w), np.sin(2 * np.pi * psi_w)], 1)
+        out["h | ridge -> window clock (control)"] = ridge(h, Yw)
+        if s is not None:
+            out["s | ridge -> window clock (control)"] = ridge(s, Yw)
     # shuffle control: targets permuted among the tokens of the same star
     Ysh = Y.copy()
     for s in np.unique(star):

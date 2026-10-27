@@ -210,6 +210,9 @@ def add_train_args(parser) -> None:
     # LeJEPA's static part on the CLS (the "LeNEPA" variant): the CLS of a star's windows pulled together, SIGReg across the batch
     g.add_argument("--cls-inv", type=float, default=0.0, help="weight of the variance of the CLS across a star's windows in the batch; 0 = off")
     g.add_argument("--cls-sig", type=float, default=0.0, help="weight of SIGReg (LeJEPA) on the CLS across the batch; 0 = off")
+    g.add_argument("--dyn-cross", action="store_true",
+                   help="pairs across a star's windows (source in one window, target in another; negatives = every token of the star): "
+                        "a clock built from the time since the window start cannot pass this test, only the phase can")  # fmt: skip
     g.add_argument("--dyn-freeze", action="store_true",
                    help="freeze the encoder (needs --init or a resume): only the state head and the predictor train, on the full window "
                         "without masking and without the reconstruction loss; tells whether the phase is already in the frozen tokens")  # fmt: skip
@@ -561,7 +564,7 @@ def main(argv=None):
             print("encoder frozen: only the dynamic-state head and predictor train", flush=True)
     aux_modules = [m for m in (phase_head, fold_dec, dyn) if m is not None]
 
-    def dyn_term(tok, cl, pd, t_days, step_now):
+    def dyn_term(tok, cl, pd, t_days, step_now, n_fr=None, n_b=None, start_rows=None):
         """The add-on's loss on token outputs ``tok [R, N, D]`` (no CLS), ``cl [R, D]``, padding ``pd [R, N]``,
         ``t_days [R, N]``; the clock speed is the spectral layer's own estimate from the same forward."""
         from romae_lc.model import spectral_frequency
@@ -569,7 +572,13 @@ def main(argv=None):
         frac = min(step_now / max(args.dyn_ramp * args.steps, 1), 1.0)
         dt_max = args.dyn_dt[0] * (args.dyn_dt[1] / args.dyn_dt[0]) ** frac
         f = spectral_frequency(model.spectral, None, args.dyn_freq)
-        l_dyn, st = dyn(tok, cl, pd, t_days, f, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau, args.dyn_nce, args.dyn_sig, args.dyn_mean)
+        if args.dyn_cross:
+            # absolute token time: window start (days, relative to the star's first window) + time in the window
+            t_abs = start_rows.to(tok.device).float()[:, None] + t_days
+            l_dyn, st = dyn.forward_cross(tok, cl, pd, t_abs, f, n_fr, n_b, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau,
+                                          args.dyn_nce, args.dyn_sig, args.dyn_mean)  # fmt: skip
+        else:
+            l_dyn, st = dyn(tok, cl, pd, t_days, f, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau, args.dyn_nce, args.dyn_sig, args.dyn_mean)
         for k_, v_ in st.items():
             aux_stats.setdefault(f"dyn_{k_}", []).append(v_)
         return args.dyn_weight * l_dyn
@@ -646,7 +655,7 @@ def main(argv=None):
             total = total + args.spectral_aux * ls_
         return total
 
-    def forward(frames, mode=None, periods_rows=None, template_rows=None, step_now=0, index_rows=None, start_rows=None):
+    def forward(frames, mode=None, periods_rows=None, template_rows=None, step_now=0, index_rows=None, start_rows=None, dyn_starts=None):
         """The reconstruction loss of one fused window batch; the bottleneck
         model takes the Tokens with the per-point errors. ``mode`` is the
         mask mode (default: the run's). With ``periods_rows`` (the catalogue
@@ -660,7 +669,7 @@ def main(argv=None):
             with torch.no_grad():
                 x, _ = model.encode(values, positions, pad)
             t_days = (positions[:, 0].float() - 1.0) * spec.tokenize["time_scale"]
-            return dyn_term(x[:, 1:].float(), x[:, 0].float(), pad, t_days, step_now)
+            return dyn_term(x[:, 1:].float(), x[:, 0].float(), pad, t_days, step_now, len(frames), frames[0].values.shape[0], dyn_starts)
         mode = args.mask_mode if mode is None else mode
         mask = None
         if mode != "random":
@@ -727,7 +736,8 @@ def main(argv=None):
         if dyn is not None and model.training:
             # the dynamic-state add-on on the visible-token outputs of the same masked forward
             t_days = (out.enc_positions[:, 0, 1:].float() - 1.0) * spec.tokenize["time_scale"]
-            loss = loss + dyn_term(out.enc_tokens[:, 1:], out.enc_tokens[:, 0], out.enc_pad[:, 1:], t_days, step_now)
+            loss = loss + dyn_term(out.enc_tokens[:, 1:], out.enc_tokens[:, 0], out.enc_pad[:, 1:], t_days, step_now,
+                                   len(frames), frames[0].values.shape[0], dyn_starts)  # fmt: skip
         if (args.cls_inv > 0 or args.cls_sig > 0) and model.training:
             # LeJEPA's static part: fused rows are frame t of every star in rows t B .. (t + 1) B, so a star's windows are rows b, B + b, ...
             from project.dyn import sigreg
@@ -905,8 +915,13 @@ def main(argv=None):
             template_rows = train_template_periods[batch["index"]].repeat(len(frames)) if smooth else None
             index_rows = batch["index"].repeat(len(frames)) if smooth else None  # fused rows: frame t of every item in rows t B .. (t + 1) B
             start_rows = batch["starts"].T.reshape(-1) if (smooth and "starts" in batch) else None
+            dyn_starts = None
+            if dyn is not None and args.dyn_cross:
+                st0 = batch["starts"]  # [B, T] days; relative to the star's first window keeps float32 exact enough
+                dyn_starts = (st0 - st0[:, :1]).T.reshape(-1)
             with amp:
-                loss_t = forward(frames, periods_rows=periods_rows, template_rows=template_rows, step_now=step, index_rows=index_rows, start_rows=start_rows)
+                loss_t = forward(frames, periods_rows=periods_rows, template_rows=template_rows, step_now=step, index_rows=index_rows,
+                                 start_rows=start_rows, dyn_starts=dyn_starts)  # fmt: skip
             opt.zero_grad(set_to_none=True)
             loss_t.backward()
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [p for m in aux_modules for p in m.parameters()], args.clip)

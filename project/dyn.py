@@ -146,3 +146,84 @@ class DynHead(nn.Module):
             stats = dict(pred=float(l_pred.detach()), nce=float(l_nce.detach()), sig=float(l_sig.detach()), mean=float(l_mean.detach()),
                          hit=float(hit), npairs=float(n_ok), dt_max=float(dt_max))  # fmt: skip
         return loss, stats
+
+    def forward_cross(self, tokens, cls, pad, t_abs, freq, n_frames: int, n_b: int, dt_max: float, n_pairs: int = 256,
+                      dt_min: float = 0.5, tau: float = 1.0, w_nce: float = 0.2, w_sig: float = 1.0, w_mean: float = 1.0):
+        """The same losses with the pairs ACROSS a star's windows (the test bed's design).
+
+        Why: inside one window a token knows its time since the window start from its rotary
+        position, so a state that is a clock at the spectral frequency, ``s_i = R(2 pi f t_i)``,
+        satisfies the within-window predictor and contrast with no light-curve content (the
+        `enc_dyn` run of 10-26: predictor hit rate 0.32, phase probe unchanged). A clock does
+        not carry across windows, because every window is encoded on its own with time counted
+        from its own start. So the source token sits in one window and the target in a later
+        one, the negatives are every real token of the star, and only the true phase can pick
+        the target.
+
+        Fused rows are frame ``t`` of every star in rows ``t B .. (t + 1) B``. ``t_abs [R, N]``
+        is the token time in record days (window start + time in the window), ``freq [R]`` the
+        window's estimate in cycles per day; the star uses the median over its windows. The
+        damping comes from the source window's CLS."""
+        with torch.autocast(device_type=tokens.device.type, enabled=False):
+            T, B = int(n_frames), int(n_b)
+            R, N, D = tokens.shape
+            s = self.states(tokens)  # [R, N, 2K]
+            ds = s.shape[-1]
+
+            def star(x):  # [R, N, ...] -> [B, T N, ...]
+                return x.reshape(T, B, N, *x.shape[2:]).transpose(0, 1).reshape(B, T * N, *x.shape[2:])
+
+            S, real, TA = star(s), star(~pad), star(t_abs.float())
+            WID = torch.arange(T, device=s.device).repeat_interleave(N)[None].expand(B, T * N)
+            cls_star = cls.float().reshape(T, B, D).transpose(0, 1)  # [B, T, D]
+            f_star = freq.float().reshape(T, B).transpose(0, 1).median(1).values  # [B]
+            n_real = real.sum(1)
+            t = torch.where(real, TA, torch.full_like(TA, float("inf")))
+            order = t.argsort(1)
+            t, real, WID = t.gather(1, order), real.gather(1, order), WID.gather(1, order)
+            S = S.gather(1, order[..., None].expand(-1, -1, ds))
+            TN = T * N
+            P = int(n_pairs)
+            u = torch.rand(B, P, device=s.device)
+            i = (u * n_real[:, None]).long().clamp(min=0, max=TN - 1)  # source: a real token of the star
+            ti, wi = t.gather(1, i), WID.gather(1, i)
+            # target: a random real token of the star in ANOTHER window, at or after the source, at most dt_max later.
+            # dt = 0 happens when windows overlap and the same observation sits in both: its two states must agree.
+            # Short gaps only: the phase predicted over a gap drifts by f dt (relative frequency error), so long gaps cannot be scored.
+            tt = torch.where(real, t, torch.zeros_like(t))
+            gap_all = tt[:, None, :] - ti[..., None]  # [B, P, TN]
+            cand = real[:, None, :] & (WID[:, None, :] != wi[..., None]) & (gap_all >= 0) & (gap_all <= dt_max)
+            score = torch.rand(B, P, TN, device=s.device).masked_fill(~cand, -1.0)
+            j = score.argmax(-1)
+            dt = t.gather(1, j) - ti
+            wj = WID.gather(1, j)
+            ok = (n_real > 1)[:, None] & cand.gather(2, j[..., None])[..., 0] & real.gather(1, i)
+            del gap_all, cand, score
+            dt = torch.where(ok, dt, torch.zeros_like(dt))
+            si = S.gather(1, i[..., None].expand(-1, -1, ds))
+            sj = S.gather(1, j[..., None].expand(-1, -1, ds))
+            ci = cls_star.gather(1, wi[..., None].expand(-1, -1, D))  # the source window's CLS
+            pred = self.predict(si.reshape(-1, ds), ci.reshape(-1, D), f_star[:, None].expand(B, P).reshape(-1), dt.reshape(-1)).view(B, P, ds)
+            m = ok.reshape(-1).float()
+            n_ok = m.sum().clamp(min=1)
+            l_pred = (((pred - sj) ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
+            # squared distances to every token of the star without the [B, P, TN, 2K] intermediate
+            d2 = (pred.pow(2).sum(-1)[:, :, None] + S.pow(2).sum(-1)[:, None, :] - 2 * torch.bmm(pred, S.transpose(1, 2))).clamp(min=0)
+            # negatives: the star's real tokens outside the source window (with overlapping windows the source's own
+            # copy of an observation would otherwise compete, and telling the two copies apart needs the window clock)
+            logits = (-d2 / tau).masked_fill(~real[:, None, :] | (WID[:, None, :] == wi[..., None]), -1e4)
+            ce = F.cross_entropy(logits.reshape(-1, TN), j.reshape(-1), reduction="none")
+            ce = torch.where(ok.reshape(-1), ce, torch.zeros_like(ce))
+            l_nce = (ce * m).sum() / n_ok
+            rf = real.float()[..., None]
+            s_mean = (S * rf).sum(1) / n_real.clamp(min=1)[:, None]  # per star
+            centred = (S - s_mean[:, None, :])[real]
+            l_sig = sigreg(centred) if centred.shape[0] >= 16 else s.new_zeros(())
+            l_mean = s_mean.pow(2).mean()
+            loss = l_pred + w_nce * l_nce + w_sig * l_sig + w_mean * l_mean
+            with torch.no_grad():
+                hit = ((logits.argmax(-1) == j).float().reshape(-1) * m).sum() / n_ok
+                mdt = (dt.reshape(-1) * m).sum() / n_ok
+            stats = dict(pred=float(l_pred.detach()), nce=float(l_nce.detach()), sig=float(l_sig.detach()), mean=float(l_mean.detach()),
+                         hit=float(hit), npairs=float(n_ok), dt_max=float(dt_max), dt_mean=float(mdt))  # fmt: skip
+        return loss, stats

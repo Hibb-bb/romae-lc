@@ -163,7 +163,19 @@ context part of the phase on real stars), and the predictor's own hit rate.
 | J3 | NEPA on JEPA | J1 + `--dyn 8`, warm-started from J1, 20k | none | same, on a latent-prediction encoder |
 | J4 | LeNEPA | J3 + LeJEPA's static part: the CLS pulled together across a star's 8 windows and SIGReg on the CLS across the batch | about 20 lines (`--cls-inv`, `--cls-sig`) | does the static code get cleaner without losing the phase? |
 | J5 | SIGReg in place of the EMA | masked latent prediction regularised by SIGReg (the test bed's `mjepa`) | some | control only; it was the worst variant in the test bed, run only if J1 fails |
-| J6 | long gaps | pairs across a star's windows (gaps up to the span) | window starts in the batch | after J2 or J3 shows a phase |
+| J6 | cross-window pairs | pairs across a star's windows (`--dyn-cross`); now part of J3 and J4, see below | window starts in the batch | done 10-26 |
 
 Order: J2 (in the queue), then J1, J3, J4. Each is 2 to 3 links of 2 h;
 about ten links in all.
+
+Update 10-26 (after J2). The unfrozen add-on on the MAE (`enc_dyn`) reached a predictor hit
+rate of 0.32 but the per-token phase probe hardly moved (sin R2 0.07 to 0.10). Inside one
+window a token knows its time since the window start, so a state that is a clock at the
+spectral frequency passes the within-window test without any light-curve content. J3 and J4
+therefore use `--dyn-cross`: the source token is in one window, the target in ANOTHER window
+of the same star, and the negatives are the star's tokens outside the source window. Gaps stay
+short (0.5 to 30 days): over a gap the predicted phase drifts by f dt times the relative
+frequency error, which is a full cycle over 300 days for a 0.3-day star at 0.1 %. Overlapping
+windows (`--advance 0.5 1.0`) make such pairs common, and an observation that sits in two
+windows gives a dt = 0 pair whose two states must agree. Check on hand-made states: true phase
+states hit the target 97 % of the time, a window clock 0 %.
