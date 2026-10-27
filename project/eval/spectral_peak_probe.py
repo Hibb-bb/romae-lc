@@ -65,7 +65,9 @@ for ck in a.ckpts:
     with torch.no_grad():
         for batch in loader:
             enc.encode([batch["tokens"].to(dev)])
-            f_all[batch["widx"]] = spectral_frequency(model.spectral, None, "local").float().cpu()
+            # the spectral layer that ran (a JEPA checkpoint wraps a copy of the encoder, so model.spectral may be idle)
+            ran = [m for m in enc.modules() if type(m).__name__ == "SpectralLayer" and getattr(m, "last_logits", None) is not None]
+            f_all[batch["widx"]] = spectral_frequency(ran[0], None, "local").float().cpu()
             n_tok[batch["widx"]] = batch["n_tokens"]
     p_hat = np.full(len(recs), np.nan)
     for i in range(len(recs)):
