@@ -210,6 +210,9 @@ def add_train_args(parser) -> None:
     # LeJEPA's static part on the CLS (the "LeNEPA" variant): the CLS of a star's windows pulled together, SIGReg across the batch
     g.add_argument("--cls-inv", type=float, default=0.0, help="weight of the variance of the CLS across a star's windows in the batch; 0 = off")
     g.add_argument("--cls-sig", type=float, default=0.0, help="weight of SIGReg (LeJEPA) on the CLS across the batch; 0 = off")
+    g.add_argument("--attn-pool", type=int, default=0,
+                   help="learned queries of an attention-pooling head over the token outputs (romae_lc.model.AttnPool); it replaces the CLS "
+                        "as the window vector: --cls-inv / --cls-sig act on it, and the latents and probes read it; 0 = the CLS")  # fmt: skip
     g.add_argument("--dyn-cross", action="store_true",
                    help="pairs across a star's windows (source in one window, target in another; negatives = every token of the star): "
                         "a clock built from the time since the window start cannot pass this test, only the phase can")  # fmt: skip
@@ -477,7 +480,7 @@ def main(argv=None):
             decoder=decoder, mask_ratio=args.mask_ratio, encoder=encoder_config(args), n_channels=spec.n_channels, n_axes=2,
             rope=rope_layouts(args, ladder), abs_timescales=abs_timescales(ladder) if args.abs_time else None, spectral=spectral_kw,
             ema=args.jepa_ema, ema_end=args.jepa_ema_end, loss=args.jepa_loss, use_target=not args.jepa_use_context, recon_weight=args.jepa_recon_weight,
-            clean_target=args.jepa_clean_target, proj_dim=args.jepa_proj, proj_hidden=args.jepa_proj_hidden,
+            clean_target=args.jepa_clean_target, proj_dim=args.jepa_proj, proj_hidden=args.jepa_proj_hidden, attn_pool=args.attn_pool,
         )  # fmt: skip
         if args.jepa_clean_target and args.target == "obs":
             parser.error("--jepa-clean-target needs --target template or mix")
@@ -514,6 +517,7 @@ def main(argv=None):
             phase_rope=args.phase_rope,
             phasor_init=args.phasor_init,
             phase_freq=args.phase_freq,
+            attn_pool=args.attn_pool,
         )
         if args.init:
             from project.common import warm_start
@@ -521,6 +525,8 @@ def main(argv=None):
             w = warm_start(model, torch.load(args.init, map_location="cpu", weights_only=False))
             print(f"warm start from {args.init}: {w['copied']} tensors copied, {w['left']} left as initialised"
                   f"{' (' + ', '.join(w['left_names'][:6]) + ('...' if w['left'] > 6 else '') + ')' if w['left'] else ''}", flush=True)
+    if args.attn_pool > 0 and args.cls_inv <= 0 and args.cls_sig <= 0:
+        parser.error("--attn-pool needs --cls-inv and/or --cls-sig: nothing else trains the pooling head")
     if (args.phasor or args.phase_rope) and not args.spectral:
         parser.error("--phasor and --phase-rope need --spectral")
     if args.query_cycles and args.template_fit != "record":
@@ -742,7 +748,9 @@ def main(argv=None):
             # LeJEPA's static part: fused rows are frame t of every star in rows t B .. (t + 1) B, so a star's windows are rows b, B + b, ...
             from project.dyn import sigreg
 
-            z = out.enc_tokens[:, 0].float()
+            # the window vector: the attention-pooling head over the visible tokens when there is one, else the CLS
+            enc_net = model.context if isinstance(model, TokenJEPA) else model
+            z = enc_net.pool_vector(out.enc_tokens, out.enc_pad).float() if args.attn_pool > 0 else out.enc_tokens[:, 0].float()
             n_fr, n_b = len(frames), frames[0].values.shape[0]
             zs = z.view(n_fr, n_b, -1)
             if args.cls_inv > 0:

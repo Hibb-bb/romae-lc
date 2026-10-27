@@ -57,13 +57,15 @@ class TokenJEPA(nn.Module):
         clean_target: bool = False,
         proj_dim: int = 0,
         proj_hidden: int = 256,
+        attn_pool: int = 0,
     ):
         super().__init__()
         d = encoder["d_model"] if isinstance(encoder, dict) else encoder.d_model
         if target_channels is not None and target_channels != d:
             raise ValueError(f"the JEPA head outputs the encoder width {d}, not {target_channels}")
         self.context = RoMAEForPreTraining(decoder=decoder, mask_ratio=mask_ratio, target_channels=d, encoder=encoder, n_channels=n_channels,
-                                           n_axes=n_axes, rope=rope, use_cls=use_cls, abs_timescales=abs_timescales, spectral=spectral)  # fmt: skip
+                                           n_axes=n_axes, rope=rope, use_cls=use_cls, abs_timescales=abs_timescales, spectral=spectral,
+                                           attn_pool=attn_pool)  # fmt: skip
         self.target = copy.deepcopy(self.context)
         self.target.requires_grad_(False)
         self.ema, self.ema_end, self.loss_kind, self.use_target = float(ema), float(ema_end), str(loss), bool(use_target)
@@ -132,6 +134,11 @@ class TokenJEPA(nn.Module):
     @property
     def spectral(self):
         return self.context.spectral
+
+    @property
+    def attn_pool(self):
+        """The downstream encoder's attention-pooling head (None without one)."""
+        return self.chosen.attn_pool
 
     @property
     def chosen(self) -> RoMAEForPreTraining:

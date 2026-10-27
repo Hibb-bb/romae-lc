@@ -762,6 +762,8 @@ class PooledEncoder(nn.Module):
 
     def forward(self, values, positions, pad_mask=None):
         x, pad = self.model.encode(values, positions, pad_mask)
+        if getattr(self.model, "attn_pool", None) is not None:  # the attention-pooling head replaces the CLS
+            return self.model.attn_pool(x, pad)
         return pool_tokens(x, pad, "cls", self.model.use_cls)
 
 

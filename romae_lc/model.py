@@ -110,6 +110,10 @@ class RoMAEBase(nn.Module):
             position units and any spacing (overrides ``rope_base`` and the
             time block's ``p_rope``), e.g. ``TimeEncodingReport.timescales``.
         use_cls: Prepend a learned CLS token at position 0.
+        attn_pool: Learned queries of an attention-pooling head over the
+            encoder's outputs (:class:`AttnPool`); 0 = none. When present it,
+            not the CLS, makes the window vector (:class:`RoMAE` with
+            ``pool="attn"``, ``project.common.PooledEncoder``).
     """
 
     def __init__(
@@ -124,6 +128,7 @@ class RoMAEBase(nn.Module):
         rope_timescales=None,
         abs_timescales=None,
         spectral: dict | None = None,
+        attn_pool: int = 0,
     ):
         super().__init__()
         self.cfg = config(encoder)
@@ -178,6 +183,8 @@ class RoMAEBase(nn.Module):
         if self.spectral is not None and not (0 <= self.spectral.after_layer <= self.cfg.depth):
             raise ValueError(f"spectral after_layer {self.spectral.after_layer} must be within 0..{self.cfg.depth}")
         self.cls = nn.Parameter(torch.zeros(self.cfg.d_model)) if use_cls else None
+        self.n_attn_pool = int(attn_pool)
+        self.attn_pool = AttnPool(self.cfg.d_model, self.n_attn_pool, self.cfg.nhead) if self.n_attn_pool > 0 else None
         self.apply(_init_weights)
         if self.cls is not None:
             nn.init.trunc_normal_(self.cls, std=0.02)
@@ -215,7 +222,16 @@ class RoMAEBase(nn.Module):
             use_cls=self.use_cls,
             abs_timescales=None if self.abs_proj is None else self.abs_timescales.tolist(),
             spectral=None if self.spectral is None else self.spectral.hparams,
+            # only when present, so the constructors that take hparams but predate the head still work
+            **({"attn_pool": self.n_attn_pool} if self.n_attn_pool > 0 else {}),
         )
+
+    def pool_vector(self, x: torch.Tensor, pad_mask: torch.Tensor | None) -> torch.Tensor:
+        """The window vector ``[B, D]`` of encoder outputs ``x`` (CLS first when
+        enabled): the attention-pooling head when present, else the CLS."""
+        if self.attn_pool is not None:
+            return self.attn_pool(x, pad_mask)
+        return pool_tokens(x, pad_mask, "cls", self.use_cls)
 
     def run_transformer(self, x, positions, pad_mask, values=None):
         """The encoder blocks on ``x [B, L, d_model]``, with the spectral
@@ -283,9 +299,34 @@ class RoMAEBase(nn.Module):
         return x, pad_mask
 
 
+class AttnPool(nn.Module):
+    """Attention pooling: ``n_queries`` learned queries attend over a window's
+    token outputs (the CLS included as one more key, so a window with no
+    real token still has something to read), and a linear map turns their
+    concatenated answers into one ``[B, d_model]`` vector. The read-out of
+    I-JEPA / V-JEPA's attentive probe, here trained with the encoder."""
+
+    def __init__(self, d_model: int, n_queries: int = 4, nhead: int = 8):
+        super().__init__()
+        self.n_queries = int(n_queries)
+        self.queries = nn.Parameter(torch.randn(self.n_queries, d_model) * 0.02)
+        self.norm = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.out = nn.Linear(self.n_queries * d_model, d_model)
+
+    def forward(self, x: torch.Tensor, pad_mask: torch.Tensor | None = None) -> torch.Tensor:
+        b = x.shape[0]
+        k = self.norm(x)
+        q = self.queries.to(k.dtype).expand(b, -1, -1)
+        if pad_mask is not None and pad_mask.all(1).any():  # a row with no key at all: let it see everything (its output is ignored anyway)
+            pad_mask = pad_mask & ~pad_mask.all(1, keepdim=True)
+        y, _ = self.attn(q, k, k, key_padding_mask=pad_mask, need_weights=False)
+        return self.out(y.reshape(b, -1))
+
+
 def _check_pool(pool: str, use_cls: bool) -> None:
-    if pool not in ("cls", "mean"):
-        raise ValueError(f"pool must be 'cls' or 'mean', got {pool!r}")
+    if pool not in ("cls", "mean", "attn"):
+        raise ValueError(f"pool must be 'cls', 'mean' or 'attn', got {pool!r}")
     if pool == "cls" and not use_cls:
         raise ValueError("pool='cls' requires use_cls=True")
 
@@ -314,6 +355,8 @@ class RoMAE(RoMAEBase):
     def __init__(self, pool: str = "cls", **kwargs):
         super().__init__(**kwargs)
         _check_pool(pool, self.use_cls)
+        if pool == "attn" and self.attn_pool is None:
+            raise ValueError("pool='attn' needs attn_pool > 0")
         self.pool = pool
 
     def forward(self, values, positions, pad_mask=None, return_tokens=False):
@@ -330,7 +373,7 @@ class RoMAE(RoMAEBase):
             ``[B, D]`` pooled embedding, or ``(pooled, tokens)``.
         """
         x, pad = self.encode(values, positions, pad_mask)
-        out = pool_tokens(x, pad, self.pool, self.use_cls)
+        out = self.attn_pool(x, pad) if self.pool == "attn" else pool_tokens(x, pad, self.pool, self.use_cls)
         if return_tokens:
             return out, x[:, 1:] if self.use_cls else x
         return out
@@ -701,7 +744,11 @@ class RoMAEForPreTraining(RoMAEBase):
         )
 
     def backbone(self, pool: str = "cls") -> RoMAE:
-        """A :class:`RoMAE` encoder initialised from the pretrained weights."""
+        """A :class:`RoMAE` encoder initialised from the pretrained weights.
+        With an attention-pooling head, ``"cls"`` means that head (it replaces
+        the CLS as the window vector)."""
+        if pool == "cls" and self.attn_pool is not None:
+            pool = "attn"
         model = RoMAE(pool=pool, **self.hparams)
         model.projection.load_state_dict(self.projection.state_dict())
         if self.abs_proj is not None:
@@ -711,6 +758,8 @@ class RoMAEForPreTraining(RoMAEBase):
             model.spectral.load_state_dict(self.spectral.state_dict())
         if self.cls is not None:
             model.cls.data.copy_(self.cls.data)
+        if self.attn_pool is not None:
+            model.attn_pool.load_state_dict(self.attn_pool.state_dict())
         return model
 
 
