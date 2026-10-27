@@ -44,9 +44,10 @@ for ax, alias, title in zip(axes, (False, True), ("Strict: the catalogue period"
         h = rates(p, alias)
         out[f"{name} | {'alias' if alias else 'strict'}"] = h.tolist()
         ax.plot(TOL * 100, h, color=c, lw=2, marker="o", ms=5, label=name)
-        ax.text(TOL[-1] * 100 * 0.9, h[-1], f"{h[-1]:.2f}", color=INK2, fontsize=8.5, ha="right", va="bottom")
+        ax.text(TOL[-1] * 100 * 0.8, h[-1], f"{h[-1]:.2f}", color=INK2, fontsize=8.5, ha="left", va="center")
     ax.set_xscale("log")
-    ax.invert_xaxis()
+    ax.set_xlim(TOL[0] * 100 * 1.4, TOL[-1] * 100 * 0.45)  # reversed: tighter to the right; room for the end labels
+    ax.minorticks_off()
     ax.set_xticks(TOL * 100)
     ax.set_xticklabels([f"{t * 100:g}" for t in TOL], fontsize=8.5)
     ax.set_xlabel("tolerance (% of the period)")
