@@ -213,6 +213,9 @@ def add_train_args(parser) -> None:
     g.add_argument("--attn-pool", type=int, default=0,
                    help="learned queries of an attention-pooling head over the token outputs (romae_lc.model.AttnPool); it replaces the CLS "
                         "as the window vector: --cls-inv / --cls-sig act on it, and the latents and probes read it; 0 = the CLS")  # fmt: skip
+    g.add_argument("--dyn-lambda", type=float, default=None,
+                   help="LeJEPA's weighting: (1 - lambda) (prediction + dyn-nce x contrastive) + lambda SIGReg (LeJEPA's default 0.05); "
+                        "unset = the old weights (prediction 1, SIGReg --dyn-sig)")  # fmt: skip
     g.add_argument("--dyn-cross", action="store_true",
                    help="pairs across a star's windows (source in one window, target in another; negatives = every token of the star): "
                         "a clock built from the time since the window start cannot pass this test, only the phase can")  # fmt: skip
@@ -578,13 +581,18 @@ def main(argv=None):
         frac = min(step_now / max(args.dyn_ramp * args.steps, 1), 1.0)
         dt_max = args.dyn_dt[0] * (args.dyn_dt[1] / args.dyn_dt[0]) ** frac
         f = spectral_frequency(model.spectral, None, args.dyn_freq)
+        if args.dyn_lambda is None:
+            w_pred, w_nce, w_sig = 1.0, args.dyn_nce, args.dyn_sig
+        else:
+            lam = args.dyn_lambda
+            w_pred, w_nce, w_sig = 1.0 - lam, (1.0 - lam) * args.dyn_nce, lam
         if args.dyn_cross:
             # absolute token time: window start (days, relative to the star's first window) + time in the window
             t_abs = start_rows.to(tok.device).float()[:, None] + t_days
             l_dyn, st = dyn.forward_cross(tok, cl, pd, t_abs, f, n_fr, n_b, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau,
-                                          args.dyn_nce, args.dyn_sig, args.dyn_mean)  # fmt: skip
+                                          w_nce, w_sig, args.dyn_mean, w_pred)  # fmt: skip
         else:
-            l_dyn, st = dyn(tok, cl, pd, t_days, f, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau, args.dyn_nce, args.dyn_sig, args.dyn_mean)
+            l_dyn, st = dyn(tok, cl, pd, t_days, f, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau, w_nce, w_sig, args.dyn_mean, w_pred)
         for k_, v_ in st.items():
             aux_stats.setdefault(f"dyn_{k_}", []).append(v_)
         return args.dyn_weight * l_dyn

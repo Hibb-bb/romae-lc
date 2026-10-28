@@ -91,7 +91,7 @@ class DynHead(nn.Module):
         return torch.stack([y1, y2], -1).flatten(-2)
 
     def forward(self, tokens, cls, pad, t_days, freq, dt_max: float, n_pairs: int = 128, dt_min: float = 0.5,
-                tau: float = 1.0, w_nce: float = 0.2, w_sig: float = 1.0, w_mean: float = 1.0):
+                tau: float = 1.0, w_nce: float = 0.2, w_sig: float = 1.0, w_mean: float = 1.0, w_pred: float = 1.0):
         """``tokens [R, N, D]`` (no CLS), ``cls [R, D]``, ``pad [R, N]`` (True =
         padding; real tokens come first, sorted by time, as the tokenizer
         makes them), ``t_days [R, N]`` time since the window start, ``freq [R]``
@@ -140,7 +140,7 @@ class DynHead(nn.Module):
             centred = (s - s_mean[:, None, :])[real]
             l_sig = sigreg(centred) if centred.shape[0] >= 16 else s.new_zeros(())
             l_mean = s_mean.pow(2).mean()
-            loss = l_pred + w_nce * l_nce + w_sig * l_sig + w_mean * l_mean
+            loss = w_pred * l_pred + w_nce * l_nce + w_sig * l_sig + w_mean * l_mean
             with torch.no_grad():
                 hit = ((logits.argmax(-1) == j).float().reshape(-1) * m).sum() / n_ok  # share of pairs where the prediction's nearest token is j
                 # scale-free: the prediction error over the error of predicting zero (the targets' mean square);
@@ -153,7 +153,7 @@ class DynHead(nn.Module):
         return loss, stats
 
     def forward_cross(self, tokens, cls, pad, t_abs, freq, n_frames: int, n_b: int, dt_max: float, n_pairs: int = 256,
-                      dt_min: float = 0.5, tau: float = 1.0, w_nce: float = 0.2, w_sig: float = 1.0, w_mean: float = 1.0):
+                      dt_min: float = 0.5, tau: float = 1.0, w_nce: float = 0.2, w_sig: float = 1.0, w_mean: float = 1.0, w_pred: float = 1.0):
         """The same losses with the pairs ACROSS a star's windows (the test bed's design).
 
         Why: inside one window a token knows its time since the window start from its rotary
@@ -225,7 +225,7 @@ class DynHead(nn.Module):
             centred = (S - s_mean[:, None, :])[real]
             l_sig = sigreg(centred) if centred.shape[0] >= 16 else s.new_zeros(())
             l_mean = s_mean.pow(2).mean()
-            loss = l_pred + w_nce * l_nce + w_sig * l_sig + w_mean * l_mean
+            loss = w_pred * l_pred + w_nce * l_nce + w_sig * l_sig + w_mean * l_mean
             with torch.no_grad():
                 hit = ((logits.argmax(-1) == j).float().reshape(-1) * m).sum() / n_ok
                 mdt = (dt.reshape(-1) * m).sum() / n_ok
