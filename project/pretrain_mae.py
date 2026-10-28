@@ -131,6 +131,10 @@ def add_train_args(parser) -> None:
     g.add_argument("--warmup", type=float, default=0.02, help="fraction of steps")
     g.add_argument("--clip", type=float, default=1.0)
     g.add_argument("--mask-ratio", type=float, default=0.5)
+    g.add_argument("--mask-ratio-range", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="draw the mask ratio of every training step from [LO, HI] (one ratio per batch); overrides --mask-ratio in training")
+    g.add_argument("--phase-band", type=float, nargs=2, default=(0.1, 0.3), metavar=("LO", "HI"),
+                   help="--mask-mode phaseband: width range, in cycles, of the hidden phase band (catalogue period, training only)")
     g.add_argument("--dec-width", type=int, default=192, help="MAE decoder width")
     g.add_argument("--dec-depth", type=int, default=2)
     g.add_argument("--dec-heads", type=int, default=3)
@@ -216,6 +220,9 @@ def add_train_args(parser) -> None:
     g.add_argument("--dyn-lambda", type=float, default=None,
                    help="LeJEPA's weighting: (1 - lambda) (prediction + dyn-nce x contrastive) + lambda SIGReg (LeJEPA's default 0.05); "
                         "unset = the old weights (prediction 1, SIGReg --dyn-sig)")  # fmt: skip
+    g.add_argument("--dyn-phase-pos", type=float, default=None, metavar="TOL",
+                   help="--dyn-cross: tokens of the star (outside the source window) within TOL cycles of the target's phase also count "
+                        "as matches in the contrastive term (training-time catalogue period); unset = only the target token")  # fmt: skip
     g.add_argument("--dyn-cross", action="store_true",
                    help="pairs across a star's windows (source in one window, target in another; negatives = every token of the star): "
                         "a clock built from the time since the window start cannot pass this test, only the phase can")  # fmt: skip
@@ -573,7 +580,7 @@ def main(argv=None):
             print("encoder frozen: only the dynamic-state head and predictor train", flush=True)
     aux_modules = [m for m in (phase_head, fold_dec, dyn) if m is not None]
 
-    def dyn_term(tok, cl, pd, t_days, step_now, n_fr=None, n_b=None, start_rows=None):
+    def dyn_term(tok, cl, pd, t_days, step_now, n_fr=None, n_b=None, start_rows=None, periods_rows=None):
         """The add-on's loss on token outputs ``tok [R, N, D]`` (no CLS), ``cl [R, D]``, padding ``pd [R, N]``,
         ``t_days [R, N]``; the clock speed is the spectral layer's own estimate from the same forward."""
         from romae_lc.model import spectral_frequency
@@ -590,7 +597,7 @@ def main(argv=None):
             # absolute token time: window start (days, relative to the star's first window) + time in the window
             t_abs = start_rows.to(tok.device).float()[:, None] + t_days
             l_dyn, st = dyn.forward_cross(tok, cl, pd, t_abs, f, n_fr, n_b, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau,
-                                          w_nce, w_sig, args.dyn_mean, w_pred)  # fmt: skip
+                                          w_nce, w_sig, args.dyn_mean, w_pred, periods_rows, args.dyn_phase_pos)  # fmt: skip
         else:
             l_dyn, st = dyn(tok, cl, pd, t_days, f, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau, w_nce, w_sig, args.dyn_mean, w_pred)
         for k_, v_ in st.items():
@@ -683,12 +690,27 @@ def main(argv=None):
             with torch.no_grad():
                 x, _ = model.encode(values, positions, pad)
             t_days = (positions[:, 0].float() - 1.0) * spec.tokenize["time_scale"]
-            return dyn_term(x[:, 1:].float(), x[:, 0].float(), pad, t_days, step_now, len(frames), frames[0].values.shape[0], dyn_starts)
+            return dyn_term(x[:, 1:].float(), x[:, 0].float(), pad, t_days, step_now, len(frames), frames[0].values.shape[0], dyn_starts, periods_rows)
         mode = args.mask_mode if mode is None else mode
         mask = None
-        if mode != "random":
+        ratio = args.mask_ratio
+        if args.mask_ratio_range is not None and model.training:
+            lo, hi = args.mask_ratio_range
+            ratio = lo + (hi - lo) * float(torch.rand(()))
+        if mode == "phaseband":
+            from project.mae_data import phase_band_mask
+
+            if periods_rows is None:
+                raise ValueError("--mask-mode phaseband needs the period of every row (the aux losses on)")
+            t_days_all = (positions[:, 0].float() - 1.0) * spec.tokenize["time_scale"]
+            mask = phase_band_mask(t_days_all, pad, periods_rows.to(pad.device), ratio, args.phase_band)
+        elif mode == "random" and ratio != args.mask_ratio:
+            from romae_lc.model import gen_mask
+
+            mask = gen_mask(ratio, pad)
+        elif mode != "random":
             mask = make_mask(
-                positions[:, 0], pad, args.mask_ratio, mode, args.mask_blocks, args.mask_block_prob,
+                positions[:, 0], pad, ratio, mode, args.mask_blocks, args.mask_block_prob,
                 position=args.mask_block_pos, block_share=args.mask_block_share,
             )
         weight = error_weights(values, pad, spec.err_stats, args.loss_weight_cap) if args.loss_weight == "err" else None
@@ -751,7 +773,7 @@ def main(argv=None):
             # the dynamic-state add-on on the visible-token outputs of the same masked forward
             t_days = (out.enc_positions[:, 0, 1:].float() - 1.0) * spec.tokenize["time_scale"]
             loss = loss + dyn_term(out.enc_tokens[:, 1:], out.enc_tokens[:, 0], out.enc_pad[:, 1:], t_days, step_now,
-                                   len(frames), frames[0].values.shape[0], dyn_starts)  # fmt: skip
+                                   len(frames), frames[0].values.shape[0], dyn_starts, periods_rows)  # fmt: skip
         if (args.cls_inv > 0 or args.cls_sig > 0) and model.training:
             # LeJEPA's static part: fused rows are frame t of every star in rows t B .. (t + 1) B, so a star's windows are rows b, B + b, ...
             from project.dyn import sigreg

@@ -153,7 +153,8 @@ class DynHead(nn.Module):
         return loss, stats
 
     def forward_cross(self, tokens, cls, pad, t_abs, freq, n_frames: int, n_b: int, dt_max: float, n_pairs: int = 256,
-                      dt_min: float = 0.5, tau: float = 1.0, w_nce: float = 0.2, w_sig: float = 1.0, w_mean: float = 1.0, w_pred: float = 1.0):
+                      dt_min: float = 0.5, tau: float = 1.0, w_nce: float = 0.2, w_sig: float = 1.0, w_mean: float = 1.0, w_pred: float = 1.0,
+                      period=None, phase_tol: float | None = None):
         """The same losses with the pairs ACROSS a star's windows (the test bed's design).
 
         Why: inside one window a token knows its time since the window start from its rotary
@@ -217,8 +218,23 @@ class DynHead(nn.Module):
             # negatives: the star's real tokens outside the source window (with overlapping windows the source's own
             # copy of an observation would otherwise compete, and telling the two copies apart needs the window clock)
             logits = (-d2 / tau).masked_fill(~real[:, None, :] | (WID[:, None, :] == wi[..., None]), -1e4)
-            ce = F.cross_entropy(logits.reshape(-1, TN), j.reshape(-1), reduction="none")
-            ce = torch.where(ok.reshape(-1), ce, torch.zeros_like(ce))
+            onehot = torch.zeros_like(logits, dtype=torch.bool).scatter_(2, j[..., None], True)
+            pos = onehot
+            if phase_tol is not None and period is not None:
+                # same-phase positives: every token of the star outside the source window whose phase is within
+                # phase_tol cycles of the target's also counts as a match (training-time catalogue period).
+                # What must match is the phase, not the time since the window start or the exact token.
+                p_star = period.to(s.device).double().reshape(T, B)[0]  # [B]
+                okp = torch.isfinite(p_star) & (p_star > 0)
+                ph = torch.remainder(torch.where(real, t, torch.zeros_like(t)).double() / torch.where(okp, p_star, torch.ones_like(p_star))[:, None], 1.0)
+                ph_j = ph.gather(1, j)
+                dph = (ph[:, None, :] - ph_j[..., None]).abs()
+                dph = torch.minimum(dph, 1.0 - dph)
+                same = real[:, None, :] & (WID[:, None, :] != wi[..., None]) & (dph < phase_tol) & okp[:, None, None]
+                pos = onehot | same
+                del dph, same
+            ce = torch.logsumexp(logits, -1) - torch.logsumexp(logits.masked_fill(~pos, -1e4), -1)  # multi-positive cross-entropy
+            ce = torch.where(ok, ce, torch.zeros_like(ce)).reshape(-1)
             l_nce = (ce * m).sum() / n_ok
             rf = real.float()[..., None]
             s_mean = (S * rf).sum(1) / n_real.clamp(min=1)[:, None]  # per star
@@ -228,10 +244,12 @@ class DynHead(nn.Module):
             loss = w_pred * l_pred + w_nce * l_nce + w_sig * l_sig + w_mean * l_mean
             with torch.no_grad():
                 hit = ((logits.argmax(-1) == j).float().reshape(-1) * m).sum() / n_ok
+                hit_phase = (pos.gather(2, logits.argmax(-1)[..., None])[..., 0].float().reshape(-1) * m).sum() / n_ok  # nearest token is a positive
+                n_pos = (pos.sum(-1).float().reshape(-1) * m).sum() / n_ok
                 mdt = (dt.reshape(-1) * m).sum() / n_ok
                 tgt_ms = ((sj.float() ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
                 stay = (((si.float() - sj.float()) ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
             stats = dict(pred=float(l_pred.detach()), nce=float(l_nce.detach()), sig=float(l_sig.detach()), mean=float(l_mean.detach()),
-                         hit=float(hit), npairs=float(n_ok), dt_max=float(dt_max), dt_mean=float(mdt), state_ms=float(tgt_ms),
+                         hit=float(hit), hit_phase=float(hit_phase), n_pos=float(n_pos), npairs=float(n_ok), dt_max=float(dt_max), dt_mean=float(mdt), state_ms=float(tgt_ms),
                          pred_rel=float(l_pred.detach() / tgt_ms.clamp(min=1e-8)), stay_rel=float(stay / tgt_ms.clamp(min=1e-8)))  # fmt: skip
         return loss, stats

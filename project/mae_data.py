@@ -32,7 +32,7 @@ from torch.utils.data import Dataset
 from romae_lc import FrameConfig, Record
 from romae_lc.model import gen_mask
 
-MASK_MODES = ("random", "block", "mix", "blockplus")
+MASK_MODES = ("random", "block", "mix", "blockplus", "phaseband")  # phaseband: phase_band_mask (needs the period)
 
 
 def block_mask(
@@ -243,3 +243,43 @@ class MultiWindowDataset(Dataset):
         actions = np.zeros((self.cfg.n_frames, 1), dtype=np.float32)
         return dict(frames=frames, actions=actions, label=record.label, index=j,
                     lengths=np.asarray(lengths, dtype=np.float32))  # fmt: skip
+
+
+def phase_band_mask(
+    t_days: torch.Tensor,
+    pad_mask: torch.Tensor,
+    period: torch.Tensor,
+    mask_ratio: float,
+    band: Sequence[float] = (0.1, 0.3),
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Hide a band of PHASE, then random points up to ``mask_ratio``.
+
+    Every row hides the tokens whose phase ``(t / P + u) mod 1`` falls below a width
+    drawn from ``band`` (``u`` a random offset per row, so the band sits anywhere in the
+    cycle), capped at the row's hidden count, then random real tokens up to
+    ``ceil(n_real * mask_ratio)``. The hidden band can only be filled by folding the
+    other cycles, so the encoder must carry the period and the phase. ``period [B]``
+    in days (the training-time catalogue period, never an input); a row without a
+    finite period gets random points only. Rows are equalised like ``gen_mask``."""
+    b, n = pad_mask.shape
+    dev = pad_mask.device
+    real = ~pad_mask
+    k = (real.sum(1).float() * mask_ratio).ceil().long()
+    p = period.to(dev).double()
+    ok = torch.isfinite(p) & (p > 0)
+    u = torch.rand(b, generator=generator).to(dev).double()
+    w = (band[0] + (band[1] - band[0]) * torch.rand(b, generator=generator)).to(dev).double()
+    phi = torch.remainder(t_days.double() / torch.where(ok, p, torch.ones_like(p))[:, None] + u[:, None], 1.0)
+    in_band = (phi < w[:, None]) & real & ok[:, None]
+    # keep at most k band tokens (a random subset when the band is larger)
+    s_band = torch.rand(b, n, generator=generator).to(dev).masked_fill(~in_band, 2.0)
+    band_m = in_band & (s_band.argsort(1).argsort(1) < k[:, None])
+    need = (k - band_m.sum(1)).clamp_min(0)
+    score = torch.rand(b, n, generator=generator).to(dev).masked_fill(band_m | pad_mask, 2.0)
+    extra = score.argsort(1).argsort(1) < need[:, None]
+    mask = band_m | extra
+    tot = (mask & real).sum(1)
+    pad_extra = tot.max() - tot
+    idx = torch.arange(n, device=dev)[None, :]
+    return mask | (idx >= (n - pad_extra)[:, None])
