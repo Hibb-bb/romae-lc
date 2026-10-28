@@ -40,7 +40,10 @@ panels = [("dyn_pred", "Prediction loss", "squared error of the predicted state"
           ("dyn_nce", "Contrastive loss", "cross-entropy over the star's tokens"),
           ("dyn_hit", "Right target picked", "share of pairs"),
           ("dyn_dt_max", "Largest gap allowed", "days")]
-fig, axes = plt.subplots(len(panels), 1, figsize=(7.2, 9.6), dpi=150, sharex=True, gridspec_kw=dict(hspace=0.45))
+if "dyn_pred_rel" in tr[0]:  # runs from 10-27 on: the scale-free prediction error (1 = no better than predicting zero)
+    panels.insert(1, ("dyn_pred_rel", "Prediction error relative to predicting zero", "ratio"))
+    panels.insert(2, ("dyn_state_ms", "State scale", "mean square of the targets"))
+fig, axes = plt.subplots(len(panels), 1, figsize=(7.2, 1.95 * len(panels)), dpi=150, sharex=True, gridspec_kw=dict(hspace=0.45))
 
 
 def smooth(y, k=9):

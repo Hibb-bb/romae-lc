@@ -143,8 +143,13 @@ class DynHead(nn.Module):
             loss = l_pred + w_nce * l_nce + w_sig * l_sig + w_mean * l_mean
             with torch.no_grad():
                 hit = ((logits.argmax(-1) == j).float().reshape(-1) * m).sum() / n_ok  # share of pairs where the prediction's nearest token is j
+                # scale-free: the prediction error over the error of predicting zero (the targets' mean square);
+                # SIGReg sets the state scale, so the raw squared error alone cannot show learning
+                tgt_ms = ((sj.float() ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
+                stay = (((si.float() - sj.float()) ** 2).mean(-1).reshape(-1) * m).sum() / n_ok  # error of "no change"
             stats = dict(pred=float(l_pred.detach()), nce=float(l_nce.detach()), sig=float(l_sig.detach()), mean=float(l_mean.detach()),
-                         hit=float(hit), npairs=float(n_ok), dt_max=float(dt_max))  # fmt: skip
+                         hit=float(hit), npairs=float(n_ok), dt_max=float(dt_max), state_ms=float(tgt_ms),
+                         pred_rel=float(l_pred.detach() / tgt_ms.clamp(min=1e-8)), stay_rel=float(stay / tgt_ms.clamp(min=1e-8)))  # fmt: skip
         return loss, stats
 
     def forward_cross(self, tokens, cls, pad, t_abs, freq, n_frames: int, n_b: int, dt_max: float, n_pairs: int = 256,
@@ -224,6 +229,9 @@ class DynHead(nn.Module):
             with torch.no_grad():
                 hit = ((logits.argmax(-1) == j).float().reshape(-1) * m).sum() / n_ok
                 mdt = (dt.reshape(-1) * m).sum() / n_ok
+                tgt_ms = ((sj.float() ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
+                stay = (((si.float() - sj.float()) ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
             stats = dict(pred=float(l_pred.detach()), nce=float(l_nce.detach()), sig=float(l_sig.detach()), mean=float(l_mean.detach()),
-                         hit=float(hit), npairs=float(n_ok), dt_max=float(dt_max), dt_mean=float(mdt))  # fmt: skip
+                         hit=float(hit), npairs=float(n_ok), dt_max=float(dt_max), dt_mean=float(mdt), state_ms=float(tgt_ms),
+                         pred_rel=float(l_pred.detach() / tgt_ms.clamp(min=1e-8)), stay_rel=float(stay / tgt_ms.clamp(min=1e-8)))  # fmt: skip
         return loss, stats
