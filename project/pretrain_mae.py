@@ -223,6 +223,11 @@ def add_train_args(parser) -> None:
     g.add_argument("--dyn-phase-pos", type=float, default=None, metavar="TOL",
                    help="--dyn-cross: tokens of the star (outside the source window) within TOL cycles of the target's phase also count "
                         "as matches in the contrastive term (training-time catalogue period); unset = only the target token")  # fmt: skip
+    g.add_argument("--dyn-ham", action="store_true",
+                   help="Hamiltonian predictor (project.dyn.HamHead, after LeHami): exact harmonic rotation + a learned "
+                        "symplectic term, no damping; advances the fraction of the elapsed cycles; needs --dyn-cross")  # fmt: skip
+    g.add_argument("--dyn-ham-steps", type=int, default=16, help="--dyn-ham: substeps per cycle")
+    g.add_argument("--dyn-ham-close", type=float, default=1.0, help="--dyn-ham: weight of the one-cycle closure loss")
     g.add_argument("--dyn-cross", action="store_true",
                    help="pairs across a star's windows (source in one window, target in another; negatives = every token of the star): "
                         "a clock built from the time since the window start cannot pass this test, only the phase can")  # fmt: skip
@@ -572,7 +577,14 @@ def main(argv=None):
             parser.error("--dyn needs --spectral (the clock speed comes from the spectral layer)")
         from project.dyn import DynHead
 
-        dyn = DynHead(model.embed_dim, args.dyn).to(dev)
+        if args.dyn_ham:
+            from project.dyn import HamHead
+
+            if not args.dyn_cross:
+                parser.error("--dyn-ham needs --dyn-cross")
+            dyn = HamHead(model.embed_dim, args.dyn, n_sub=args.dyn_ham_steps).to(dev)
+        else:
+            dyn = DynHead(model.embed_dim, args.dyn).to(dev)
         if args.dyn_freeze:
             if not args.init and ckpt is None:
                 parser.error("--dyn-freeze needs --init (a trained encoder to freeze) or a resume")
@@ -597,7 +609,8 @@ def main(argv=None):
             # absolute token time: window start (days, relative to the star's first window) + time in the window
             t_abs = start_rows.to(tok.device).float()[:, None] + t_days
             l_dyn, st = dyn.forward_cross(tok, cl, pd, t_abs, f, n_fr, n_b, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau,
-                                          w_nce, w_sig, args.dyn_mean, w_pred, periods_rows, args.dyn_phase_pos)  # fmt: skip
+                                          w_nce, w_sig, args.dyn_mean, w_pred, periods_rows, args.dyn_phase_pos,
+                                          args.dyn_ham_close if args.dyn_ham else 0.0)  # fmt: skip
         else:
             l_dyn, st = dyn(tok, cl, pd, t_days, f, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau, w_nce, w_sig, args.dyn_mean, w_pred)
         for k_, v_ in st.items():

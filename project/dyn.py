@@ -154,7 +154,7 @@ class DynHead(nn.Module):
 
     def forward_cross(self, tokens, cls, pad, t_abs, freq, n_frames: int, n_b: int, dt_max: float, n_pairs: int = 256,
                       dt_min: float = 0.5, tau: float = 1.0, w_nce: float = 0.2, w_sig: float = 1.0, w_mean: float = 1.0, w_pred: float = 1.0,
-                      period=None, phase_tol: float | None = None):
+                      period=None, phase_tol: float | None = None, w_close: float = 0.0):
         """The same losses with the pairs ACROSS a star's windows (the test bed's design).
 
         Why: inside one window a token knows its time since the window start from its rotary
@@ -242,6 +242,12 @@ class DynHead(nn.Module):
             l_sig = sigreg(centred) if centred.shape[0] >= 16 else s.new_zeros(())
             l_mean = s_mean.pow(2).mean()
             loss = w_pred * l_pred + w_nce * l_nce + w_sig * l_sig + w_mean * l_mean
+            l_close = None
+            if hasattr(self, "closure") and w_close > 0:
+                # one full cycle of the Hamiltonian flow must return to its start (HamHead)
+                c_tok = cls_star.gather(1, WID[..., None].expand(-1, -1, D))  # the CLS of every token's window (WID is sorted)
+                l_close = self.closure(S[real], c_tok[real])
+                loss = loss + w_close * l_close
             with torch.no_grad():
                 hit = ((logits.argmax(-1) == j).float().reshape(-1) * m).sum() / n_ok
                 hit_phase = (pos.gather(2, logits.argmax(-1)[..., None])[..., 0].float().reshape(-1) * m).sum() / n_ok  # nearest token is a positive
@@ -250,6 +256,80 @@ class DynHead(nn.Module):
                 tgt_ms = ((sj.float() ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
                 stay = (((si.float() - sj.float()) ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
             stats = dict(pred=float(l_pred.detach()), nce=float(l_nce.detach()), sig=float(l_sig.detach()), mean=float(l_mean.detach()),
-                         hit=float(hit), hit_phase=float(hit_phase), n_pos=float(n_pos), npairs=float(n_ok), dt_max=float(dt_max), dt_mean=float(mdt), state_ms=float(tgt_ms),
+                         hit=float(hit), hit_phase=float(hit_phase), n_pos=float(n_pos), close=float(l_close.detach()) if l_close is not None else 0.0, npairs=float(n_ok), dt_max=float(dt_max), dt_mean=float(mdt), state_ms=float(tgt_ms),
                          pred_rel=float(l_pred.detach() / tgt_ms.clamp(min=1e-8)), stay_rel=float(stay / tgt_ms.clamp(min=1e-8)))  # fmt: skip
         return loss, stats
+
+
+class HamHead(DynHead):
+    """The add-on with a symplectic Hamiltonian predictor (LeHami, Yalovetzky, Balestriero & LeCun 2026),
+    shaped for sparse, irregular light curves.
+
+    State pairs ``(q_k, p_k) = (s[2k], s[2k+1])``. Time is counted in cycles of the spectral frequency,
+    ``tau = f dt``. The Hamiltonian is ``H = H0 + K1(p) + V1(q, c)``: ``H0`` is the harmonic oscillator whose
+    exact flow rotates pair k by ``2 pi k tau`` (our earlier predictor without damping), ``K1`` and ``V1`` are
+    small learned MLPs (zero at the start), the potential conditioned on the window's CLS ``c`` as LeHami
+    conditions it on the action. One substep of size h is the Strang splitting rotate(h/2), leapfrog of
+    ``K1 + V1`` over h, rotate(h/2): every part is exactly symplectic, so the step keeps phase-space volume
+    for any parameters and nothing contracts the states.
+
+    LeHami steps the flow frame by frame; our gaps span 1 to 100 cycles, which leapfrog cannot cross
+    cheaply or accurately. So the flow advances only by the FRACTION of the elapsed cycles, ``tau mod 1``,
+    in ``n_sub`` substeps, and a closure loss (``closure``) makes one full cycle of the flow return to its
+    start, the condition under which skipping whole cycles is exact."""
+
+    def __init__(self, d_model: int, K: int = 8, n_sub: int = 16, hidden: int = 64, c_dim: int = 16):
+        super().__init__(d_model, K)
+        self.n_sub = int(n_sub)
+        self.c_proj = nn.Linear(d_model, c_dim)
+        self.k_mlp = nn.Sequential(nn.Linear(self.K, hidden), nn.Tanh(), nn.Linear(hidden, hidden), nn.Tanh(), nn.Linear(hidden, 1))
+        self.v_mlp = nn.Sequential(nn.Linear(self.K + c_dim, hidden), nn.Tanh(), nn.Linear(hidden, hidden), nn.Tanh(), nn.Linear(hidden, 1))
+        with torch.no_grad():  # the learned part starts at zero: the flow starts as the exact harmonic rotation
+            for m in (self.k_mlp[-1], self.v_mlp[-1]):
+                m.weight.zero_()
+                m.bias.zero_()
+
+    def _rotate(self, q, p, h):
+        k = torch.arange(1, self.K + 1, device=q.device, dtype=q.dtype)
+        ang = (2 * math.pi) * h[:, None] * k
+        c, s = ang.cos(), ang.sin()
+        return q * c - p * s, q * s + p * c
+
+    def _flow(self, q, p, cz, tau):
+        """Advance ``(q, p) [M, K]`` by ``tau [M]`` cycles (tau in [0, 1]) with the CLS code ``cz [M, c_dim]``."""
+        h = tau / self.n_sub
+        with torch.enable_grad():
+            if not q.requires_grad:
+                q = q.detach().requires_grad_(True)
+            if not p.requires_grad:
+                p = p.detach().requires_grad_(True)
+
+            def dV(q_):
+                return torch.autograd.grad(self.v_mlp(torch.cat([q_, cz], -1)).sum(), q_, create_graph=True)[0]
+
+            def dK(p_):
+                return torch.autograd.grad(self.k_mlp(p_).sum(), p_, create_graph=True)[0]
+
+            for _ in range(self.n_sub):
+                q, p = self._rotate(q, p, h / 2)
+                p = p - (h / 2)[:, None] * dV(q)
+                q = q + h[:, None] * dK(p)
+                p = p - (h / 2)[:, None] * dV(q)
+                q, p = self._rotate(q, p, h / 2)
+        return q, p
+
+    def predict(self, s_i, c_i, f_i, dt):
+        tau = torch.remainder(f_i.float() * dt.float(), 1.0)
+        q, p = self._flow(s_i[:, 0::2].float(), s_i[:, 1::2].float(), self.c_proj(c_i.float()), tau)
+        return torch.stack([q, p], -1).flatten(-2)
+
+    def closure(self, s, c, max_n: int = 1024):
+        """Squared distance after one full cycle of the flow, over the states' mean square: 0 when the flow
+        has period 1. The states are detached, so this term trains the flow, not the encoder."""
+        if s.shape[0] > max_n:
+            idx = torch.randperm(s.shape[0], device=s.device)[:max_n]
+            s, c = s[idx], c[idx]
+        s = s.detach().float()
+        q, p = self._flow(s[:, 0::2], s[:, 1::2], self.c_proj(c.float()), torch.ones(s.shape[0], device=s.device))
+        out = torch.stack([q, p], -1).flatten(-2)
+        return ((out - s) ** 2).mean() / (s ** 2).mean().clamp(min=1e-8)

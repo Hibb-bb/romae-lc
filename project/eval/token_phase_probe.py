@@ -207,6 +207,7 @@ for k, ck in enumerate(a.ckpts):
         from project.dyn import DynHead
 
         dyn = DynHead(dyn_sd["s_head.weight"].shape[1], dyn_sd["s_head.weight"].shape[0] // 2).to(dev)
+        dyn_sd = {k: v for k, v in dyn_sd.items() if k in dyn.state_dict()}  # a HamHead's flow is not needed: the probe reads the states
         dyn.load_state_dict(dyn_sd)
         dyn.eval()
         print(f"[{a.label}] {ck}: dynamic-state head found (K = {dyn.K}), its state s is probed too", flush=True)
