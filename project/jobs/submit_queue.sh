@@ -21,9 +21,17 @@ echo "$(date '+%F %T') started on $(hostname), list $Q"
 while true; do
     line=$(grep -v '^[[:space:]]*#' "$Q" 2>/dev/null | grep -v '^[[:space:]]*$' | head -1)
     if [ -z "$line" ]; then
-        echo "$(date '+%F %T') the list is empty: done"
-        exit 0
+        # a read error (a file-system hiccup) also gives an empty line: stop only after three empty reads a minute apart
+        # (10-29: the helper quit on one bad read with 22 lines still in the list)
+        empty=$(( ${empty:-0} + 1 ))
+        if [ "$empty" -ge 3 ]; then
+            echo "$(date '+%F %T') the list is empty: done"
+            exit 0
+        fi
+        sleep 60
+        continue
     fi
+    empty=0
     if [ "$(squeue -u "$USER" -p "${QUEUE_PARTITION:-ghx4-interactive}" -h 2>/dev/null | wc -l)" -eq 0 ]; then
         echo "$(date '+%F %T') submitting: $line"
         if out=$(eval "$line" 2>&1); then
