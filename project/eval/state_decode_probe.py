@@ -41,6 +41,7 @@ ap.add_argument("--harmonics", type=int, default=4)
 ap.add_argument("--context", action="store_true", help="also score the JEPA context encoder")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", default=None)
+ap.add_argument("--save-npz", default=None, help="per-pair z-scores and a few example forecast curves, for the figures")
 a = ap.parse_args()
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 rng = np.random.default_rng(a.seed)
@@ -163,6 +164,9 @@ def score(tokens, wins, dyn, window_days, label):
         rows[f"predicted state [{dname}]"] = decode(pred, cls[A_])
         rows[f"no change [{dname}]"] = decode(s[I], cls[A_])
         rows[f"target state, saw m_j [{dname}]"] = decode(s[J], cls[win[J]])
+    if hasattr(dyn, "dec"):
+        with torch.no_grad():
+            rows["predicted state [trained decoder]"] = dyn.decode(torch.as_tensor(pred).float().to(dev), torch.as_tensor(cls[A_]).float().to(dev)).cpu().numpy()
     rows |= {
         "window mean": (np.bincount(win, weights=m, minlength=len(cls)) / np.maximum(np.bincount(win, minlength=len(cls)), 1))[A_],
     }
@@ -185,6 +189,35 @@ def score(tokens, wins, dyn, window_days, label):
               f"|z|<3 {r['within_3']:.3f}  mean z {r['mean_z']:+.2f}  | |z|<2 by gap "
               + "  ".join(f"{k} {v['within_2']:.3f}" for k, v in out[name].items() if k != "all"), flush=True)
     out["n_pairs"], out["gap_median_days"] = int(len(I)), float(np.median(dt))
+    if a.save_npz:
+        # example curves: the last token of window A advanced over a grid of gaps, for the test stars with the most targets
+        ex = {}
+        n_t = np.bincount(np.searchsorted(np.unique(star[I]), star[I]))
+        order_st = np.unique(star[I])[np.argsort(-n_t)][:8]
+        grid = np.linspace(0.0, a.dt[1], 200)
+        for e, o in enumerate(order_st):
+            wA = np.bincount(A_[star[I] == o]).argmax()
+            sel = win == wA
+            i0 = np.flatnonzero(sel)[np.argmax(t[sel])]
+            endA = wins["start"][wA] + window_days
+            with torch.no_grad():
+                pg = dyn.predict(torch.as_tensor(np.repeat(s[i0][None], len(grid), 0)).float().to(dev),
+                                 torch.as_tensor(np.repeat(cls[wA][None], len(grid), 0)).float().to(dev),
+                                 torch.full((len(grid),), f_star[o]).float().to(dev), torch.as_tensor(grid).float().to(dev)).cpu().numpy()
+            cl = np.repeat(cls[wA][None], len(grid), 0)
+            tt, mm, ss = t[sel], m[sel], sig[sel]
+            after = (star == o) & (t > endA) & (t <= t[i0] + a.dt[1])
+            ex[f"ex{e}_A_t"], ex[f"ex{e}_A_m"], ex[f"ex{e}_A_s"] = tt, mm, ss
+            ex[f"ex{e}_B_t"], ex[f"ex{e}_B_m"], ex[f"ex{e}_B_s"] = t[after], m[after], sig[after]
+            ex[f"ex{e}_grid_t"] = t[i0] + grid
+            ex[f"ex{e}_pred_mlp"] = decoders["mlp"](pg, cl)
+            ex[f"ex{e}_pred_ridge"] = decoders["ridge"](pg, cl)
+            ex[f"ex{e}_four"] = fourier_forecast(tt - tt.min(), mm, ss, f_star[o], t[i0] + grid - tt.min(), a.harmonics)
+            ex[f"ex{e}_info"] = np.array([o, f_star[o], endA, t[i0]])
+        tag = label.split(" | ")[0]
+        np.savez(a.save_npz.replace(".npz", f"_{tag}.npz"), dt=dt, m_j=yj, sig_j=sj, row_names=np.array(list(rows)),
+                 yhat=np.stack([rows[k] for k in rows]), **ex)
+        print("saved", a.save_npz.replace(".npz", f"_{tag}.npz"), flush=True)
     return out
 
 
@@ -200,6 +233,9 @@ for ck in a.ckpts:
     from project.dyn import DynHead, HamHead
     D, K2 = dyn_sd["s_head.weight"].shape[1], dyn_sd["s_head.weight"].shape[0]
     dyn = (HamHead if "k_mlp.0.weight" in dyn_sd else DynHead)(D, K2 // 2).to(dev)
+    if "dec.0.weight" in dyn_sd:  # trained with --dyn-decode: its own magnitude decoder
+        dyn.add_decoder(D)
+        dyn.to(dev)
     dyn.load_state_dict(dyn_sd)
     dyn.eval()
     ds = WindowDataset([("validation", recs, list(range(len(recs))))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)

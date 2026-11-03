@@ -16,6 +16,6 @@
 export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1
 source .venv/bin/activate
 for NAME in "$@"; do
-    python -m project.eval.state_decode_probe --ckpts project/runs/$NAME/mae.pt --context --out project/results/state_decode/$NAME.json
+    python -m project.eval.state_decode_probe --ckpts project/runs/$NAME/mae.pt --context --out project/results/state_decode/$NAME.json --save-npz project/results/state_decode/pairs.npz ${EXTRA:-}
 done
 echo "exit $?"
