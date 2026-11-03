@@ -1,10 +1,119 @@
 # Plan and to-do list
 
-The living plan of the period / phase work. Updated 2026-10-09. Every item carries a
-status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
-**dropped** (superseded or rejected, with the reason). Dates are absolute.
+**The current plan is the ICML plan below (agreed 2026-11-03).** The sections after it are the
+older period / phase plan, kept as history. Every item carries a status: **done**, **alive**
+(still the plan), **parked** (not wrong, not now), **dropped** (with the reason). Dates are absolute.
 
-## Where we are
+## ICML plan (agreed 2026-11-03)
+
+### Goal
+
+A light-curve world model trained with a JEPA-based framework, with as few auxiliary losses
+as possible: good views should do the work. It must support physical-parameter inference
+and forecasting. New ideas that are not in this plan wait until the current phase is done.
+
+### Decisions
+
+- Prediction losses at the **token level only**. No JEPA, invariance or SIGReg terms on the CLS.
+  Evidence: J4 is J3b plus the two CLS terms and nothing else; macro F1 fell from 0.586 to
+  0.533 (seed spread about 0.01).
+- The catalogue period never enters the encoder at inference. Using it to build training
+  pairs or masks is allowed.
+- Chen labels and periods are not used for training or evaluation. Evaluation is on ZTFxPC.
+
+### Test card (every run)
+
+1. Classification: macro F1, 13 classes, attention probe (`project/eval/attn_probe.py`).
+2. Period: log-period R2 and the spectral-peak hit rate.
+3. Per-token phase R2 (`project/eval/token_phase_probe.py`).
+4. Forecasting: share within 2 sigma, 0.5 to 10 days past the window
+   (`project/eval/state_decode_probe.py`, figure `project/eval/decode_figs.py`).
+5. Later: cross-survey retrieval and transfer; physical parameters.
+
+### Where we are (2026-11-03)
+
+| run | what | macro F1 (mean head) |
+|---|---|---|
+| maew_spec | masked autoencoder + spectral layer + aux | 0.598 |
+| J3 | J1 (JEPA + reconstruction 0.5 + aux 0.5) + cross-window next-state add-on, prediction and SIGReg at weight 1 | 0.597 |
+| J3b | J3 with lambda 0.05 | 0.586 |
+| J4 | J3b + CLS invariance and SIGReg | 0.533 |
+| hand-crafted features | (number from the user) | 0.578 |
+
+Forecast decoding of J3 (100 stars, 30 held out, 8,773 forecasts, MLP decoder):
+within 2 sigma, predicted state 0.46, no change 0.27, Fourier fit 0.67, the target's own
+state 0.97 (the ceiling). The state holds the brightness; the prediction step is the weak part.
+
+The add-on predictor (`project/dyn.py`, `DynHead`) is a fixed rotation: state = Linear(384 -> 16)
+of the token output, 8 pairs rotated by 2 pi k f dt (f = the star's median spectral estimate),
+times a damping exp(-g_k dt) from the source CLS. About 31k learned weights; the step itself
+is not learned. It can only rotate and shrink the state.
+
+### Phase 1: debug the predictor (first, about 2 weeks) — alive
+
+1a. Diagnostics on the J3 checkpoint, no training (one evaluation job):
+- D1: refit the decoder on predicted states. Off the set of real states, or lost information?
+- D2: the catalogue frequency in place of the encoder's (evaluation only). How much error comes from f?
+- D3: do real states rotate, s(t_j) = R(dt) s(t_i)? Do a star's states form a loop or a Gaussian cloud? By class.
+- D4: forecast error by class and by amplitude (the failures looked like peaky stars).
+
+1b. Short training runs from J1, 20k steps (about 3 h each). Code written, not yet checked on a GPU
+(smoke job 3521844):
+- J3t: targets from the target encoder on the full window, no gradient (`--dyn-target ema`).
+- J3t + a likelihood decoder on the predicted state, told the band (`--dyn-decode`, to be upgraded
+  from a fixed error to a learned spread and a band input).
+- SIGReg off on the states, or SIGReg across stars instead of within a star.
+- Rotation off (`--dyn-no-rot`), control.
+- J1 + 20k steps with no add-on, control for the extra steps.
+
+If D3 shows that real states do not rotate, change the predictor (a step learned from the CLS,
+more harmonics, or a small transformer over state, dt and f) before adding losses.
+
+### Phase 2: find what can be removed (about weeks 2 to 4) — alive
+
+- Top-down from J1: drop one part at a time (contrast, mean penalty, damping, reconstruction,
+  aux loss). Includes LeNEPA with no contrast (never tried).
+- J1's starting weights were trained with reconstruction and the aux loss, so the final minimal
+  recipe needs one run from scratch (about a day) to confirm it.
+- The bottom-up floor is the plain token JEPA (`enc_jepa`, 0.63 within 10 % on period).
+
+### Phase 3: cross-survey views (about weeks 4 to 7) — alive
+
+- Data: ZTFxPC, ATLASxPC, ASASSNxPC under /projects/bfrf/data/PC_matches. Each survey's own split.
+  Checked 2026-11-03: the splits agree by Gaia DR3 id (no star in train in one survey and in
+  validation or test in another).
+  ZTF train/validation/test 43.5k/5.5k/5.5k; also in ATLAS 40.6k/5.1k/5.1k; also in ASAS-SN
+  15.2k/1.9k/1.8k; in all three (`ZTF-ATLAS-ASASSN-isect`) 15.0k/1.9k/1.8k.
+- Views: for a source token, the targets are the star's other windows in the same survey (the
+  star can be its own target) plus its windows in the other surveys when matched. Stars with
+  no match get the normal views.
+- Across surveys the predictor advances by phase, dphi = (t_j - t_i) / P mod 1, with the
+  catalogue P (training pairs only). Within a survey it keeps the encoder's own f.
+- Preprocessing: fold each matched star's two surveys together at P and keep it as a
+  cross-survey pair only if the joint fold is clean (drops stars whose phase does not hold
+  over years: long-period variables, spotted stars, period changes). Same-phase positives
+  (0.02 cycles) absorb small phase errors. The predictor is told the target's band.
+- Loader work: band wavelengths for ATLAS c/o and ASAS-SN V/g, error statistics per survey,
+  one time system, pairing by Gaia id.
+- ZTF + ATLAS first (40k pairs), then ASAS-SN.
+- Tests: retrieval (is a star's ZTF latent closest to its own ATLAS latent?), probe transfer
+  (fit on ZTF, score on ATLAS), forecast z-scores per survey.
+
+### Phase 4: physical parameters — choose the targets early
+
+- On disk: Gaia parallax, proper motion and radial velocity (in the data); Gaia-specxPC
+  (probably temperature and metallicity, not yet inspected).
+- A clean physical test: distances of RR Lyrae and Cepheids through the period-luminosity relation.
+
+### Queue decisions still open (2026-11-03)
+
+- The interactive queue holds J7, J3c, J4c and J4Hami (about 30 h). J4c and J4Hami carry the
+  CLS terms the plan drops; proposed: remove them, keep J7 and J3c.
+- Submit Phase 1a and 1b once the smoke job passes.
+
+# Older plan: period and phase (2026-10-07 to 2026-10-28)
+
+### Where we are
 
 - The 250-day wide encoder with the spectral layer is the best encoder (`project/runs/maew_spec`):
   period within 10 % 0.79, within 1 % 0.72 on 5,346 validation stars; with the fine search
@@ -19,7 +128,7 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
   against observations 0.15 mean squared error per window, template loss lower than the
   observed-target loss).
 
-## The roadmap (agreed 2026-10-07, revised 2026-10-09)
+### The roadmap (agreed 2026-10-07, revised 2026-10-09)
 
 | step | what | status |
 |---|---|---|
@@ -30,7 +139,7 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
 | 4 | the world model conditioned on the time gap (copy the right phase point forward) | alive, after step 3 |
 | 5 | scale to the 800k-star Chen set: our own period table (done, 712,278 stars), then pretraining with the auxiliary loss on our own periods | started 2026-10-19: cache job + 9 links of the base recipe (`chen_spec`) on the chain; the rope/cycle fine-tune follows from that checkpoint |
 
-## Items added 2026-10-09 (step 1, the revised recipe)
+### Items added 2026-10-09 (step 1, the revised recipe)
 
 - **A. Queries in cycles, not days.** `--query-cycles LO HI`: the offset of a query from a seen
   point is drawn log-uniform in cycles of the star's table period, between 0.1 and a cap that
@@ -85,7 +194,7 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
   250-day windows and undersamples the narrower peaks of a 2,000-day baseline; the test is
   `--spectral-rel 1e-4` (five times the layer's cost). Status: parked; 250-day windows for now.
 
-## Runs in the queue (ghx4 batch, all pending on priority as of 2026-10-09 evening)
+### Runs in the queue (ghx4 batch, all pending on priority as of 2026-10-09 evening)
 
 | job | what | status |
 |---|---|---|
@@ -95,7 +204,7 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
 | cyc, cycph | the cycle curriculum pair (item D) | alive, submitted 2026-10-09 |
 | jepaclean, jepacleanshort, longspecwtpl2 | template runs with queries in days | cancelled 2026-10-09 (superseded by A to C) |
 
-## Other open items
+### Other open items
 
 - Delta CPU job for the StarEmbed hand-crafted baseline (`project/jobs/delta_cpu_starembed.sh`,
   now installs its own x86 environment): submit from the Delta login node. Alive.
@@ -106,7 +215,7 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
 - Classification: the random-forest benchmark is done (13 classes, 5 seeds: latent macro F1
   0.577 against our hand features 0.416); the StarEmbed baseline waits on the Delta job. Alive.
 
-## Dropped on 2026-10-09, and why
+### Dropped on 2026-10-09, and why
 
 - Query offsets in days as the curriculum: 30 days is 100 cycles for an RR Lyrae and a tenth
   of a cycle for a long-period variable; cycles put every class on the same curriculum.
@@ -119,7 +228,7 @@ status: **done**, **alive** (still the plan), **parked** (not wrong, not now),
 - Token JEPA alone as the way to period precision: run 1 reached 0.63 within 10 % and 0.13
   within 1 %; the objective is satisfied by a rough period. Kept only as a comparison.
 
-## Clean-up of the repository (started 2026-10-19)
+### Clean-up of the repository (started 2026-10-19)
 
 Order agreed with the user: record first, remove later; no code moves while
 the 800k pretraining chain runs from this working tree.
@@ -139,7 +248,7 @@ the 800k pretraining chain runs from this working tree.
    tests in GitHub Actions.
 5. open — split `project/common.py` last.
 
-## JEPA variants with the aux loss (proposed 2026-10-26)
+### JEPA variants with the aux loss (proposed 2026-10-26)
 
 Facts behind the plan. The aux loss (cross-entropy of the spectral layer's
 logits on the catalogue period's bin, training only) is the biggest win in
