@@ -78,6 +78,36 @@ class DynHead(nn.Module):
     def states(self, tokens: torch.Tensor) -> torch.Tensor:
         return self.s_head(self.norm(tokens.float()))
 
+    def add_decoder(self, d_model: int, c_dim: int = 32, hidden: int = 256, n_bands: int = 0, learn_sig: bool = False):
+        """A magnitude decoder on [predicted state, CLS code, band] (``--dyn-decode``): the predicted state of the
+        target token, with the source window's CLS for the star's amplitude and shape, must give the target's
+        observed magnitude within its error. It makes the predicted latent decodable, not just matchable.
+        ``n_bands > 0``: the target's band enters as a learned 8-number code (magnitudes are scaled per band).
+        ``learn_sig``: a second output, the log of the model's own spread, so the loss is a Gaussian likelihood
+        with variance sigma_obs^2 + sigma_model^2 instead of a fixed error."""
+        self.dec_c = nn.Linear(d_model, c_dim)
+        self.dec_nb, self.dec_learn_sig = int(n_bands), bool(learn_sig)
+        b_dim = 8 if self.dec_nb > 0 else 0
+        if self.dec_nb > 0:
+            self.dec_band = nn.Embedding(self.dec_nb, b_dim)
+        self.dec = nn.Sequential(nn.Linear(2 * self.K + c_dim + b_dim, hidden), nn.GELU(), nn.Linear(hidden, hidden), nn.GELU(),
+                                 nn.Linear(hidden, 2 if self.dec_learn_sig else 1))
+        if self.dec_learn_sig:
+            with torch.no_grad():  # start with a small model spread (exp(-3) = 0.05 scaled magnitudes)
+                self.dec[-1].bias[1] = -3.0
+
+    def decode_full(self, s: torch.Tensor, c: torch.Tensor, band: torch.Tensor | None = None):
+        """``(mean, log sigma_model or None)`` of the magnitude."""
+        x = [s.float(), self.dec_c(c.float())]
+        if getattr(self, "dec_nb", 0) > 0:
+            b = torch.zeros(s.shape[:-1], dtype=torch.long, device=s.device) if band is None else band.long().clamp(0, self.dec_nb - 1)
+            x.append(self.dec_band(b))
+        o = self.dec(torch.cat(x, -1))
+        return o[..., 0], (o[..., 1].clamp(-8.0, 3.0) if getattr(self, "dec_learn_sig", False) else None)
+
+    def decode(self, s: torch.Tensor, c: torch.Tensor, band: torch.Tensor | None = None) -> torch.Tensor:
+        return self.decode_full(s, c, band)[0]
+
     def predict(self, s_i: torch.Tensor, c_i: torch.Tensor, f_i: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
         """``s_i [M, 2K]`` advanced by ``dt [M]`` days at frequency ``f_i [M]``
         (cycles per day) with damping from ``c_i [M, D]``."""
@@ -154,7 +184,9 @@ class DynHead(nn.Module):
 
     def forward_cross(self, tokens, cls, pad, t_abs, freq, n_frames: int, n_b: int, dt_max: float, n_pairs: int = 256,
                       dt_min: float = 0.5, tau: float = 1.0, w_nce: float = 0.2, w_sig: float = 1.0, w_mean: float = 1.0, w_pred: float = 1.0,
-                      period=None, phase_tol: float | None = None, w_close: float = 0.0):
+                      period=None, phase_tol: float | None = None, w_close: float = 0.0,
+                      tgt_tokens=None, tgt_pad=None, tgt_t_abs=None, tgt_mag=None, tgt_sig=None, w_dec: float = 0.0, sig_floor: float = 0.05,
+                      tgt_band=None, sig_mode: str = "star"):
         """The same losses with the pairs ACROSS a star's windows (the test bed's design).
 
         Why: inside one window a token knows its time since the window start from its rotary
@@ -169,7 +201,15 @@ class DynHead(nn.Module):
         Fused rows are frame ``t`` of every star in rows ``t B .. (t + 1) B``. ``t_abs [R, N]``
         is the token time in record days (window start + time in the window), ``freq [R]`` the
         window's estimate in cycles per day; the star uses the median over its windows. The
-        damping comes from the source window's CLS."""
+        damping comes from the source window's CLS.
+
+        Targets (``tgt_tokens [R, N2, D]``, ``tgt_pad``, ``tgt_t_abs``; ``--dyn-target ema``): the target
+        states and the negatives come from these tokens (the JEPA target encoder on the full window) through
+        the state head with no gradient, as a JEPA target; SIGReg and the mean act on the source states.
+        Unset: targets are the source set itself (both sides get gradient; the J3 runs).
+
+        Decoding (``w_dec > 0``, needs ``add_decoder`` and ``tgt_mag``/``tgt_sig [R, N2]``): the decoded
+        prediction's z-score against the target's magnitude and error (floor ``sig_floor``), Huber loss."""
         with torch.autocast(device_type=tokens.device.type, enabled=False):
             T, B = int(n_frames), int(n_b)
             R, N, D = tokens.shape
@@ -189,6 +229,32 @@ class DynHead(nn.Module):
             t, real, WID = t.gather(1, order), real.gather(1, order), WID.gather(1, order)
             S = S.gather(1, order[..., None].expand(-1, -1, ds))
             TN = T * N
+            MAG2 = SIG2 = BAND2 = None
+            if tgt_tokens is None:
+                S2, real2, t2, WID2, TN2 = S, real, t, WID, TN
+                if tgt_mag is not None:
+                    MAG2, SIG2 = star(tgt_mag.float()).gather(1, order), star(tgt_sig.float()).gather(1, order)
+                if tgt_band is not None:
+                    BAND2 = star(tgt_band.long()).gather(1, order)
+            else:
+                N2 = tgt_tokens.shape[1]
+
+                def star2(x):
+                    return x.reshape(T, B, N2, *x.shape[2:]).transpose(0, 1).reshape(B, T * N2, *x.shape[2:])
+
+                with torch.no_grad():  # a JEPA target: no gradient into the target states
+                    s2 = self.states(tgt_tokens.detach())
+                S2, real2, TA2 = star2(s2), star2(~tgt_pad), star2(tgt_t_abs.float())
+                WID2 = torch.arange(T, device=s.device).repeat_interleave(N2)[None].expand(B, T * N2)
+                t2 = torch.where(real2, TA2, torch.full_like(TA2, float("inf")))
+                order2 = t2.argsort(1)
+                t2, real2, WID2 = t2.gather(1, order2), real2.gather(1, order2), WID2.gather(1, order2)
+                S2 = S2.gather(1, order2[..., None].expand(-1, -1, ds))
+                TN2 = T * N2
+                if tgt_mag is not None:
+                    MAG2, SIG2 = star2(tgt_mag.float()).gather(1, order2), star2(tgt_sig.float()).gather(1, order2)
+                if tgt_band is not None:
+                    BAND2 = star2(tgt_band.long()).gather(1, order2)
             P = int(n_pairs)
             u = torch.rand(B, P, device=s.device)
             i = (u * n_real[:, None]).long().clamp(min=0, max=TN - 1)  # source: a real token of the star
@@ -196,28 +262,27 @@ class DynHead(nn.Module):
             # target: a random real token of the star in ANOTHER window, at or after the source, at most dt_max later.
             # dt = 0 happens when windows overlap and the same observation sits in both: its two states must agree.
             # Short gaps only: the phase predicted over a gap drifts by f dt (relative frequency error), so long gaps cannot be scored.
-            tt = torch.where(real, t, torch.zeros_like(t))
-            gap_all = tt[:, None, :] - ti[..., None]  # [B, P, TN]
-            cand = real[:, None, :] & (WID[:, None, :] != wi[..., None]) & (gap_all >= 0) & (gap_all <= dt_max)
-            score = torch.rand(B, P, TN, device=s.device).masked_fill(~cand, -1.0)
+            tt = torch.where(real2, t2, torch.zeros_like(t2))
+            gap_all = tt[:, None, :] - ti[..., None]  # [B, P, TN2]
+            cand = real2[:, None, :] & (WID2[:, None, :] != wi[..., None]) & (gap_all >= 0) & (gap_all <= dt_max)
+            score = torch.rand(B, P, TN2, device=s.device).masked_fill(~cand, -1.0)
             j = score.argmax(-1)
-            dt = t.gather(1, j) - ti
-            wj = WID.gather(1, j)
+            dt = t2.gather(1, j) - ti
             ok = (n_real > 1)[:, None] & cand.gather(2, j[..., None])[..., 0] & real.gather(1, i)
             del gap_all, cand, score
             dt = torch.where(ok, dt, torch.zeros_like(dt))
             si = S.gather(1, i[..., None].expand(-1, -1, ds))
-            sj = S.gather(1, j[..., None].expand(-1, -1, ds))
+            sj = S2.gather(1, j[..., None].expand(-1, -1, ds))
             ci = cls_star.gather(1, wi[..., None].expand(-1, -1, D))  # the source window's CLS
             pred = self.predict(si.reshape(-1, ds), ci.reshape(-1, D), f_star[:, None].expand(B, P).reshape(-1), dt.reshape(-1)).view(B, P, ds)
             m = ok.reshape(-1).float()
             n_ok = m.sum().clamp(min=1)
             l_pred = (((pred - sj) ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
             # squared distances to every token of the star without the [B, P, TN, 2K] intermediate
-            d2 = (pred.pow(2).sum(-1)[:, :, None] + S.pow(2).sum(-1)[:, None, :] - 2 * torch.bmm(pred, S.transpose(1, 2))).clamp(min=0)
+            d2 = (pred.pow(2).sum(-1)[:, :, None] + S2.pow(2).sum(-1)[:, None, :] - 2 * torch.bmm(pred, S2.transpose(1, 2))).clamp(min=0)
             # negatives: the star's real tokens outside the source window (with overlapping windows the source's own
             # copy of an observation would otherwise compete, and telling the two copies apart needs the window clock)
-            logits = (-d2 / tau).masked_fill(~real[:, None, :] | (WID[:, None, :] == wi[..., None]), -1e4)
+            logits = (-d2 / tau).masked_fill(~real2[:, None, :] | (WID2[:, None, :] == wi[..., None]), -1e4)
             onehot = torch.zeros_like(logits, dtype=torch.bool).scatter_(2, j[..., None], True)
             pos = onehot
             if phase_tol is not None and period is not None:
@@ -226,11 +291,11 @@ class DynHead(nn.Module):
                 # What must match is the phase, not the time since the window start or the exact token.
                 p_star = period.to(s.device).double().reshape(T, B)[0]  # [B]
                 okp = torch.isfinite(p_star) & (p_star > 0)
-                ph = torch.remainder(torch.where(real, t, torch.zeros_like(t)).double() / torch.where(okp, p_star, torch.ones_like(p_star))[:, None], 1.0)
+                ph = torch.remainder(torch.where(real2, t2, torch.zeros_like(t2)).double() / torch.where(okp, p_star, torch.ones_like(p_star))[:, None], 1.0)
                 ph_j = ph.gather(1, j)
                 dph = (ph[:, None, :] - ph_j[..., None]).abs()
                 dph = torch.minimum(dph, 1.0 - dph)
-                same = real[:, None, :] & (WID[:, None, :] != wi[..., None]) & (dph < phase_tol) & okp[:, None, None]
+                same = real2[:, None, :] & (WID2[:, None, :] != wi[..., None]) & (dph < phase_tol) & okp[:, None, None]
                 pos = onehot | same
                 del dph, same
             ce = torch.logsumexp(logits, -1) - torch.logsumexp(logits.masked_fill(~pos, -1e4), -1)  # multi-positive cross-entropy
@@ -238,7 +303,10 @@ class DynHead(nn.Module):
             l_nce = (ce * m).sum() / n_ok
             rf = real.float()[..., None]
             s_mean = (S * rf).sum(1) / n_real.clamp(min=1)[:, None]  # per star
-            centred = (S - s_mean[:, None, :])[real]
+            # sig_mode "star": SIGReg on the states centred per star (within-star Gaussian, the test bed's choice);
+            # "batch": SIGReg on the raw states pooled over all stars (across-star Gaussian, LeJEPA's usual choice),
+            # which leaves each star free to trace a loop instead of filling a Gaussian cloud
+            centred = (S - s_mean[:, None, :])[real] if sig_mode == "star" else S[real]
             l_sig = sigreg(centred) if centred.shape[0] >= 16 else s.new_zeros(())
             l_mean = s_mean.pow(2).mean()
             loss = w_pred * l_pred + w_nce * l_nce + w_sig * l_sig + w_mean * l_mean
@@ -248,6 +316,27 @@ class DynHead(nn.Module):
                 c_tok = cls_star.gather(1, WID[..., None].expand(-1, -1, D))  # the CLS of every token's window (WID is sorted)
                 l_close = self.closure(S[real], c_tok[real])
                 loss = loss + w_close * l_close
+            l_dec = z_in2 = sig_model = None
+            if hasattr(self, "dec") and w_dec > 0 and MAG2 is not None:
+                bj = BAND2.gather(1, j).reshape(-1) if BAND2 is not None else None
+                mhat, ls = self.decode_full(pred.reshape(-1, ds), ci.reshape(-1, D), bj)
+                mhat = mhat.view(B, P)
+                sobs = SIG2.gather(1, j).clamp(min=sig_floor)
+                z_obs = (mhat - MAG2.gather(1, j)) / sobs  # against the observation's error only (the test's yardstick)
+                okd = ok & torch.isfinite(z_obs)
+                nd = okd.float().sum().clamp(min=1)
+                if ls is None:  # fixed error: Huber on the z-score
+                    z = torch.where(okd, z_obs, torch.zeros_like(z_obs))
+                    l_el = F.huber_loss(z, torch.zeros_like(z), reduction="none", delta=1.0)
+                else:  # Gaussian likelihood with variance sigma_obs^2 + sigma_model^2
+                    var = sobs ** 2 + torch.exp(2 * ls.view(B, P))
+                    r = torch.where(okd, mhat - MAG2.gather(1, j), torch.zeros_like(mhat))
+                    l_el = 0.5 * r ** 2 / var + 0.5 * torch.log(var)
+                l_dec = (torch.where(okd, l_el, torch.zeros_like(l_el))).sum() / nd
+                loss = loss + w_dec * l_dec
+                with torch.no_grad():
+                    z_in2 = ((z_obs.abs() < 2).float() * okd.float()).sum() / nd
+                    sig_model = (torch.exp(ls.view(B, P)) * okd.float()).sum() / nd if ls is not None else None
             with torch.no_grad():
                 hit = ((logits.argmax(-1) == j).float().reshape(-1) * m).sum() / n_ok
                 hit_phase = (pos.gather(2, logits.argmax(-1)[..., None])[..., 0].float().reshape(-1) * m).sum() / n_ok  # nearest token is a positive
@@ -256,7 +345,8 @@ class DynHead(nn.Module):
                 tgt_ms = ((sj.float() ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
                 stay = (((si.float() - sj.float()) ** 2).mean(-1).reshape(-1) * m).sum() / n_ok
             stats = dict(pred=float(l_pred.detach()), nce=float(l_nce.detach()), sig=float(l_sig.detach()), mean=float(l_mean.detach()),
-                         hit=float(hit), hit_phase=float(hit_phase), n_pos=float(n_pos), close=float(l_close.detach()) if l_close is not None else 0.0, npairs=float(n_ok), dt_max=float(dt_max), dt_mean=float(mdt), state_ms=float(tgt_ms),
+                         hit=float(hit), hit_phase=float(hit_phase), n_pos=float(n_pos), close=float(l_close.detach()) if l_close is not None else 0.0,
+                         dec=float(l_dec.detach()) if l_dec is not None else 0.0, dec_in2=float(z_in2) if z_in2 is not None else 0.0, dec_sig_model=float(sig_model) if sig_model is not None else 0.0, npairs=float(n_ok), dt_max=float(dt_max), dt_mean=float(mdt), state_ms=float(tgt_ms),
                          pred_rel=float(l_pred.detach() / tgt_ms.clamp(min=1e-8)), stay_rel=float(stay / tgt_ms.clamp(min=1e-8)))  # fmt: skip
         return loss, stats
 

@@ -231,6 +231,22 @@ def add_train_args(parser) -> None:
     g.add_argument("--dyn-cross", action="store_true",
                    help="pairs across a star's windows (source in one window, target in another; negatives = every token of the star): "
                         "a clock built from the time since the window start cannot pass this test, only the phase can")  # fmt: skip
+    # ablations and the JEPA-style target (11-03)
+    g.add_argument("--dyn-target", choices=["context", "ema"], default="context",
+                   help="--dyn-cross: where the target states and negatives come from: the context encoder's visible tokens of the same "
+                        "masked forward, with gradient on both sides (J3), or the JEPA target encoder on the full window through the "
+                        "state head with no gradient (a JEPA target)")  # fmt: skip
+    g.add_argument("--dyn-pred", type=float, default=1.0, help="weight of the add-on's prediction loss when --dyn-lambda is unset (ablation: 0)")
+    g.add_argument("--dyn-no-rot", action="store_true", help="ablation: the frequency is set to 0, so the predictor only damps (no clock)")
+    g.add_argument("--dyn-decode", type=float, default=0.0,
+                   help="--dyn-cross: weight of a magnitude decoder on [predicted state, source CLS], Huber on the z-score against "
+                        "the target's observed magnitude and error; 0 = off")  # fmt: skip
+    g.add_argument("--dyn-sig-floor", type=float, default=0.05, help="--dyn-decode: floor on the error (scaled magnitude units)")
+    g.add_argument("--dyn-dec-band", action="store_true", help="--dyn-decode: the decoder is told the target's band")
+    g.add_argument("--dyn-dec-nll", action="store_true",
+                   help="--dyn-decode: Gaussian likelihood with a learned model spread (variance sigma_obs^2 + sigma_model^2) instead of Huber on z")
+    g.add_argument("--dyn-sig-mode", choices=["star", "batch"], default="star",
+                   help="--dyn-cross: SIGReg on the states centred per star (default) or on the raw states pooled over stars")
     g.add_argument("--dyn-freeze", action="store_true",
                    help="freeze the encoder (needs --init or a resume): only the state head and the predictor train, on the full window "
                         "without masking and without the reconstruction loss; tells whether the phase is already in the frozen tokens")  # fmt: skip
@@ -585,6 +601,14 @@ def main(argv=None):
             dyn = HamHead(model.embed_dim, args.dyn, n_sub=args.dyn_ham_steps).to(dev)
         else:
             dyn = DynHead(model.embed_dim, args.dyn).to(dev)
+        if args.dyn_decode > 0:
+            if args.dyn_target != "ema" or spec.err_stats is None:
+                parser.error("--dyn-decode needs --dyn-target ema and the error channel")
+            dyn.add_decoder(model.embed_dim, n_bands=len(spec.tokenize["band_wavelengths"]) if args.dyn_dec_band else 0,
+                            learn_sig=args.dyn_dec_nll)
+            dyn.to(dev)
+        if args.dyn_target == "ema" and not (args.dyn_cross and args.jepa):
+            parser.error("--dyn-target ema needs --dyn-cross and --jepa")
         if args.dyn_freeze:
             if not args.init and ckpt is None:
                 parser.error("--dyn-freeze needs --init (a trained encoder to freeze) or a resume")
@@ -592,7 +616,7 @@ def main(argv=None):
             print("encoder frozen: only the dynamic-state head and predictor train", flush=True)
     aux_modules = [m for m in (phase_head, fold_dec, dyn) if m is not None]
 
-    def dyn_term(tok, cl, pd, t_days, step_now, n_fr=None, n_b=None, start_rows=None, periods_rows=None):
+    def dyn_term(tok, cl, pd, t_days, step_now, n_fr=None, n_b=None, start_rows=None, periods_rows=None, tgt=None):
         """The add-on's loss on token outputs ``tok [R, N, D]`` (no CLS), ``cl [R, D]``, padding ``pd [R, N]``,
         ``t_days [R, N]``; the clock speed is the spectral layer's own estimate from the same forward."""
         from romae_lc.model import spectral_frequency
@@ -600,17 +624,27 @@ def main(argv=None):
         frac = min(step_now / max(args.dyn_ramp * args.steps, 1), 1.0)
         dt_max = args.dyn_dt[0] * (args.dyn_dt[1] / args.dyn_dt[0]) ** frac
         f = spectral_frequency(model.spectral, None, args.dyn_freq)
+        if args.dyn_no_rot:
+            f = torch.zeros_like(f)
         if args.dyn_lambda is None:
-            w_pred, w_nce, w_sig = 1.0, args.dyn_nce, args.dyn_sig
+            w_pred, w_nce, w_sig = args.dyn_pred, args.dyn_nce, args.dyn_sig
         else:
             lam = args.dyn_lambda
             w_pred, w_nce, w_sig = 1.0 - lam, (1.0 - lam) * args.dyn_nce, lam
         if args.dyn_cross:
             # absolute token time: window start (days, relative to the star's first window) + time in the window
             t_abs = start_rows.to(tok.device).float()[:, None] + t_days
+            kw = {}
+            if tgt is not None:  # tgt: dict(tokens, pad, t_days, mag, sig) over the target set
+                if "tokens" in tgt:
+                    kw.update(tgt_tokens=tgt["tokens"], tgt_pad=tgt["pad"], tgt_t_abs=start_rows.to(tok.device).float()[:, None] + tgt["t_days"])
+                if args.dyn_decode > 0:
+                    kw.update(tgt_mag=tgt["mag"], tgt_sig=tgt["sig"], w_dec=args.dyn_decode, sig_floor=args.dyn_sig_floor)
+                    if args.dyn_dec_band:
+                        kw.update(tgt_band=tgt["band"])
             l_dyn, st = dyn.forward_cross(tok, cl, pd, t_abs, f, n_fr, n_b, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau,
                                           w_nce, w_sig, args.dyn_mean, w_pred, periods_rows, args.dyn_phase_pos,
-                                          args.dyn_ham_close if args.dyn_ham else 0.0)  # fmt: skip
+                                          args.dyn_ham_close if args.dyn_ham else 0.0, sig_mode=args.dyn_sig_mode, **kw)  # fmt: skip
         else:
             l_dyn, st = dyn(tok, cl, pd, t_days, f, dt_max, args.dyn_pairs, args.dyn_dt[0], args.dyn_tau, w_nce, w_sig, args.dyn_mean, w_pred)
         for k_, v_ in st.items():
@@ -785,8 +819,19 @@ def main(argv=None):
         if dyn is not None and model.training:
             # the dynamic-state add-on on the visible-token outputs of the same masked forward
             t_days = (out.enc_positions[:, 0, 1:].float() - 1.0) * spec.tokenize["time_scale"]
+            tgt = None
+            if args.dyn_cross and args.dyn_target == "ema":
+                # the target encoder's full-window tokens (no CLS), stashed by TokenJEPA.forward, and the window's values
+                mu_e, sd_e = spec.err_stats if spec.err_stats is not None else (0.0, 1.0)
+                xf, pdf = model.last_target_tokens
+                tgt = dict(tokens=xf, pad=pdf, t_days=(positions[:, 0].float() - 1.0) * spec.tokenize["time_scale"],
+                           mag=values[..., 0], sig=torch.exp(values[..., 1].float() * sd_e + mu_e))
+                if args.dyn_dec_band:
+                    from project.phase_decoder import band_ids, band_table
+
+                    tgt["band"] = band_ids(positions[:, 1], band_table(spec))
             loss = loss + dyn_term(out.enc_tokens[:, 1:], out.enc_tokens[:, 0], out.enc_pad[:, 1:], t_days, step_now,
-                                   len(frames), frames[0].values.shape[0], dyn_starts, periods_rows)  # fmt: skip
+                                   len(frames), frames[0].values.shape[0], dyn_starts, periods_rows, tgt)  # fmt: skip
         if (args.cls_inv > 0 or args.cls_sig > 0) and model.training:
             # LeJEPA's static part: fused rows are frame t of every star in rows t B .. (t + 1) B, so a star's windows are rows b, B + b, ...
             from project.dyn import sigreg

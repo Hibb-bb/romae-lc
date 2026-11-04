@@ -109,7 +109,10 @@ more harmonics, or a small transformer over state, dt and f) before adding losse
 
 - The interactive queue holds J7, J3c, J4c and J4Hami (about 30 h). J4c and J4Hami carry the
   CLS terms the plan drops; proposed: remove them, keep J7 and J3c.
-- Submit Phase 1a and 1b once the smoke job passes.
+- Submit Phase 1a and 1b once the smoke job passes. Done 11-04: job 3528784 (`project/jobs/phase1.sh`, one
+  4-GPU node, four lanes): D1-D4 on J3, J3b, J4; runs enc_p1_j3t, enc_p1_j3tdec (band + learned spread),
+  enc_p1_sig0, enc_p1_sigbatch (SIGReg across stars, no mean penalty), enc_p1_norot, enc_p1_noadd; each then
+  eval_encoder.sh and the decoding probe. J4c and J4Hami parked in queue.txt (commented out).
 
 # Older plan: period and phase (2026-10-07 to 2026-10-28)
 

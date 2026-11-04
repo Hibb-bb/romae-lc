@@ -211,6 +211,7 @@ class TokenJEPA(nn.Module):
             xf, pf, pdf = tg.add_cls(xf, positions, pad_mask)
             xf = tg.run_transformer(xf, pf, pdf, tv)
             toks = xf[:, 1:] if tg.use_cls else xf
+            self.last_target_tokens = (toks, pad_mask)  # the full window's target tokens, for the add-on's --dyn-target ema
             target = split(toks.float(), mask)
             if self.proj_target is not None:
                 target = self.proj_target(target)
