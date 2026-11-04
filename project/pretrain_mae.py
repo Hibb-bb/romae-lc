@@ -131,6 +131,11 @@ def add_train_args(parser) -> None:
     g.add_argument("--warmup", type=float, default=0.02, help="fraction of steps")
     g.add_argument("--clip", type=float, default=1.0)
     g.add_argument("--mask-ratio", type=float, default=0.5)
+    g.add_argument("--forecast-tail", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="forecast mode of the masked JEPA: every training window also hides ALL its tokens in the last H days, "
+                        "H uniform in [LO, HI] per window, so the predictor must forecast past the context's end (the target encoder "
+                        "sees the whole window, so targets and queries share one clock); the hidden count per row stays fixed")
+    g.add_argument("--forecast-share", type=float, default=1.0, help="--forecast-tail: share of the windows that get a tail")
     g.add_argument("--mask-ratio-range", type=float, nargs=2, default=None, metavar=("LO", "HI"),
                    help="draw the mask ratio of every training step from [LO, HI] (one ratio per batch); overrides --mask-ratio in training")
     g.add_argument("--phase-band", type=float, nargs=2, default=(0.1, 0.3), metavar=("LO", "HI"),
@@ -389,6 +394,26 @@ def error_weights(values, pad, err_stats, cap: float = 20.0) -> torch.Tensor:
     w = w * real.sum(1, keepdim=True) / (w * real).sum(1, keepdim=True).clamp(min=1e-12)
     return w * real
 
+
+
+def forecast_tail_mask(mask, t_days, pad, window, h_range, share=1.0):
+    """``--forecast-tail``: hide every real token in the last ``H`` days of each window (``H`` uniform in
+    ``h_range`` per row; a ``share`` of the rows), keeping the same hidden count in every row, as the JEPA
+    forward needs. Per row the hidden set is the tail first, then the tokens ``mask`` already hid, then random
+    others (padding first), up to ``k``, the largest union of tail and ``mask`` over the rows. Returns ``(mask, share of hidden real tokens
+    that are tail)``."""
+    b, n = mask.shape
+    lo, hi = h_range
+    h = lo + (hi - lo) * torch.rand(b, device=mask.device)
+    on = torch.rand(b, device=mask.device) < share
+    tail = (~pad) & (t_days > (float(window) - h)[:, None]) & on[:, None]
+    k = min(int((mask | tail).sum(1).max()), n - 1)
+    # priority: the tail, then what mask hid, then padding (filler that costs no real token), then other real tokens
+    score = torch.rand(b, n, device=mask.device) + 1.0 * pad.float() + 2.0 * mask.float() + 4.0 * tail.float()
+    idx = score.topk(k, dim=1).indices
+    out = torch.zeros_like(mask).scatter_(1, idx, True)
+    hid_real = (out & ~pad).sum().clamp(min=1)
+    return out, float((out & tail).sum() / hid_real)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -760,6 +785,14 @@ def main(argv=None):
                 positions[:, 0], pad, ratio, mode, args.mask_blocks, args.mask_block_prob,
                 position=args.mask_block_pos, block_share=args.mask_block_share,
             )
+        if args.forecast_tail is not None and model.training:
+            t_days_all = (positions[:, 0].float() - 1.0) * spec.tokenize["time_scale"]
+            if mask is None:
+                from romae_lc.model import gen_mask
+
+                mask = gen_mask(ratio, pad)
+            mask, tail_share = forecast_tail_mask(mask, t_days_all, pad, args.window, args.forecast_tail, args.forecast_share)
+            aux_stats.setdefault("forecast_tail_share", []).append(tail_share)
         weight = error_weights(values, pad, spec.err_stats, args.loss_weight_cap) if args.loss_weight == "err" else None
         target_values = None
         if smooth and template_rows is not None:

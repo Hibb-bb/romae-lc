@@ -113,6 +113,12 @@ more harmonics, or a small transformer over state, dt and f) before adding losse
   4-GPU node, four lanes): D1-D4 on J3, J3b, J4; runs enc_p1_j3t, enc_p1_j3tdec (band + learned spread),
   enc_p1_sig0, enc_p1_sigbatch (SIGReg across stars, no mean penalty), enc_p1_norot, enc_p1_noadd; each then
   eval_encoder.sh and the decoding probe. J4c and J4Hami parked in queue.txt (commented out).
+- Added 11-04, job 3529039 (`project/jobs/phase1b.sh`, second 4-GPU node): enc_p1_nce0 (J3, no contrast),
+  enc_p1_mask75 (J3, 70-80 % hidden), enc_p1_fc (masked JEPA in forecast mode, `--forecast-tail 5 30`: the last
+  5-30 days of each window hidden, no add-on), enc_p1_fc75 (both). Forecast test of the masked predictor:
+  `project/eval/jepa_forecast_probe.py`. On J3 (30 stars, CPU check) its predictor cannot forecast past the
+  window: within 2 sigma, recon head 0.10, decoded predicted latent 0.20, window mean 0.12, Fourier 0.54,
+  target latent 0.72 (ceiling); latent error / variance 0.99. Expected: J3's predictor only ever interpolated.
 
 # Older plan: period and phase (2026-10-07 to 2026-10-28)
 
