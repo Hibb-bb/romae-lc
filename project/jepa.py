@@ -58,6 +58,8 @@ class TokenJEPA(nn.Module):
         proj_dim: int = 0,
         proj_hidden: int = 256,
         attn_pool: int = 0,
+        phase_rope: int = 0,
+        phase_freq: str = "local",
     ):
         super().__init__()
         d = encoder["d_model"] if isinstance(encoder, dict) else encoder.d_model
@@ -65,7 +67,10 @@ class TokenJEPA(nn.Module):
             raise ValueError(f"the JEPA head outputs the encoder width {d}, not {target_channels}")
         self.context = RoMAEForPreTraining(decoder=decoder, mask_ratio=mask_ratio, target_channels=d, encoder=encoder, n_channels=n_channels,
                                            n_axes=n_axes, rope=rope, use_cls=use_cls, abs_timescales=abs_timescales, spectral=spectral,
-                                           attn_pool=attn_pool)  # fmt: skip
+                                           attn_pool=attn_pool, phase_rope=phase_rope, phase_freq=phase_freq)  # fmt: skip
+        # the predictor's rotary encoding gets the phase at the context encoder's own frequency as one more axis
+        # (0 = off); the spectral layer's estimate, never the catalogue period
+        self.phase_rope, self.phase_freq = int(phase_rope), str(phase_freq)
         self.target = copy.deepcopy(self.context)
         self.target.requires_grad_(False)
         self.ema, self.ema_end, self.loss_kind, self.use_target = float(ema), float(ema_end), str(loss), bool(use_target)
@@ -89,7 +94,8 @@ class TokenJEPA(nn.Module):
     @property
     def jepa_hparams(self) -> dict:
         return dict(ema=self.ema, ema_end=self.ema_end, loss=self.loss_kind, use_target=self.use_target, recon_weight=self.recon_weight, clean_target=self.clean_target,
-                    proj_dim=self.proj_dim, proj_hidden=self.proj_hidden)
+                    proj_dim=self.proj_dim, proj_hidden=self.proj_hidden,
+                    **({"phase_rope": self.phase_rope, "phase_freq": self.phase_freq} if self.phase_rope else {}))
 
     @property
     def hparams(self) -> dict:
@@ -164,12 +170,27 @@ class TokenJEPA(nn.Module):
         target encoder starts as a copy. The MAE head (width 1) is not
         copied: the JEPA head outputs the encoder width."""
         sd = ckpt["state_dict"]
+        if ckpt.get("kind") == "jepa":
+            # a JEPA checkpoint (e.g. J1): every tensor of the same name and shape, context, target, projections and the
+            # reconstruction head; a resized predictor starts fresh. (Before 11-06 this path copied nothing: the keys
+            # carry a "context." prefix, so J3, J3b, J4 and the Phase 1 runs all trained from random weights.)
+            own = self.state_dict()
+            picked = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape}
+            missing = [k for k in own if k not in picked]
+            self.load_state_dict(picked, strict=False)
+            print(f"warm start from the JEPA: {len(picked)} tensors copied, {len(missing)} left as initialised "
+                  f"({', '.join(missing[:6])}{'...' if len(missing) > 6 else ''})", flush=True)
+            if len(picked) == 0:
+                raise ValueError("--jepa-init copied nothing")
+            return
         own = self.context.state_dict()
         picked = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape and not k.startswith("head.")}
         missing = [k for k in own if k not in picked]
         self.context.load_state_dict(picked, strict=False)
         self.target.load_state_dict(self.context.state_dict())
         print(f"warm start from the autoencoder: {len(picked)} tensors copied, {len(missing)} left as initialised ({', '.join(missing[:6])}{'...' if len(missing) > 6 else ''})", flush=True)
+        if len(picked) == 0:
+            raise ValueError("--jepa-init copied nothing")
 
     def momentum(self, step: int, total: int) -> float:
         """Linear schedule from ``ema`` to ``ema_end`` over the run."""
@@ -230,6 +251,13 @@ class TokenJEPA(nn.Module):
         x = torch.cat([x, enc.mask_token.expand(b, k, -1).to(x.dtype)], dim=1)
         pos = torch.cat([v_pos, m_pos], dim=2)
         pad = torch.cat([v_pad, m_pad], dim=1)
+        if self.phase_rope:
+            # as RoMAE's decoder does with phase_rope: the phase in cycles at the context encoder's own frequency
+            from romae_lc.model import spectral_frequency
+
+            f = spectral_frequency(enc.spectral, None, self.phase_freq)
+            t_days = (pos[:, 0].float() - 1.0) * enc.spectral.time_scale
+            pos = torch.cat([pos, (f[:, None] * t_days)[:, None].to(pos.dtype)], 1)
         x = enc.decoder(x, enc.decoder_rope.prepare(pos), attention_mask(pad))
         hid = x[:, -k:]
         pred = enc.head(hid).float()

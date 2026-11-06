@@ -537,6 +537,7 @@ def main(argv=None):
             rope=rope_layouts(args, ladder), abs_timescales=abs_timescales(ladder) if args.abs_time else None, spectral=spectral_kw,
             ema=args.jepa_ema, ema_end=args.jepa_ema_end, loss=args.jepa_loss, use_target=not args.jepa_use_context, recon_weight=args.jepa_recon_weight,
             clean_target=args.jepa_clean_target, proj_dim=args.jepa_proj, proj_hidden=args.jepa_proj_hidden, attn_pool=args.attn_pool,
+            phase_rope=args.phase_rope, phase_freq=args.phase_freq,
         )  # fmt: skip
         if args.jepa_clean_target and args.target == "obs":
             parser.error("--jepa-clean-target needs --target template or mix")

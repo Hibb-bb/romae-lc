@@ -185,7 +185,8 @@ def score(tokens, wins, dyn, window_days, label, spec):
     # D1: a decoder fitted on predicted states (training stars' pairs)
     Itr, Jtr, Atr, _ = make_pairs(tr)
     pred_tr = run_pred(Itr, Atr, np.array([f_star[o] for o in star[Itr]]), t[Jtr] - t[Itr])
-    ktr = rng.permutation(len(Itr))[:60000]
+    fin = np.flatnonzero(np.isfinite(pred_tr).all(1) & np.isfinite(m[Jtr]))  # a rare non-finite predicted state (seen in enc_p1_sigbatch)
+    ktr = fin[rng.permutation(len(fin))[:60000]]
     sc_p = StandardScaler().fit(feat(pred_tr[ktr], cls[Atr[ktr]]))
     mlp_p = MLPRegressor(hidden_layer_sizes=(256, 256), max_iter=80, early_stopping=True, random_state=0).fit(
         sc_p.transform(feat(pred_tr[ktr], cls[Atr[ktr]])), m[Jtr[ktr]])

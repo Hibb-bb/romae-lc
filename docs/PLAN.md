@@ -120,6 +120,42 @@ more harmonics, or a small transformer over state, dt and f) before adding losse
   window: within 2 sigma, recon head 0.10, decoded predicted latent 0.20, window mean 0.12, Fourier 0.54,
   target latent 0.72 (ceiling); latent error / variance 0.99. Expected: J3's predictor only ever interpolated.
 
+### Phase 1 results (11-06)
+
+Warm-start bug: `--jepa-init` copied NOTHING from a JEPA checkpoint (keys carry "context."), so J3, J3b, J4 and
+every Phase 1 run trained 20k steps from random weights; J1 itself (50k) also had no init. Fair among
+themselves, but "J1 + 20k" was never what ran. Fixed 11-06 (`TokenJEPA.init_from_mae` loads JEPA checkpoints;
+copying nothing is now an error).
+
+Add-on forecast (state_decode_probe, 600 stars, 55,753 pairs, within 2 sigma; Fourier fit 0.61):
+
+| run | forecast | class F1 (mean head) | phase R2 of states |
+|---|---|---|---|
+| J3 | 0.43 | 0.597 | 0.29 |
+| J3t (EMA targets) | 0.40 | 0.573 | 0.18 |
+| J3t + decoder (band, learned spread) | 0.44 (own decoder 0.45) | 0.560 | 0.24 |
+| SIGReg off | 0.45 | 0.570 | 0.43 |
+| SIGReg across stars, no mean penalty | 0.39 | (pending) | 0.24 |
+| rotation off | 0.24 (= no change) | 0.575 | 0.05 |
+| no contrast | 0.40 | 0.605 | 0.26 |
+| 70-80 % masking | 0.36 | 0.584 | 0.30 |
+| no add-on | - | 0.587 | - |
+
+F1 spread about +-0.01. Diagnostics on J3: D2 the encoder's f is within 2 % of the catalogue for 88 % of stars and
+the catalogue f changes nothing (f is not the problem); D1 refitting the decoder on predicted states is worse
+(0.36: information lost, not just off the real states); D3 a 4-harmonic function of phase explains only 29 % of
+a star's state variance (no loop to rotate); D4 failures grow with amplitude (top third 0.31 vs Fourier 0.49).
+
+Masked predictor in forecast mode (`--forecast-tail 5 30`, jepa_forecast_probe): latent error / variance drops
+from ~1.0 to 0.44, but decoded to magnitude 0.25 within 2 sigma, the same as the window mean (0.22): it
+predicts a flat curve (spread 0.21 vs 1.64). The reconstruction head is weak everywhere (in-window error 2.1 vs
+variance 2.7).
+
+Decision (11-06): D3 says the states do not rotate, so change the predictor. Option 2 first (the masked
+predictor forecasts, no add-on): job 3543932 (`project/jobs/option2.sh`), all from J1 for real: enc_o2_noadd
+(control), enc_o2_fc (tail 10-60 d), enc_o2_fcbig (+ predictor 4 x 384), enc_o2_fcbig_ph (+ phase rope at the
+encoder's own f). Option 1 (a learned step in the add-on) is the fallback.
+
 # Older plan: period and phase (2026-10-07 to 2026-10-28)
 
 ### Where we are
