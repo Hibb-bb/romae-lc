@@ -69,7 +69,7 @@ def collect(model, ds, spec, window):
     ts = spec.tokenize["time_scale"]
     spec_layers = [m for m in model.context.modules() if type(m).__name__ == "SpectralLayer"]
     loader = DataLoader(ds, 128, shuffle=False, num_workers=0, collate_fn=make_collate(spec))
-    H = dict(star=[], win=[], t=[], dt=[], m=[], sig=[], recon=[], pred=[], target=[])
+    H = dict(star=[], win=[], t=[], dt=[], m=[], sig=[], recon=[], pred=[], target=[], nctx=[], n30=[])
     W = dict(t=[], m=[], sig=[], f=[], star=[])
     n_win = 0
     for b in loader:
@@ -100,7 +100,9 @@ def collect(model, ds, spec, window):
         obj = torch.as_tensor(b["obj"].numpy(), device=dev)
         wid = torch.arange(bsz, device=dev) + n_win
         n_win += bsz
-        for k_, v_ in dict(star=obj[:, None].expand_as(h_t), win=wid[:, None].expand_as(h_t), t=h_t, dt=h_dt, m=h_m, sig=h_sig,
+        nctx = vis.sum(1).float()  # visible (context) tokens of the window
+        n30 = (vis & (t_days > (t_last - 30.0)[:, None])).sum(1).float()  # of them, in the last 30 days of the context
+        for k_, v_ in dict(nctx=nctx[:, None].expand_as(h_t), n30=n30[:, None].expand_as(h_t), star=obj[:, None].expand_as(h_t), win=wid[:, None].expand_as(h_t), t=h_t, dt=h_dt, m=h_m, sig=h_sig,
                            recon=model.last_recon[..., 0], pred=out.pred, target=out.target).items():
             H[k_].append(v_[keep].cpu() if k_ in ("star", "win") else v_[keep].float().cpu())
         tv, mv, sv = t_days.cpu().numpy(), values[..., 0].float().cpu().numpy(), torch.exp(values[..., 1].float() * sd + mu).cpu().numpy()
@@ -158,10 +160,21 @@ def score(Hn, W, recs, star_train, label, rng):
                                  for c in sorted(set(cls), key=lambda c: -(cls == c).sum())}
     print(f"[{label}] latent error / target variance {out['latent_err_over_var']:.3f} | within 2 sigma by class, recon head: "
           + ", ".join(f"{c} {v['within_2']:.2f}" for c, v in list(out["by_class"]["recon head"].items())[:8]), flush=True)
+    out["by_density"] = {}
+    for key, v in (("context tokens", Hn["nctx"][idx]), ("context tokens in the last 30 d", Hn["n30"][idx])):
+        qb = np.digitize(v, np.quantile(v, [0.2, 0.4, 0.6, 0.8]))
+        out["by_density"][key] = {}
+        for name in ("recon head", "predicted latent [mlp]", f"Fourier fit ({a.harmonics} harmonics, f of the window)"):
+            az = np.abs((rows[name] - yj) / sj)
+            out["by_density"][key][name] = {f"quintile {b + 1}": dict(n=int((qb == b).sum()), median=float(np.median(v[qb == b])),
+                                                                     within_2=float(np.mean(az[qb == b] < 2))) for b in range(5)}
+        print(f"[{label}] within 2 sigma by quintile of {key} (medians "
+              + ", ".join(f"{x['median']:.0f}" for x in out["by_density"][key]["recon head"].values()) + "): "
+              + " | ".join(f"{nm[:22]} " + " ".join(f"{x['within_2']:.2f}" for x in d.values()) for nm, d in out["by_density"][key].items()), flush=True)
     out["n"], out["gap_median_days"] = int(len(idx)), float(np.median(dtj))
     if a.save_npz:
         path = a.save_npz.replace(".npz", f"_{label}.npz")
-        np.savez(path, dt=dtj, m_j=yj, sig_j=sj, row_names=np.array(list(rows)), yhat=np.stack([rows[k] for k in rows]), cls=cls)
+        np.savez(path, dt=dtj, m_j=yj, sig_j=sj, row_names=np.array(list(rows)), yhat=np.stack([rows[k] for k in rows]), cls=cls, nctx=Hn["nctx"][idx], n30=Hn["n30"][idx])
         print("saved", path, flush=True)
     return out
 

@@ -282,6 +282,25 @@ def score(tokens, wins, dyn, window_days, label, spec):
                               for c in sorted(set(cl_pair), key=lambda c: -(cl_pair == c).sum())}
         out["by_amplitude"][r] = {f"tercile {b + 1}": dict(n=int((abin == b).sum()), amp_median=float(np.median(amp[abin == b])),
                                                           within_2=float(np.mean(az[abin == b] < 2))) for b in range(3)}
+    # D5: forecast skill against how densely window A is sampled (the encoder sees window A only)
+    nA = wins["n"][A_].astype(float)  # encoded tokens of window A (capped at max_tokens by a random subsample)
+    n30 = np.empty(len(I))
+    for n_, (w, ti) in enumerate(zip(A_, t[I])):
+        tt = cache[w][0]
+        n30[n_] = np.sum((tt <= ti) & (tt > ti - 30.0))  # tokens of window A in the 30 days up to the source
+    out["by_density"] = {}
+    for key, v in (("tokens in window A", nA), ("tokens in the 30 d before the source", n30)):
+        edges = np.quantile(v, [0.2, 0.4, 0.6, 0.8])
+        qb = np.digitize(v, edges)
+        out["by_density"][key] = {}
+        for r in key_rows:
+            az = np.abs((rows[r] - yj) / sj)
+            out["by_density"][key][r] = {f"quintile {b + 1}": dict(n=int((qb == b).sum()), median=float(np.median(v[qb == b])),
+                                                                   within_2=float(np.mean(az[qb == b] < 2))) for b in range(5)}
+        print(f"[{label}] D5: within 2 sigma by quintile of {key} (medians "
+              + ", ".join(f"{x['median']:.0f}" for x in out["by_density"][key][key_rows[0]].values()) + ")", flush=True)
+        for r in key_rows:
+            print(f"[{label}]   {r:48s} " + "  ".join(f"{x['within_2']:.3f}" for x in out["by_density"][key][r].values()), flush=True)
     print(f"[{label}] D4: within 2 sigma by amplitude tercile (amplitude / sigma medians "
           + ", ".join(f"{v['amp_median']:.0f}" for v in out["by_amplitude"][key_rows[0]].values()) + ")", flush=True)
     for r in key_rows:
@@ -314,7 +333,7 @@ def score(tokens, wins, dyn, window_days, label, spec):
             ex[f"ex{e}_info"] = np.array([o, f_star[o], endA, t[i0]])
         tag = label.split(" | ")[0]
         np.savez(a.save_npz.replace(".npz", f"_{tag}.npz"), dt=dt, m_j=yj, sig_j=sj, row_names=np.array(list(rows)),
-                 yhat=np.stack([rows[k] for k in rows]), cls_pair=cl_pair, amp=amp, **ex)
+                 yhat=np.stack([rows[k] for k in rows]), cls_pair=cl_pair, amp=amp, n_window=nA, n_recent30=n30, **ex)
         print("saved", a.save_npz.replace(".npz", f"_{tag}.npz"), flush=True)
     return out
 
