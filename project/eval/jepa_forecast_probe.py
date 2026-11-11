@@ -17,6 +17,10 @@ Rows:
 Also the latent error, mean squared (pred - target) over the target variance, and within 2 sigma by class.
 Stars are split 70 / 30 for the decoder; every score is on the 30 %.
 
+Gap mode (``--gap-share P``): instead of the tail, hide a random share P of each window's real tokens (filling in
+missing points inside the window, not a forecast). Every hidden real token is scored; dt is then the distance to
+the nearest visible token, and the local density is the visible tokens within 15 days of the hidden one.
+
     python -m project.eval.jepa_forecast_probe --ckpts project/runs/enc_p1_fc/mae.pt --out project/results/jepa_forecast/enc_p1_fc.json
 """
 import sys, argparse, json, os, time, numpy as np, torch
@@ -35,12 +39,28 @@ ap.add_argument("--tail", type=float, default=10.0, help="days hidden at the end
 ap.add_argument("--dt", type=float, nargs=2, default=(0.5, 10.0))
 ap.add_argument("--min-context", type=int, default=16)
 ap.add_argument("--harmonics", type=int, default=4)
+ap.add_argument("--gap-share", type=float, default=None, help="gap mode: hide this share of real tokens at random")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", default=None)
 ap.add_argument("--save-npz", default=None)
 a = ap.parse_args()
 dev = "cuda" if torch.cuda.is_available() else "cpu"
-DT_BINS = [(0.5, 2.0), (2.0, 5.0), (5.0, 10.0)]
+GAP = a.gap_share is not None
+DT_BINS = [(0.0, 0.5), (0.5, 2.0), (2.0, 5.0), (5.0, 60.0)] if GAP else [(0.5, 2.0), (2.0, 5.0), (5.0, 10.0)]
+LOCAL = "visible tokens within 15 d" if GAP else "context tokens in the last 30 d"
+
+
+def gap_mask(t_days, pad, share):
+    """Hide a random share of each row's real tokens; rows are topped up to the same hidden count (pads first),
+    as the JEPA forward needs."""
+    real = ~pad
+    r = torch.rand(pad.shape, device=pad.device)
+    n_hide = (real.sum(1).float() * share).round().clamp(min=1)
+    rank = torch.where(real, r, torch.full_like(r, 2.0)).argsort(1).argsort(1)
+    sel = real & (rank < n_hide[:, None])
+    k = min(int(sel.sum(1).max()), pad.shape[1] - 1)
+    score = torch.rand(pad.shape, device=pad.device) + 1.0 * pad.float() + 4.0 * sel.float()
+    return torch.zeros_like(pad).scatter_(1, score.topk(k, dim=1).indices, True)
 
 
 def fourier_forecast(t, m, sig, f, t_new, K):
@@ -76,9 +96,12 @@ def collect(model, ds, spec, window):
         tok = b["tokens"]
         values, positions, pad = tok.values.to(dev), tok.positions.to(dev), tok.pad_mask.to(dev)
         t_days = (positions[:, 0].float() - 1.0) * ts
-        mask0 = torch.zeros_like(pad)
-        mask, _ = forecast_tail_mask(mask0, t_days, pad, window, (a.tail, a.tail), 1.0)
-        tail = (~pad) & (t_days > window - a.tail)
+        if GAP:
+            mask = gap_mask(t_days, pad, a.gap_share)
+            tail = mask & ~pad  # every hidden real token is scored
+        else:
+            mask, _ = forecast_tail_mask(torch.zeros_like(pad), t_days, pad, window, (a.tail, a.tail), 1.0)
+            tail = (~pad) & (t_days > window - a.tail)
         if int(mask.sum()) == 0:
             continue
         for m_ in spec_layers:
@@ -95,14 +118,21 @@ def collect(model, ds, spec, window):
         h_t, h_tail = split(t_days), split(tail)
         h_m = split(values[..., 0].float())
         h_sig = torch.exp(split(values[..., 1].float()) * sd + mu)
-        h_dt = h_t - t_last[:, None]
-        keep = h_tail & (vis.sum(1) >= a.min_context)[:, None] & (h_dt >= a.dt[0]) & (h_dt <= a.dt[1])
+        if GAP:  # distance to the nearest visible token; visible tokens within 15 d
+            dist = (h_t[:, :, None] - t_days[:, None, :]).abs().masked_fill(~vis[:, None, :], 1e9)
+            h_dt = dist.min(2).values
+            h_loc = (dist <= 15.0).sum(2).float()
+            keep = h_tail & (vis.sum(1) >= a.min_context)[:, None]
+        else:
+            h_dt = h_t - t_last[:, None]
+            keep = h_tail & (vis.sum(1) >= a.min_context)[:, None] & (h_dt >= a.dt[0]) & (h_dt <= a.dt[1])
         obj = torch.as_tensor(b["obj"].numpy(), device=dev)
         wid = torch.arange(bsz, device=dev) + n_win
         n_win += bsz
         nctx = vis.sum(1).float()  # visible (context) tokens of the window
         n30 = (vis & (t_days > (t_last - 30.0)[:, None])).sum(1).float()  # of them, in the last 30 days of the context
-        for k_, v_ in dict(nctx=nctx[:, None].expand_as(h_t), n30=n30[:, None].expand_as(h_t), star=obj[:, None].expand_as(h_t), win=wid[:, None].expand_as(h_t), t=h_t, dt=h_dt, m=h_m, sig=h_sig,
+        n30 = h_loc if GAP else n30[:, None].expand_as(h_t)
+        for k_, v_ in dict(nctx=nctx[:, None].expand_as(h_t), n30=n30, star=obj[:, None].expand_as(h_t), win=wid[:, None].expand_as(h_t), t=h_t, dt=h_dt, m=h_m, sig=h_sig,
                            recon=model.last_recon[..., 0], pred=out.pred, target=out.target).items():
             H[k_].append(v_[keep].cpu() if k_ in ("star", "win") else v_[keep].float().cpu())
         tv, mv, sv = t_days.cpu().numpy(), values[..., 0].float().cpu().numpy(), torch.exp(values[..., 1].float() * sd + mu).cpu().numpy()
@@ -121,8 +151,8 @@ def score(Hn, W, recs, star_train, label, rng):
     star, win, t, dt, m, sig = (Hn[k] for k in ("star", "win", "t", "dt", "m", "sig"))
     tr = star_train[star]
     te = ~tr
-    print(f"[{label}] {int(te.sum())} forecast tokens on {len(np.unique(star[te]))} test stars ({int(tr.sum())} for the decoder), "
-          f"gap median {np.median(dt[te]):.1f} d", flush=True)
+    print(f"[{label}] {int(te.sum())} {'hidden in-window' if GAP else 'forecast'} tokens on {len(np.unique(star[te]))} test stars ({int(tr.sum())} for the decoder), "
+          f"{'distance to nearest visible' if GAP else 'gap'} median {np.median(dt[te]):.2f} d", flush=True)
     sub = rng.permutation(np.flatnonzero(tr))[:60000]
     sc = StandardScaler().fit(Hn["target"][sub])
     mlp = MLPRegressor(hidden_layer_sizes=(256, 256), max_iter=80, early_stopping=True, random_state=0).fit(sc.transform(Hn["target"][sub]), m[sub])
@@ -161,8 +191,8 @@ def score(Hn, W, recs, star_train, label, rng):
     print(f"[{label}] latent error / target variance {out['latent_err_over_var']:.3f} | within 2 sigma by class, recon head: "
           + ", ".join(f"{c} {v['within_2']:.2f}" for c, v in list(out["by_class"]["recon head"].items())[:8]), flush=True)
     out["by_density"] = {}
-    for key, v in (("context tokens", Hn["nctx"][idx]), ("context tokens in the last 30 d", Hn["n30"][idx])):
-        qb = np.digitize(v, np.quantile(v, [0.2, 0.4, 0.6, 0.8]))
+    for key, v in (("context tokens", Hn["nctx"][idx]), (LOCAL, Hn["n30"][idx])):
+        qb = np.clip(np.searchsorted(np.quantile(v, [0.2, 0.4, 0.6, 0.8]), v, side="right"), 0, 4)
         out["by_density"][key] = {}
         for name in ("recon head", "predicted latent [mlp]", f"Fourier fit ({a.harmonics} harmonics, f of the window)"):
             az = np.abs((rows[name] - yj) / sj)
@@ -199,7 +229,7 @@ for ck in a.ckpts:
     ds = WindowDataset([("validation", recs, list(range(len(recs))))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)
     t0 = time.time()
     Hn, W = collect(model, ds, spec, cfg.window)
-    label = os.path.basename(os.path.dirname(ck))
+    label = os.path.basename(os.path.dirname(ck)) + (f"_gap{a.gap_share:g}" if GAP else "")
     results[label] = score(Hn, W, recs, star_train, label, rng)
     results[label]["seconds"] = round(time.time() - t0)
 if a.out:
