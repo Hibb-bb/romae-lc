@@ -198,6 +198,13 @@ Four single-GPU jobs (`project/jobs/option3_one.sh LANE`, 3586857-60), all from 
 - New test (card item 4b): phase gap, `jepa_forecast_probe --phase-gap 0.2`: hide 0.2 cycles at the catalogue
   period (evaluation only) in every cycle of the window; no same-phase point is left to copy. Reference runs
   (J1, o2_noadd, o2_fc, o2_fcbig_ph): job 3586877.
+- Next for Phase 2, after option 3 reports (agreed 11-12, not started): LeJEPA-style views at the TOKEN level.
+  Per 250-day window, 2 global views (70-100 % of points) and about 6 local views (a 30-100 d stretch, a phase
+  band fully or partly hidden, the forecast tail, 70-80 % random); the target of an observation is the mean of
+  the two global views' latents; the predictor (phase rope) predicts it from every local view, at kept and
+  missing points. Windows per star 8 -> 2 to hold the cost. EMA kept first; then one run with no EMA and
+  SIGReg on the token latents. Not LeJEPA's CLS-level loss (J4: CLS invariance + SIGReg cost 0.05 F1).
+  Also queued as an idea: a partly hidden phase band (80 % of the band's points).
 
 # Older plan: period and phase (2026-10-07 to 2026-10-28)
 
