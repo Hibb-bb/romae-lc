@@ -53,7 +53,7 @@ a = ap.parse_args()
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 PGAP = a.phase_gap is not None
 GAP = a.gap_share is not None or PGAP
-DT_BINS = [(0.0, 0.5), (0.5, 2.0), (2.0, 5.0), (5.0, 60.0)] if GAP else [(0.5, 2.0), (2.0, 5.0), (5.0, 10.0)]
+DT_BINS = [(0.0, 0.5), (0.5, 2.0), (2.0, 5.0), (5.0, 60.0)] if GAP else [(lo, hi) for lo, hi in [(0.5, 2.0), (2.0, 5.0), (5.0, 10.0), (10.0, 20.0), (20.0, 40.0), (40.0, 60.0)] if lo < a.dt[1]]
 LOCAL = "visible tokens within 15 d" if GAP else "context tokens in the last 30 d"
 
 
