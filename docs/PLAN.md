@@ -156,6 +156,34 @@ predictor forecasts, no add-on): job 3543932 (`project/jobs/option2.sh`), all fr
 (control), enc_o2_fc (tail 10-60 d), enc_o2_fcbig (+ predictor 4 x 384), enc_o2_fcbig_ph (+ phase rope at the
 encoder's own f). Option 1 (a learned step in the add-on) is the fallback.
 
+### Option 2 results (11-12)
+
+Ran as four single-GPU jobs (3563719-22). Masked-predictor forecast, last 10 days hidden, 0.5-10 d past the last
+visible token, 600 stars (jepa_forecast_probe; within 2 sigma; window mean 0.22, Fourier at the window's f 0.55,
+Fourier at the catalogue f 0.65):
+
+| run | recon head | decoded predicted latent | ceiling | class F1 | period within 10 % | token phase cos / sin |
+|---|---|---|---|---|---|---|
+| J1 | 0.22 | 0.24 | 0.86 | - | - | - |
+| enc_o2_noadd (J1 + 20k) | 0.22 | 0.25 | 0.86 | 0.595 | 0.717 | 0.14 / 0.02 |
+| enc_o2_fc (tail 10-60 d) | 0.22 | 0.23 | 0.90 | 0.580 | 0.693 | 0.10 / 0.01 |
+| enc_o2_fcbig (+ predictor 4 x 384) | 0.22 | 0.23 | 0.86 | 0.574 | 0.692 | 0.11 / 0.01 |
+| **enc_o2_fcbig_ph (+ phase rope)** | **0.67** | **0.63** | 0.93 | 0.562 | 0.674 | 0.12 / 0.04 |
+
+- The phase rope is the fix: the predictor forecasts, beats Fourier at the encoder's own f (0.55) and at the
+  catalogue f (0.65). It holds at every gap (0.70 / 0.66 / 0.66 for 0.5-2 / 2-5 / 5-10 d), every density
+  (0.56 on the sparsest fifth, 0.72 on the densest; Fourier 0.47 to 0.59) and every class but DSCT (0.36).
+- No leak: f comes from the context encoder's spectral layer, which sees only the visible tokens (the target
+  encoder is a separate copy and runs first); the rope adds f * t, no magnitude.
+- The tokens still carry almost no phase (sin R2 0.04): the phase comes in through the rope, not the latents.
+- Cost: class F1 0.562 vs 0.595 for the control, period 0.674 vs 0.717. To check whether this is the
+  bigger predictor or the rope.
+
+Missing points inside the window (gap mode, `--gap-share`, job 3579825, J1 / p1_noadd / p1_fc / o2_noadd): without
+the phase rope every run scores about 0.5 within 2 sigma when a visible token lies within 0.5 d (same night) and
+the window mean (0.22-0.26) beyond that, against Fourier 0.55-0.66: the predictor copies the nearest neighbour.
+Same at 10, 30 and 50 % hidden. Gap mode on the option 2 runs: job 3586814.
+
 # Older plan: period and phase (2026-10-07 to 2026-10-28)
 
 ### Where we are
