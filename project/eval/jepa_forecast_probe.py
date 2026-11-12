@@ -21,6 +21,11 @@ Gap mode (``--gap-share P``): instead of the tail, hide a random share P of each
 missing points inside the window, not a forecast). Every hidden real token is scored; dt is then the distance to
 the nearest visible token, and the local density is the visible tokens within 15 days of the hidden one.
 
+Phase-gap mode (``--phase-gap W``): hide every real token whose phase at the CATALOGUE period (evaluation only)
+falls in a band W cycles wide at a random place in the cycle, the same band in every cycle of the window. No
+same-phase point is left to copy: the predictor must know the shape of the curve. Scored as gap mode; stars
+without a catalogue period are skipped.
+
     python -m project.eval.jepa_forecast_probe --ckpts project/runs/enc_p1_fc/mae.pt --out project/results/jepa_forecast/enc_p1_fc.json
 """
 import sys, argparse, json, os, time, numpy as np, torch
@@ -40,12 +45,14 @@ ap.add_argument("--dt", type=float, nargs=2, default=(0.5, 10.0))
 ap.add_argument("--min-context", type=int, default=16)
 ap.add_argument("--harmonics", type=int, default=4)
 ap.add_argument("--gap-share", type=float, default=None, help="gap mode: hide this share of real tokens at random")
+ap.add_argument("--phase-gap", type=float, default=None, help="phase-gap mode: hide a band this many cycles wide (catalogue period)")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--out", default=None)
 ap.add_argument("--save-npz", default=None)
 a = ap.parse_args()
 dev = "cuda" if torch.cuda.is_available() else "cpu"
-GAP = a.gap_share is not None
+PGAP = a.phase_gap is not None
+GAP = a.gap_share is not None or PGAP
 DT_BINS = [(0.0, 0.5), (0.5, 2.0), (2.0, 5.0), (5.0, 60.0)] if GAP else [(0.5, 2.0), (2.0, 5.0), (5.0, 10.0)]
 LOCAL = "visible tokens within 15 d" if GAP else "context tokens in the last 30 d"
 
@@ -61,6 +68,21 @@ def gap_mask(t_days, pad, share):
     k = min(int(sel.sum(1).max()), pad.shape[1] - 1)
     score = torch.rand(pad.shape, device=pad.device) + 1.0 * pad.float() + 4.0 * sel.float()
     return torch.zeros_like(pad).scatter_(1, score.topk(k, dim=1).indices, True)
+
+
+def phase_gap_mask(t_days, pad, period, width):
+    """Hide the real tokens whose phase (t / P + u) mod 1 < width (u random per row); rows without a period
+    hide nothing real. Rows are topped up to the same hidden count with pads, then random real tokens that are
+    NOT scored (returned separately)."""
+    real = ~pad
+    ok = torch.isfinite(period) & (period > 0)
+    u = torch.rand(len(period), device=pad.device)
+    phi = torch.remainder(t_days / torch.where(ok, period, torch.ones_like(period))[:, None] + u[:, None], 1.0)
+    band = real & ok[:, None] & (phi < width)
+    band &= (real.sum(1) - band.sum(1) >= 1)[:, None]  # keep at least one visible token
+    k = max(min(int(band.sum(1).max()), pad.shape[1] - 1), 1)
+    score = torch.rand(pad.shape, device=pad.device) + 1.0 * pad.float() + 4.0 * band.float()
+    return torch.zeros_like(pad).scatter_(1, score.topk(k, dim=1).indices, True), band
 
 
 def fourier_forecast(t, m, sig, f, t_new, K):
@@ -82,7 +104,7 @@ def zstats(z):
 
 
 @torch.no_grad()
-def collect(model, ds, spec, window):
+def collect(model, ds, spec, window, recs=None):
     """Per hidden tail token: star, window, t (days in window), dt, m, sigma, recon, predicted and target latent;
     per window: visible (t, m, sigma) for the baselines and the context encoder's frequency."""
     mu, sd = spec.err_stats
@@ -96,7 +118,10 @@ def collect(model, ds, spec, window):
         tok = b["tokens"]
         values, positions, pad = tok.values.to(dev), tok.positions.to(dev), tok.pad_mask.to(dev)
         t_days = (positions[:, 0].float() - 1.0) * ts
-        if GAP:
+        if PGAP:
+            per = torch.tensor([float(recs[int(o)].period or float("nan")) for o in b["obj"]], device=dev)
+            mask, tail = phase_gap_mask(t_days, pad, per, a.phase_gap)  # only the band is scored
+        elif GAP:
             mask = gap_mask(t_days, pad, a.gap_share)
             tail = mask & ~pad  # every hidden real token is scored
         else:
@@ -228,8 +253,8 @@ for ck in a.ckpts:
     star_train = rng.random(len(recs)) < 0.7
     ds = WindowDataset([("validation", recs, list(range(len(recs))))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)
     t0 = time.time()
-    Hn, W = collect(model, ds, spec, cfg.window)
-    label = os.path.basename(os.path.dirname(ck)) + (f"_gap{a.gap_share:g}" if GAP else "")
+    Hn, W = collect(model, ds, spec, cfg.window, recs)
+    label = os.path.basename(os.path.dirname(ck)) + (f"_pgap{a.phase_gap:g}" if PGAP else f"_gap{a.gap_share:g}" if GAP else "")
     results[label] = score(Hn, W, recs, star_train, label, rng)
     results[label]["seconds"] = round(time.time() - t0)
 if a.out:

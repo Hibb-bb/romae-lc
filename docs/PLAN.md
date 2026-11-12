@@ -182,7 +182,22 @@ Fourier at the catalogue f 0.65):
 Missing points inside the window (gap mode, `--gap-share`, job 3579825, J1 / p1_noadd / p1_fc / o2_noadd): without
 the phase rope every run scores about 0.5 within 2 sigma when a visible token lies within 0.5 d (same night) and
 the window mean (0.22-0.26) beyond that, against Fourier 0.55-0.66: the predictor copies the nearest neighbour.
-Same at 10, 30 and 50 % hidden. Gap mode on the option 2 runs: job 3586814.
+Same at 10, 30 and 50 % hidden. Gap mode on the option 2 runs: folded into job 3586877.
+
+### Option 3 (11-12): close Phase 1, open Phase 2 with two views
+
+Four single-GPU jobs (`project/jobs/option3_one.sh LANE`, 3586857-60), all from J1, 20k steps, small predictor
+(2 x 192), phase rope at the encoder's own f, no add-on:
+- Phase 1 close-out (is the class / period cost of enc_o2_fcbig_ph the bigger predictor or the rope?):
+  enc_o3_fcph (tail 10-60 d + rope), enc_o3_ph (rope only).
+- Phase 2 views (added 11-12 at a coworker's suggestion; views, not losses, as the goal asks):
+  enc_o3_fcph80 (80 % hidden), enc_o3_fcph_pband (a phase band of 0.1-0.3 cycles hidden at the catalogue
+  period, then random points to 50 %: `--mask-mode phaseband`, period at training only). Folding at the
+  TRUE period matters: at a random period the band is nearly random points for the short-period stars.
+  On the 800k the band would use our own period table (712,278 stars), not Chen's.
+- New test (card item 4b): phase gap, `jepa_forecast_probe --phase-gap 0.2`: hide 0.2 cycles at the catalogue
+  period (evaluation only) in every cycle of the window; no same-phase point is left to copy. Reference runs
+  (J1, o2_noadd, o2_fc, o2_fcbig_ph): job 3586877.
 
 # Older plan: period and phase (2026-10-07 to 2026-10-28)
 
