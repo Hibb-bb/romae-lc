@@ -206,6 +206,29 @@ Four single-GPU jobs (`project/jobs/option3_one.sh LANE`, 3586857-60), all from 
   SIGReg on the token latents. Not LeJEPA's CLS-level loss (J4: CLS invariance + SIGReg cost 0.05 F1).
   Also queued as an idea: a partly hidden phase band (80 % of the band's points).
 
+### Option 3 results (11-16)
+
+Within 2 sigma, recon head; in brackets Fourier at the encoder's own f. Tail = last 10 d hidden (forecast);
+gap = 30 % of points hidden at random; phase gap = 0.2 cycles hidden at the catalogue period (evaluation only).
+
+| run | tail | gap 30 % | phase gap | class F1 | period within 10 % |
+|---|---|---|---|---|---|
+| J1 | 0.22 (0.59) | 0.42 (0.66) | 0.29 (0.44) | - | 0.712 |
+| o2_noadd (control) | 0.22 (0.59) | 0.42 (0.67) | 0.29 (0.44) | 0.595 | 0.717 |
+| o2_fcbig_ph (tail, 4 x 384, rope) | 0.67 (0.55) | 0.75 (0.65) | 0.58 (0.43) | 0.562 | 0.674 |
+| o3_fcph (tail, rope) | 0.65 (0.56) | 0.73 (0.65) | 0.58 (0.42) | 0.582 | 0.674 |
+| o3_ph (rope only) | 0.65 (0.59) | 0.74 (0.67) | 0.57 (0.44) | 0.578 | 0.688 |
+| o3_fcph80 (+ 80 % hidden) | 0.43 (0.47) | 0.47 (0.57) | 0.44 (0.39) | 0.542 | 0.633 |
+| o3_fcph_pband (+ phase band) | 0.66 (0.57) | 0.73 (0.65) | **0.61** (0.43) | 0.575 | 0.678 |
+
+- Phase 1 closed: the rope is the fix (forecast, fill-in and phase gap), and it works with the small predictor
+  and without the tail. Most of the class cost was the big predictor (0.562 -> 0.582, control 0.595); the rope
+  still costs about 0.015 F1 (1-2 seed spreads) and 0.03-0.04 on period.
+- Horizon (tail 60 d, o2_fcbig_ph): 0.70 at 0.5-2 d, 0.67 at 5-10 d, 0.64 at 10-20 d, 0.60 at 20-40 d,
+  0.54 at 40-60 d; Fourier (own f) 0.57 -> 0.46; the control stays at the window mean (0.21) at every gap.
+- 80 % hidden hurts everything. The phase band helps only the phase-gap test (0.61 vs 0.58).
+- Next: the token-level global / local views (above), on the rope recipe with the small predictor.
+
 # Older plan: period and phase (2026-10-07 to 2026-10-28)
 
 ### Where we are
