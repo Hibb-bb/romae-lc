@@ -313,6 +313,15 @@ def add_train_args(parser) -> None:
     g.add_argument("--jepa-recon-weight", type=float, default=0.0, help="hybrid loss: this weight times the MSE of a brightness head on the predictor's outputs")
     g.add_argument("--jepa-proj", type=int, default=0, help="alignment loss in a projection of this width (0 = the encoder space); the probes read the pre-projection latent")
     g.add_argument("--jepa-proj-hidden", type=int, default=256)
+    # LeJEPA at the token level (project.jepa.forward_views): no EMA, SIGReg on the projected token latents,
+    # 2 global + 4 local views per window with point and band dropout
+    g.add_argument("--jepa-no-ema", action="store_true", help="one encoder for both sides, no EMA, SIGReg against collapse, multi-view training")
+    g.add_argument("--sig-lambda", type=float, default=0.05, help="--jepa-no-ema: loss = (1 - lambda) prediction + lambda SIGReg (+ spectral aux)")
+    g.add_argument("--sig-slices", type=int, default=1024, help="--jepa-no-ema: SIGReg random projections")
+    g.add_argument("--views", type=int, nargs=2, default=(2, 4), metavar=("GLOBAL", "LOCAL"), help="--jepa-no-ema: views per window")
+    g.add_argument("--view-keep", type=float, default=0.15, help="--jepa-no-ema: share of the window's tokens in each view")
+    g.add_argument("--local-span", type=float, nargs=2, default=(30.0, 80.0), metavar=("LO", "HI"), help="--jepa-no-ema: local view length, days")
+    g.add_argument("--band-drop", type=float, default=0.2, help="--jepa-no-ema: chance that a view drops one band")
     g.add_argument("--jepa-clean-target", action="store_true", help="denoising JEPA: the target encoder sees the smooth fit (needs --target template/mix), the context encoder the raw points")
     g.add_argument("--jepa-init", default=None, help="warm start the JEPA encoder (and the target copy) from this masked-autoencoder mae.pt")
     g.add_argument(
@@ -537,8 +546,10 @@ def main(argv=None):
             rope=rope_layouts(args, ladder), abs_timescales=abs_timescales(ladder) if args.abs_time else None, spectral=spectral_kw,
             ema=args.jepa_ema, ema_end=args.jepa_ema_end, loss=args.jepa_loss, use_target=not args.jepa_use_context, recon_weight=args.jepa_recon_weight,
             clean_target=args.jepa_clean_target, proj_dim=args.jepa_proj, proj_hidden=args.jepa_proj_hidden, attn_pool=args.attn_pool,
-            phase_rope=args.phase_rope, phase_freq=args.phase_freq,
+            phase_rope=args.phase_rope, phase_freq=args.phase_freq, no_ema=args.jepa_no_ema, sig_slices=args.sig_slices,
         )  # fmt: skip
+        if args.jepa_no_ema and (args.jepa_proj <= 0 or args.jepa_recon_weight > 0 or args.dyn or args.forecast_tail is not None):
+            parser.error("--jepa-no-ema needs --jepa-proj > 0 and no reconstruction, add-on or forecast tail")
         if args.jepa_clean_target and args.target == "obs":
             parser.error("--jepa-clean-target needs --target template or mix")
         if args.jepa_init:
@@ -1050,8 +1061,24 @@ def main(argv=None):
                 st0 = batch["starts"]  # [B, T] days; relative to the star's first window keeps float32 exact enough
                 dyn_starts = (st0 - st0[:, :1]).T.reshape(-1)
             with amp:
-                loss_t = forward(frames, periods_rows=periods_rows, template_rows=template_rows, step_now=step, index_rows=index_rows,
-                                 start_rows=start_rows, dyn_starts=dyn_starts)  # fmt: skip
+                if args.jepa_no_ema:
+                    from project.jepa import forward_views
+
+                    values_, positions_, pad_ = fuse_frames(frames)
+                    l_pred, l_sig, l_aux, st_ = forward_views(
+                        model, values_, positions_, pad_, periods_rows.to(dev) if periods_rows is not None else None, args.views[0], args.views[1],
+                        args.view_keep, args.local_span, args.band_drop, args.window)  # fmt: skip
+                    loss_t = (1 - args.sig_lambda) * l_pred + args.sig_lambda * l_sig
+                    if l_aux is not None and args.spectral_aux > 0:
+                        loss_t = loss_t + args.spectral_aux * l_aux
+                        aux_stats["spectral"].append(float(l_aux.detach()))
+                    aux_stats.setdefault("lejepa_pred", []).append(float(l_pred.detach()))
+                    aux_stats.setdefault("lejepa_sig", []).append(float(l_sig.detach()))
+                    for k_, v_ in st_.items():
+                        aux_stats.setdefault(f"lejepa_{k_}", []).append(v_)
+                else:
+                    loss_t = forward(frames, periods_rows=periods_rows, template_rows=template_rows, step_now=step, index_rows=index_rows,
+                                     start_rows=start_rows, dyn_starts=dyn_starts)  # fmt: skip
             opt.zero_grad(set_to_none=True)
             loss_t.backward()
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [p for m in aux_modules for p in m.parameters()], args.clip)

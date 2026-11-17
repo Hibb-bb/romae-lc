@@ -121,3 +121,24 @@ def test_record_templates_and_training(tmp_path):
     assert (out / "templates.pt").is_file() and (out / "DONE").is_file()
     rows = [l for l in open(out / "log.jsonl") if '"eval"' in l]
     assert '"template_share"' in rows[-1] and '"query_delta_days"' in rows[-1]
+
+
+def test_jepa_no_ema_views(tmp_path):
+    """LeJEPA at the token level: no EMA, SIGReg, 2 global + 4 local views, spectral aux, phase rope."""
+    out = tmp_path / "noema"
+    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-no-ema", "--jepa-proj", "16", "--jepa-proj-hidden", "16", "--sig-slices", "64",
+                                  "--spectral", "--spectral-aux", "0.5", "--phase-rope", "1", "--dec-width", "48", "--n-frames", "1", "--mask-ratio", "0.85",
+                                  "--view-keep", "0.3", "--local-span", "1", "3", "--steps", "3", "--out", str(out)])
+    enc, _ = load_encoder(str(out / "mae.pt"), "cpu")
+    model = enc.model
+    assert model.no_ema and not model.use_target and model.jepa_hparams["no_ema"]
+    values = torch.randn(2, 12, 2)
+    positions = torch.cat([torch.sort(torch.rand(2, 1, 12) * 5, -1).values + 1, torch.full((2, 1, 12), 472.0)], 1)
+    from project.jepa import forward_views
+
+    l_pred, l_sig, l_aux, st = forward_views(model, values, positions, torch.zeros(2, 12, dtype=torch.bool), torch.tensor([0.7, 3.0]),
+                                             keep=0.3, local_span=(1.0, 3.0), window=5.0)
+    assert torch.isfinite(l_pred) and torch.isfinite(l_sig) and torch.isfinite(l_aux) and st["target_share"] > 0 and "period_hit10_global" in st
+    with torch.no_grad():
+        o = model(values, positions)
+    assert o.pred.shape[-1] == 16 and torch.isfinite(o.loss)

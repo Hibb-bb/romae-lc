@@ -17,6 +17,11 @@ a hidden point's latent depends on its brightness at that time, and with
 hidden stretches of many days the predictor can only get it right by
 knowing where the star is in its cycle.
 
+No-EMA form (``no_ema``, LeJEPA): one encoder for both sides, gradients through the targets, and SIGReg on
+the projected token latents keeps them from collapsing. Training then uses :meth:`TokenJEPA.forward_views`:
+2 global and 4 local views of a window, each with point and band dropout; the target of an observation is the
+mean of the global views' projected latents of it; the predictor predicts it from every view.
+
 The checkpoint has ``kind == "jepa"``; :func:`project.common.load_mae`
 rebuilds it and every loader and probe treats it like ``mae.pt``. By default
 the TARGET encoder is the one used downstream (``use_target``), as in
@@ -60,6 +65,8 @@ class TokenJEPA(nn.Module):
         attn_pool: int = 0,
         phase_rope: int = 0,
         phase_freq: str = "local",
+        no_ema: bool = False,
+        sig_slices: int = 1024,
     ):
         super().__init__()
         d = encoder["d_model"] if isinstance(encoder, dict) else encoder.d_model
@@ -71,9 +78,10 @@ class TokenJEPA(nn.Module):
         # the predictor's rotary encoding gets the phase at the context encoder's own frequency as one more axis
         # (0 = off); the spectral layer's estimate, never the catalogue period
         self.phase_rope, self.phase_freq = int(phase_rope), str(phase_freq)
-        self.target = copy.deepcopy(self.context)
+        self.no_ema, self.sig_slices = bool(no_ema), int(sig_slices)
+        self.target = copy.deepcopy(self.context)  # unused (never updated) when no_ema
         self.target.requires_grad_(False)
-        self.ema, self.ema_end, self.loss_kind, self.use_target = float(ema), float(ema_end), str(loss), bool(use_target)
+        self.ema, self.ema_end, self.loss_kind, self.use_target = float(ema), float(ema_end), str(loss), bool(use_target) and not self.no_ema
         self.recon_weight = float(recon_weight)
         # denoising form: the target encoder sees the smooth fit (target_values) in the brightness channel, the context encoder the raw points
         self.clean_target = bool(clean_target)
@@ -95,7 +103,8 @@ class TokenJEPA(nn.Module):
     def jepa_hparams(self) -> dict:
         return dict(ema=self.ema, ema_end=self.ema_end, loss=self.loss_kind, use_target=self.use_target, recon_weight=self.recon_weight, clean_target=self.clean_target,
                     proj_dim=self.proj_dim, proj_hidden=self.proj_hidden,
-                    **({"phase_rope": self.phase_rope, "phase_freq": self.phase_freq} if self.phase_rope else {}))
+                    **({"phase_rope": self.phase_rope, "phase_freq": self.phase_freq} if self.phase_rope else {}),
+                    **({"no_ema": True, "sig_slices": self.sig_slices} if self.no_ema else {}))
 
     @property
     def hparams(self) -> dict:
@@ -192,6 +201,21 @@ class TokenJEPA(nn.Module):
         if len(picked) == 0:
             raise ValueError("--jepa-init copied nothing")
 
+    def _decode(self, x_enc, v_pos, v_pad, q_pos, q_pad, f=None):
+        """The predictor: encoder outputs (CLS included) plus a mask token at each query position, with the
+        phase at frequency ``f`` as one more rotary axis when the phase rope is on. Returns the query outputs."""
+        enc = self.context
+        b, k = x_enc.shape[0], q_pos.shape[2]
+        x = enc.encoder_to_decoder(x_enc)
+        x = torch.cat([x, enc.mask_token.expand(b, k, -1).to(x.dtype)], dim=1)
+        pos = torch.cat([v_pos, q_pos], dim=2)
+        pad = torch.cat([v_pad, q_pad], dim=1)
+        if self.phase_rope:
+            t_days = (pos[:, 0].float() - 1.0) * enc.spectral.time_scale
+            pos = torch.cat([pos, (f[:, None] * t_days)[:, None].to(pos.dtype)], 1)
+        x = enc.decoder(x, enc.decoder_rope.prepare(pos), attention_mask(pad))
+        return x[:, -k:]
+
     def momentum(self, step: int, total: int) -> float:
         """Linear schedule from ``ema`` to ``ema_end`` over the run."""
         f = min(max(step / max(total, 1), 0.0), 1.0)
@@ -199,6 +223,8 @@ class TokenJEPA(nn.Module):
 
     @torch.no_grad()
     def ema_update(self, step: int, total: int) -> float:
+        if self.no_ema:
+            return 0.0
         m = self.momentum(step, total)
         for pt, pc in zip(self.target.parameters(), self.context.parameters()):
             pt.mul_(m).add_(pc.detach(), alpha=1.0 - m)
@@ -223,7 +249,7 @@ class TokenJEPA(nn.Module):
 
         # the targets: the EMA encoder's token latents of the whole window at the hidden positions
         with torch.no_grad():
-            tg = self.target
+            tg = self.context if self.no_ema else self.target
             tv = values
             if self.clean_target and target_values is not None:
                 clean = target_values if target_values.dim() == 3 else target_values[..., None]
@@ -234,9 +260,11 @@ class TokenJEPA(nn.Module):
             toks = xf[:, 1:] if tg.use_cls else xf
             self.last_target_tokens = (toks, pad_mask)  # the full window's target tokens, for the add-on's --dyn-target ema
             target = split(toks.float(), mask)
-            if self.proj_target is not None:
-                target = self.proj_target(target)
-            target = F.layer_norm(target, (target.shape[-1],))
+            ptg = self.proj if self.no_ema else self.proj_target
+            if ptg is not None:
+                target = ptg(target)
+            if not self.no_ema:
+                target = F.layer_norm(target, (target.shape[-1],))
         if target.shape[1] == 0:
             raise ValueError("mask selects no tokens; nothing to predict")
         m_pos, m_pad = split(pos_t, mask).transpose(1, 2), split(pad_mask, mask)
@@ -262,7 +290,7 @@ class TokenJEPA(nn.Module):
         hid = x[:, -k:]
         pred = enc.head(hid).float()
         if self.proj is not None:
-            pred = F.layer_norm(self.proj(pred), (self.proj_dim,))
+            pred = self.proj(pred) if self.no_ema else F.layer_norm(self.proj(pred), (self.proj_dim,))
         real = (~m_pad).float()[..., None]
         err = F.smooth_l1_loss(pred, target, reduction="none") if self.loss_kind == "smoothl1" else F.mse_loss(pred, target, reduction="none")
         loss = (err * real).sum() / (real.sum() * target.shape[-1]).clamp_min(1e-8)
@@ -279,6 +307,140 @@ class TokenJEPA(nn.Module):
             if self.recon_head is not None:
                 self.last_stats["recon"] = self.last_stats_recon
         return MAEOutput(loss=loss, pred=pred, target=target, mask=mask, enc_tokens=enc_tokens, enc_positions=v_pos, enc_pad=v_pad)
+
+
+def _pack(keep: torch.Tensor):
+    """Indices that move the kept tokens of every row to the front (original order) and the padding of the
+    packed rows: ``(order [b, k], pad [b, k])``."""
+    cnt = keep.sum(1)
+    k = max(int(cnt.max()), 1)
+    order = torch.sort((~keep).to(torch.int8), dim=1, stable=True).indices[:, :k]
+    pad = torch.arange(k, device=keep.device)[None] >= cnt[:, None]
+    return order, pad
+
+
+def _take(values, positions, order):
+    v = values.gather(1, order[..., None].expand(-1, -1, values.shape[-1]))
+    p = positions.gather(2, order[:, None].expand(-1, positions.shape[1], -1))
+    return v, p
+
+
+def make_views(t_days, positions, pad, n_glob, n_loc, keep, local_span, band_drop, window, min_tokens=8):
+    """Keep masks ``[(n_glob + n_loc), b, n]`` of the views of one window batch. Global views: the whole window,
+    each real token kept with probability ``keep``. Local views: a stretch of ``local_span`` days around a random
+    real token, thinned so the view holds about ``keep`` of the window's tokens (kept share of the stretch between
+    0.3 and 0.9). Every view drops one band at random with probability ``band_drop``. A view with fewer than
+    ``min_tokens`` tokens takes ``min_tokens`` real tokens instead: random ones for a global view, the nearest to
+    the stretch's centre for a local view."""
+    b, n = pad.shape
+    dev = pad.device
+    real = ~pad
+    n_real = real.sum(1).float()
+    out = []
+    for v in range(n_glob + n_loc):
+        r = torch.rand(b, n, device=dev)
+        anchor_idx = torch.where(real, torch.rand(b, n, device=dev), torch.full((b, n), -1.0, device=dev)).argmax(1)
+        anchor = t_days.gather(1, anchor_idx[:, None])
+        if v < n_glob:
+            kv = real & (r < keep)
+            dist = torch.rand(b, n, device=dev)  # a sparse global view tops up with random tokens, not a clump
+        else:
+            L = local_span[0] + (local_span[1] - local_span[0]) * torch.rand(b, 1, device=dev)
+            s = anchor - L * torch.rand(b, 1, device=dev)
+            span = real & (t_days >= s) & (t_days < s + L)
+            p_keep = (keep * n_real / span.sum(1).clamp(min=1)).clamp(0.3, 0.9)
+            kv = span & (r < p_keep[:, None])
+            dist = (t_days - (s + L / 2)).abs()
+        drop = torch.rand(b, device=dev) < band_drop
+        pick = torch.where(kv, torch.rand(b, n, device=dev), torch.full((b, n), -1.0, device=dev)).argmax(1)
+        band_pick = positions[:, 1].gather(1, pick[:, None])
+        kv = kv & ~(drop[:, None] & (positions[:, 1] == band_pick))
+        few = kv.sum(1) < min_tokens
+        if few.any():
+            near = torch.where(real, dist, torch.full_like(dist, 1e9)).argsort(1).argsort(1) < min_tokens
+            kv = torch.where(few[:, None], near & real, kv)
+        out.append(kv)
+    return torch.stack(out)
+
+
+def forward_views(model: TokenJEPA, values, positions, pad, periods=None, n_glob=2, n_loc=4, keep=0.15,
+                  local_span=(30.0, 80.0), band_drop=0.2, window=250.0, sig_max_n=4096):
+    """The no-EMA multi-view loss (LeJEPA at the token level). Returns ``(pred, sigreg, spectral_aux, stats)``;
+    the caller weights them. ``periods [b]`` (training-time catalogue period) feeds the spectral aux loss on the
+    global views; the phase rope uses the encoder's own frequency from the first global view."""
+    from project.dyn import sigreg
+    from romae_lc.model import spectral_frequency
+
+    enc = model.context
+    b, n = pad.shape
+    ts = enc.spectral.time_scale if enc.spectral is not None else 1.0
+    t_days = (positions[:, 0].float() - 1.0) * ts
+    keeps = make_views(t_days, positions, pad, n_glob, n_loc, keep, local_span, band_drop, window)
+    V = n_glob + n_loc
+
+    def encode(kv):  # kv [m, b, n] -> per view-row packed outputs
+        m = kv.shape[0]
+        kk = kv.reshape(m * b, n)
+        order, vpad = _pack(kk)
+        vals, pos = _take(values.repeat(m, 1, 1), positions.repeat(m, 1, 1), order)
+        x = enc.embed(vals, pos)
+        x, pos_c, pad_c = enc.add_cls(x, pos, vpad)
+        x = enc.run_transformer(x, pos_c, pad_c, vals)
+        return x, pos_c, pad_c, order, vpad
+
+    xg, pg, padg, og, vpg = encode(keeps[:n_glob])
+    aux = None
+    if periods is not None and enc.spectral is not None:
+        from romae_lc.spectral import spectral_aux_loss
+
+        aux = spectral_aux_loss(enc.spectral, periods.repeat(n_glob))
+    f_g = spectral_frequency(enc.spectral, None, model.phase_freq).view(n_glob, b) if enc.spectral is not None else None
+    f = f_g[0] if model.phase_rope else None
+    xl, pl, padl, ol, vpl = encode(keeps[n_glob:])
+    f_l = spectral_frequency(enc.spectral, None, model.phase_freq).view(n_loc, b) if enc.spectral is not None and n_loc else None
+
+    def hits(fv):  # share of views whose frequency is within 2 % / 10 % of the catalogue's (monitoring only)
+        if periods is None or fv is None:
+            return {}
+        ok = torch.isfinite(periods) & (periods > 0)
+        if not ok.any():
+            return {}
+        rel = (fv[:, ok].float() * periods[ok].float()[None] - 1.0).abs()
+        return dict(hit2=float((rel < 0.02).float().mean()), hit10=float((rel < 0.1).float().mean()))
+    tok_g = xg[:, 1:] if enc.use_cls else xg
+    tok_l = xl[:, 1:] if enc.use_cls else xl
+    zg = model.proj(tok_g.float())  # [G b, kg, D]
+    zl = model.proj(tok_l.float())
+    D = zg.shape[-1]
+    # targets in the window layout: the mean of the global views' projected latents
+    zsum = zg.new_zeros(b, n, D)
+    cnt = zg.new_zeros(b, n)
+    for g in range(n_glob):
+        rows = slice(g * b, (g + 1) * b)
+        w = (~vpg[rows]).float()
+        zsum.scatter_add_(1, og[rows][..., None].expand(-1, -1, D), zg[rows] * w[..., None])
+        cnt.scatter_add_(1, og[rows], w)
+    has_t = cnt > 0
+    T = zsum / cnt.clamp(min=1)[..., None]
+    qo, qpad = _pack(has_t)
+    q_pos = positions.gather(2, qo[:, None].expand(-1, positions.shape[1], -1))
+    Tq = T.gather(1, qo[..., None].expand(-1, -1, D))
+    # predictor from every view to every target position
+    preds = []
+    for x, pc, padc, m in ((xg, pg, padg, n_glob), (xl, pl, padl, n_loc)):
+        hid = model._decode(x, pc, padc, q_pos.repeat(m, 1, 1), qpad.repeat(m, 1), None if f is None else f.repeat(m))
+        preds.append(model.proj(enc.head(hid).float()))
+    pred = torch.cat(preds).view(V, b, -1, D)
+    w = (~qpad).float()
+    l_pred = (((pred - Tq[None]) ** 2).mean(-1) * w[None]).sum() / (w.sum() * V).clamp(min=1)
+    z_all = torch.cat([zg[~vpg], zl[~vpl]])
+    l_sig = sigreg(z_all.float(), num_slices=model.sig_slices, max_n=sig_max_n)
+    with torch.no_grad():
+        stats = dict(view_tokens_global=float((~vpg).sum(1).float().mean()), view_tokens_local=float((~vpl).sum(1).float().mean()), target_share=float(has_t.sum() / (~pad).sum()),
+                     z_std=float(z_all.std(0).mean()), pred_std=float(pred[:, w > 0].std(1).mean()))
+        stats.update({f"period_{k}_global": v for k, v in hits(f_g).items()})
+        stats.update({f"period_{k}_local": v for k, v in hits(f_l).items()})
+    return l_pred, l_sig, aux, stats
 
 
 def jepa_state(model: TokenJEPA, spec, cfg, ladder, classes, args, step, metrics=None) -> dict:

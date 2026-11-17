@@ -39,7 +39,12 @@ from torch.utils.data import DataLoader
 ap = argparse.ArgumentParser()
 ap.add_argument("--ckpts", nargs="+", required=True)
 ap.add_argument("--data", default="/projects/bfrf/data/PC_matches/ZTFxPC")
-ap.add_argument("--n-stars", type=int, default=600)
+ap.add_argument("--n-stars", type=int, default=600, help="stars scored (0 = all of the split)")
+ap.add_argument("--split", default="validation", help="the split scored")
+ap.add_argument("--fit-split", default=None, help="fit the latent decoder on this split's stars (all of --split is scored); "
+                "default: 70 %% of --split's stars fit it, 30 %% are scored")
+ap.add_argument("--n-fit", type=int, default=1000, help="--fit-split: stars for the decoder")
+ap.add_argument("--stride", type=float, default=0.25, help="window advance, share of the window (1 = no overlap)")
 ap.add_argument("--tail", type=float, default=10.0, help="days hidden at the end of every window")
 ap.add_argument("--dt", type=float, nargs=2, default=(0.5, 10.0))
 ap.add_argument("--min-context", type=int, default=16)
@@ -158,7 +163,8 @@ def collect(model, ds, spec, window, recs=None):
         n30 = (vis & (t_days > (t_last - 30.0)[:, None])).sum(1).float()  # of them, in the last 30 days of the context
         n30 = h_loc if GAP else n30[:, None].expand_as(h_t)
         for k_, v_ in dict(nctx=nctx[:, None].expand_as(h_t), n30=n30, star=obj[:, None].expand_as(h_t), win=wid[:, None].expand_as(h_t), t=h_t, dt=h_dt, m=h_m, sig=h_sig,
-                           recon=model.last_recon[..., 0], pred=out.pred, target=out.target).items():
+                           recon=model.last_recon[..., 0] if model.recon_head is not None else torch.full_like(out.pred[..., 0], float("nan")),
+                           pred=out.pred, target=out.target).items():
             H[k_].append(v_[keep].cpu() if k_ in ("star", "win") else v_[keep].float().cpu())
         tv, mv, sv = t_days.cpu().numpy(), values[..., 0].float().cpu().numpy(), torch.exp(values[..., 1].float() * sd + mu).cpu().numpy()
         vv = vis.cpu().numpy()
@@ -182,19 +188,21 @@ def score(Hn, W, recs, star_train, label, rng):
     sc = StandardScaler().fit(Hn["target"][sub])
     mlp = MLPRegressor(hidden_layer_sizes=(256, 256), max_iter=80, early_stopping=True, random_state=0).fit(sc.transform(Hn["target"][sub]), m[sub])
     idx = np.flatnonzero(te)
-    rows = {"recon head": Hn["recon"][idx],
-            "predicted latent [mlp]": mlp.predict(sc.transform(Hn["pred"][idx])),
+    rows = {"recon head": Hn["recon"][idx]} if np.isfinite(Hn["recon"][idx]).any() else {}
+    rows.update({"predicted latent [mlp]": mlp.predict(sc.transform(Hn["pred"][idx])),
             "target latent [mlp] (ceiling)": mlp.predict(sc.transform(Hn["target"][idx])),
-            "window mean": np.array([W["m"][w].mean() for w in win[idx]])}
+            "window mean": np.array([W["m"][w].mean() for w in win[idx]])})
     four, four_c = np.empty(len(idx)), np.empty(len(idx))
-    for n_, k in enumerate(idx):
-        w = win[k]
+    wi = win[idx]
+    for w in np.unique(wi):  # one fit per window, evaluated at all its scored tokens
+        sel = np.flatnonzero(wi == w)
         tw, mw, sw = W["t"][w], W["m"][w], W["sig"][w]
         fw = W["f"][w]
-        p = recs[star[k]].period
+        p = recs[star[idx[sel[0]]]].period
         fc = 1.0 / p if p and np.isfinite(p) and p > 0 else fw
-        four[n_] = fourier_forecast(tw, mw, sw, fw, np.array([t[k]]), a.harmonics)[0] if np.isfinite(fw) else mw.mean()
-        four_c[n_] = fourier_forecast(tw, mw, sw, fc, np.array([t[k]]), a.harmonics)[0]
+        tq = t[idx[sel]]
+        four[sel] = fourier_forecast(tw, mw, sw, fw, tq, a.harmonics) if np.isfinite(fw) else mw.mean()
+        four_c[sel] = fourier_forecast(tw, mw, sw, fc, tq, a.harmonics) if np.isfinite(fc) else mw.mean()
     rows[f"Fourier fit ({a.harmonics} harmonics, f of the window)"] = four
     rows[f"Fourier fit ({a.harmonics} harmonics, catalogue f)"] = four_c
     yj, sj, dtj = m[idx], sig[idx], dt[idx]
@@ -209,22 +217,23 @@ def score(Hn, W, recs, star_train, label, rng):
     out["latent_err_over_var"] = float(np.mean((Hn["pred"][idx] - Hn["target"][idx]) ** 2) / v_t)
     cls = np.array([str(recs[o].meta.get("class_str", recs[o].label)) for o in star[idx]])
     out["by_class"] = {}
-    for name in ("recon head", "predicted latent [mlp]", f"Fourier fit ({a.harmonics} harmonics, f of the window)"):
+    MAIN = [r for r in ("recon head", "predicted latent [mlp]") if r in rows]
+    for name in MAIN + [f"Fourier fit ({a.harmonics} harmonics, f of the window)"]:
         az = np.abs((rows[name] - yj) / sj)
         out["by_class"][name] = {c: dict(n=int((cls == c).sum()), within_2=float(np.mean(az[cls == c] < 2)))
                                  for c in sorted(set(cls), key=lambda c: -(cls == c).sum())}
-    print(f"[{label}] latent error / target variance {out['latent_err_over_var']:.3f} | within 2 sigma by class, recon head: "
-          + ", ".join(f"{c} {v['within_2']:.2f}" for c, v in list(out["by_class"]["recon head"].items())[:8]), flush=True)
+    print(f"[{label}] latent error / target variance {out['latent_err_over_var']:.3f} | within 2 sigma by class, {MAIN[0]}: "
+          + ", ".join(f"{c} {v['within_2']:.2f}" for c, v in list(out["by_class"][MAIN[0]].items())[:8]), flush=True)
     out["by_density"] = {}
     for key, v in (("context tokens", Hn["nctx"][idx]), (LOCAL, Hn["n30"][idx])):
         qb = np.clip(np.searchsorted(np.quantile(v, [0.2, 0.4, 0.6, 0.8]), v, side="right"), 0, 4)
         out["by_density"][key] = {}
-        for name in ("recon head", "predicted latent [mlp]", f"Fourier fit ({a.harmonics} harmonics, f of the window)"):
+        for name in MAIN + [f"Fourier fit ({a.harmonics} harmonics, f of the window)"]:
             az = np.abs((rows[name] - yj) / sj)
             out["by_density"][key][name] = {f"quintile {b + 1}": dict(n=int((qb == b).sum()), median=float(np.median(v[qb == b])),
                                                                      within_2=float(np.mean(az[qb == b] < 2))) for b in range(5)}
         print(f"[{label}] within 2 sigma by quintile of {key} (medians "
-              + ", ".join(f"{x['median']:.0f}" for x in out["by_density"][key]["recon head"].values()) + "): "
+              + ", ".join(f"{x['median']:.0f}" for x in out["by_density"][key][MAIN[0]].values()) + "): "
               + " | ".join(f"{nm[:22]} " + " ".join(f"{x['within_2']:.2f}" for x in d.values()) for nm, d in out["by_density"][key].items()), flush=True)
     out["n"], out["gap_median_days"] = int(len(idx)), float(np.median(dtj))
     if a.save_npz:
@@ -239,19 +248,28 @@ for ck in a.ckpts:
     rng = np.random.default_rng(a.seed)
     enc, meta = load_encoder(ck, dev)
     model = enc.model
-    if not hasattr(model, "context") or getattr(model, "recon_head", None) is None:
-        print(f"{ck}: not a JEPA with a reconstruction head, skipped", flush=True)
+    if not hasattr(model, "context"):
+        print(f"{ck}: not a JEPA, skipped", flush=True)
         continue
     model.eval()
     cfg, spec = meta.cfg, meta.spec
     dargs = data_args_from(meta.args)
     dargs.data = a.data
-    val = load_data(dargs, splits=("validation",))["validation"]
-    recs = [r for r in val if r.n >= 64]
+    splits = (a.split,) if a.fit_split is None else tuple(dict.fromkeys((a.split, a.fit_split)))
+    data_ = load_data(dargs, splits=splits)
+    recs = [r for r in data_[a.split] if r.n >= 64]
     rng.shuffle(recs)
-    recs = recs[: a.n_stars]
-    star_train = rng.random(len(recs)) < 0.7
-    ds = WindowDataset([("validation", recs, list(range(len(recs))))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)
+    recs = recs[: a.n_stars] if a.n_stars > 0 else recs
+    if a.fit_split is None:
+        star_train = rng.random(len(recs)) < 0.7
+    else:  # the decoder's stars first, then every scored star
+        fit = [r for r in data_[a.fit_split] if r.n >= 64]
+        rng.shuffle(fit)
+        fit = fit[: a.n_fit]
+        recs = fit + recs
+        star_train = np.r_[np.ones(len(fit), bool), np.zeros(len(recs) - len(fit), bool)]
+    print(f"{a.split}: {int((~star_train).sum())} stars scored; decoder on {int(star_train.sum())} stars of {a.fit_split or a.split}", flush=True)
+    ds = WindowDataset([(a.split, recs, list(range(len(recs))))], cfg, a.stride, cfg.max_tokens, 0, 1, 0.5)
     t0 = time.time()
     Hn, W = collect(model, ds, spec, cfg.window, recs)
     label = os.path.basename(os.path.dirname(ck)) + (f"_pgap{a.phase_gap:g}" if PGAP else f"_gap{a.gap_share:g}" if GAP else "")
