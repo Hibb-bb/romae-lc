@@ -1,6 +1,6 @@
 """CPU test of the frozen-encoder loading path on the toy simulator: a tiny autoencoder
-(``pretrain_mae``) is trained for a few steps, then :func:`project.common.load_encoder`
-and :func:`project.common.load_mae` are checked on it."""
+(``project.train``) is trained for a few steps, then :func:`project.checkpoint.load_encoder`
+and :func:`project.checkpoint.load_mae` are checked on it."""
 
 from __future__ import annotations
 
@@ -9,15 +9,8 @@ import torch
 
 from romae_lc import FrameDataset
 
-from project.common import (
-    FrameEncoder,
-    LatentEncoder,
-    PooledEncoder,
-    data_args_from,
-    load_data,
-    load_encoder,
-    load_mae,
-)
+from project.checkpoint import FrameEncoder, LatentEncoder, load_encoder, load_mae, PooledEncoder
+from project.data import data_args_from, load_data
 from project.tests._args import MAE_ARGS
 
 
@@ -28,10 +21,10 @@ def seed():
 
 @pytest.fixture(scope="module")
 def mae_ckpt(tmp_path_factory):
-    from project import pretrain_mae
+    from project import train
 
     out = tmp_path_factory.mktemp("mae")
-    pretrain_mae.main(MAE_ARGS + ["--steps", "4", "--out", str(out)])
+    train.main(MAE_ARGS + ["--steps", "4", "--out", str(out)])
     assert (out / "mae.pt").is_file()
     return out / "mae.pt"
 

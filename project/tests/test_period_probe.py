@@ -44,10 +44,10 @@ def seed():
 
 @pytest.fixture(scope="module")
 def mae_ckpt(tmp_path_factory):
-    from project import pretrain_mae
+    from project import train
 
     out = tmp_path_factory.mktemp("mae")
-    pretrain_mae.main(MAE_ARGS + ["--steps", "4", "--out", str(out)])
+    train.main(MAE_ARGS + ["--steps", "4", "--out", str(out)])
     assert (out / "mae.pt").is_file()
     return out / "mae.pt"
 

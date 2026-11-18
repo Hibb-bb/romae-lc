@@ -18,11 +18,11 @@ hidden stretches of many days the predictor can only get it right by
 knowing where the star is in its cycle.
 
 No-EMA form (``no_ema``, LeJEPA): one encoder for both sides, gradients through the targets, and SIGReg on
-the projected token latents keeps them from collapsing. Training then uses :meth:`TokenJEPA.forward_views`:
+the projected token latents keeps them from collapsing. Training then uses :func:`forward_views`:
 2 global and 4 local views of a window, each with point and band dropout; the target of an observation is the
 mean of the global views' projected latents of it; the predictor predicts it from every view.
 
-The checkpoint has ``kind == "jepa"``; :func:`project.common.load_mae`
+The checkpoint has ``kind == "jepa"``; :func:`project.checkpoint.load_mae`
 rebuilds it and every loader and probe treats it like ``mae.pt``. By default
 the TARGET encoder is the one used downstream (``use_target``), as in
 I-JEPA; ``encode`` / ``backbone`` follow that choice.
@@ -30,9 +30,7 @@ I-JEPA; ``encode`` / ``backbone`` follow that choice.
 
 from __future__ import annotations
 
-import argparse
 import copy
-from dataclasses import asdict
 
 import torch
 import torch.nn as nn
@@ -40,6 +38,8 @@ import torch.nn.functional as F
 
 from romae_lc.model import MAEOutput, RoMAEForPreTraining, attention_mask, gen_mask, spectral_frequency
 from romae_lc.spectral import spectral_aux_loss
+
+from project.views import make_views, pack, take
 
 
 def sigreg(z: torch.Tensor, num_slices: int = 64, t_max: float = 3.0, n_t: int = 17, max_n: int = 2048) -> torch.Tensor:
@@ -321,60 +321,6 @@ class TokenJEPA(nn.Module):
         return MAEOutput(loss=loss, pred=pred, target=target, mask=mask, enc_tokens=enc_tokens, enc_positions=v_pos, enc_pad=v_pad)
 
 
-def _pack(keep: torch.Tensor):
-    """Indices that move the kept tokens of every row to the front (original order) and the padding of the
-    packed rows: ``(order [b, k], pad [b, k])``."""
-    cnt = keep.sum(1)
-    k = max(int(cnt.max()), 1)
-    order = torch.sort((~keep).to(torch.int8), dim=1, stable=True).indices[:, :k]
-    pad = torch.arange(k, device=keep.device)[None] >= cnt[:, None]
-    return order, pad
-
-
-def _take(values, positions, order):
-    v = values.gather(1, order[..., None].expand(-1, -1, values.shape[-1]))
-    p = positions.gather(2, order[:, None].expand(-1, positions.shape[1], -1))
-    return v, p
-
-
-def make_views(t_days, positions, pad, n_glob, n_loc, keep, local_span, band_drop, window, min_tokens=8):
-    """Keep masks ``[(n_glob + n_loc), b, n]`` of the views of one window batch. Global views: the whole window,
-    each real token kept with probability ``keep``. Local views: a stretch of ``local_span`` days around a random
-    real token, thinned so the view holds about ``keep`` of the window's tokens (kept share of the stretch between
-    0.3 and 0.9). Every view drops one band at random with probability ``band_drop``. A view with fewer than
-    ``min_tokens`` tokens takes ``min_tokens`` real tokens instead: random ones for a global view, the nearest to
-    the stretch's centre for a local view."""
-    b, n = pad.shape
-    dev = pad.device
-    real = ~pad
-    n_real = real.sum(1).float()
-    out = []
-    for v in range(n_glob + n_loc):
-        r = torch.rand(b, n, device=dev)
-        anchor_idx = torch.where(real, torch.rand(b, n, device=dev), torch.full((b, n), -1.0, device=dev)).argmax(1)
-        anchor = t_days.gather(1, anchor_idx[:, None])
-        if v < n_glob:
-            kv = real & (r < keep)
-            dist = torch.rand(b, n, device=dev)  # a sparse global view tops up with random tokens, not a clump
-        else:
-            L = local_span[0] + (local_span[1] - local_span[0]) * torch.rand(b, 1, device=dev)
-            s = anchor - L * torch.rand(b, 1, device=dev)
-            span = real & (t_days >= s) & (t_days < s + L)
-            p_keep = (keep * n_real / span.sum(1).clamp(min=1)).clamp(0.3, 0.9)
-            kv = span & (r < p_keep[:, None])
-            dist = (t_days - (s + L / 2)).abs()
-        drop = torch.rand(b, device=dev) < band_drop
-        pick = torch.where(kv, torch.rand(b, n, device=dev), torch.full((b, n), -1.0, device=dev)).argmax(1)
-        band_pick = positions[:, 1].gather(1, pick[:, None])
-        kv = kv & ~(drop[:, None] & (positions[:, 1] == band_pick))
-        few = kv.sum(1) < min_tokens
-        if few.any():
-            near = torch.where(real, dist, torch.full_like(dist, 1e9)).argsort(1).argsort(1) < min_tokens
-            kv = torch.where(few[:, None], near & real, kv)
-        out.append(kv)
-    return torch.stack(out)
-
-
 def forward_views(model: TokenJEPA, values, positions, pad, periods=None, n_glob=2, n_loc=4, keep=0.15,
                   local_span=(30.0, 80.0), band_drop=0.2, window=250.0, sig_max_n=4096):
     """The no-EMA multi-view loss (LeJEPA at the token level). Returns ``(pred, sigreg, spectral_aux, stats)``;
@@ -390,8 +336,8 @@ def forward_views(model: TokenJEPA, values, positions, pad, periods=None, n_glob
     def encode(kv):  # kv [m, b, n] -> per view-row packed outputs
         m = kv.shape[0]
         kk = kv.reshape(m * b, n)
-        order, vpad = _pack(kk)
-        vals, pos = _take(values.repeat(m, 1, 1), positions.repeat(m, 1, 1), order)
+        order, vpad = pack(kk)
+        vals, pos = take(values.repeat(m, 1, 1), positions.repeat(m, 1, 1), order)
         x = enc.embed(vals, pos)
         x, pos_c, pad_c = enc.add_cls(x, pos, vpad)
         x = enc.run_transformer(x, pos_c, pad_c, vals)
@@ -429,7 +375,7 @@ def forward_views(model: TokenJEPA, values, positions, pad, periods=None, n_glob
         cnt.scatter_add_(1, og[rows], w)
     has_t = cnt > 0
     T = zsum / cnt.clamp(min=1)[..., None]
-    qo, qpad = _pack(has_t)
+    qo, qpad = pack(has_t)
     q_pos = positions.gather(2, qo[:, None].expand(-1, positions.shape[1], -1))
     Tq = T.gather(1, qo[..., None].expand(-1, -1, D))
     # predictor from every view to every target position
@@ -448,23 +394,3 @@ def forward_views(model: TokenJEPA, values, positions, pad, periods=None, n_glob
         stats.update({f"period_{k}_global": v for k, v in hits(f_g).items()})
         stats.update({f"period_{k}_local": v for k, v in hits(f_l).items()})
     return l_pred, l_sig, aux, stats
-
-
-def jepa_state(model: TokenJEPA, spec, cfg, ladder, classes, args, step, metrics=None) -> dict:
-    """The stage-1 checkpoint of a token JEPA: ``mae_state``'s keys with
-    ``kind="jepa"`` and the key ``jepa`` (EMA schedule, loss, which encoder
-    is used downstream); :func:`project.common.load_mae` dispatches on ``kind``."""
-    return dict(
-        kind="jepa",
-        step=step,
-        args=dict(vars(args)) if isinstance(args, argparse.Namespace) else dict(args),
-        state_dict=model.state_dict(),
-        backbone=dict(model.hparams, encoder=asdict(model.cfg)),
-        mae=dict(decoder=asdict(model.dec_cfg), mask_ratio=model.mask_ratio, target_channels=model.target_channels),
-        jepa=model.jepa_hparams,
-        spec=spec.to_dict(),
-        frames=asdict(cfg),
-        ladder=ladder.to_dict(),
-        classes=list(classes),
-        metrics=metrics,
-    )

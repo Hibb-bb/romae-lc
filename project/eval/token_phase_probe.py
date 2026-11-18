@@ -28,8 +28,9 @@ encoder control).
         --out project/results/token_phase/maew_spec.json
 """
 import argparse, json, time, numpy as np, torch
-from project.common import data_args_from, load_data, load_encoder, superclass
-from project.cache_latents import WindowDataset, make_collate
+from project.checkpoint import load_encoder
+from project.data import data_args_from, load_data, superclass
+from project.windows import make_collate, WindowDataset
 from project.phase_probe import reference_phase
 from torch.utils.data import DataLoader, Subset
 

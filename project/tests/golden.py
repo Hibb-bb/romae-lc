@@ -6,7 +6,8 @@
 ``record`` writes the golden files to ``.golden/`` at the repo root (untracked). ``check`` runs the same
 things again and compares. Three parts:
 
-- ``flags``: each ICML run's flags resolve to the values in its ``args.json``.
+- ``flags``: each ICML run's recipe (``project/recipes/<run>.toml``, plus the run settings of the job
+  script) resolves to the values in its ``args.json``.
 - ``ckpt``: each trained ICML checkpoint loads and gives the same features, loss and prediction on one
   fixed token batch.
 - ``train``: short seeded toy runs of the live training paths give the same logged numbers, the same
@@ -50,42 +51,54 @@ FLAG_RUNS = CKPT_RUNS + ("enc_le1",)
 FLAGS_NOT_COMPARED: tuple[str, ...] = ()
 
 
+#: One recipe file per ICML run: ``RECIPES / f"{run}.toml"``.
+RECIPES = Path(__file__).resolve().parents[1] / "recipes"
+#: Run settings that the job script passes on the command line. They are not recipe keys. In the flags
+#: part they are taken from the recorded command line; every other flag must come from the recipe.
+LAUNCHER = ("out", "workers", "pin_memory", "eval_every", "ckpt_every", "time_budget", "wandb", "device")
+
+
 def train(argv: list[str]) -> None:
     """Run one pretraining job."""
-    from project import pretrain_mae
+    from project import train as script
 
-    pretrain_mae.main(argv)
+    script.main(argv)
 
 
 def load_encoder(ckpt):
     """``(frozen encoder, meta)`` from a checkpoint path or dict, on CPU."""
-    from project.common import load_encoder as f
+    from project.checkpoint import load_encoder as f
 
     return f(ckpt, "cpu")
 
 
 def flag_parser() -> argparse.ArgumentParser:
     """The training parser. ``record`` uses it to turn an ``args.json`` into a command line."""
-    from project import pretrain_mae
-    from project.common import add_data_args, add_frame_args, add_ladder_args, add_model_args
-    from project.tracking import add_wandb_args
+    from project.train import build_parser
 
-    p = argparse.ArgumentParser()
-    add_data_args(p)
-    add_frame_args(p)
-    add_ladder_args(p)
-    add_model_args(p)
-    pretrain_mae.add_train_args(p)
-    add_wandb_args(p)
-    return p
+    return build_parser()
+
+
+def launcher_flags(argv: list[str]) -> list[str]:
+    """The ``LAUNCHER`` flags of a recorded command line, with their values."""
+    out, keep = [], False
+    for tok in argv:
+        if tok.startswith("--"):
+            keep = tok[2:].replace("-", "_") in LAUNCHER
+        if keep:
+            out.append(tok)
+    return out
 
 
 def resolve_flags(run: str, argv: list[str]) -> dict:
-    """The resolved flags of one ICML run, as ``main`` would see them. Today: parse the recorded command
-    line ``argv``. From step 3 on: load the run's recipe file instead (``run`` names it)."""
-    from project.common import resolve_model_args
+    """The resolved flags of one ICML run, as ``main`` would see them: the run's recipe file plus the
+    launcher flags of the recorded command line ``argv``. With ``run == ""``: ``argv`` alone, no recipe."""
+    from project.backbone import resolve_model_args
+    from project.recipe import apply_recipe
 
-    return vars(resolve_model_args(flag_parser().parse_args(argv)))
+    if run:
+        argv = ["--recipe", str(RECIPES / f"{run}.toml")] + launcher_flags(argv)
+    return vars(resolve_model_args(apply_recipe(flag_parser(), argv)))
 
 
 #: Toy sizes shared by every training case (as in project/tests/test_jepa.py).

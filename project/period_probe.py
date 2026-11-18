@@ -18,7 +18,7 @@ Feature sets per object:
 
 - ``mean``: the mean of the object's valid window latents (``n_tokens >=
   meta.min_tokens``); ``meanmax``: the mean and the max over windows;
-- ``hand``: :func:`project.common.hand_features` of the record (no model);
+- ``hand``: :func:`project.probes.hand_features` of the record (no model);
 - ``multi`` (with ``--extra-latents``): the mean latent at several window
   lengths joined.
 
@@ -61,20 +61,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from project import fold
-from project.common import (
-    HEADLINE,
-    JsonlLog,
-    add_device_arg,
-    data_args_from,
-    dump_json,
-    fine_class,
-    get_device,
-    hand_features,
-    load_data,
-    load_encoder,
-    seed_all,
-    superclass,
-)
+from project.checkpoint import load_encoder
+from project.data import data_args_from, fine_class, load_data, superclass
+from project.probes import hand_features, HEADLINE
+from project.utils import add_device_arg, dump_json, get_device, JsonlLog, seed_all
 
 FEATURE_SETS = ("hand", "mean", "meanmax", "multi")
 REGRESSORS = ("ridge", "mlp", "bins", "joint", "winjoint")

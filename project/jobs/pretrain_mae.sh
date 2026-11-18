@@ -10,7 +10,7 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
-# Pretraining of the window encoder (project.pretrain_mae), as a chain
+# Pretraining of the window encoder (project.train), as a chain
 # of 2-hour interactive jobs, exactly like train_wm.sh (the successor is
 # queued at the START of every link; $OUT/DONE ends the chain and submits
 # the next stage, THEN or the first entry of PIPELINE, with $OUT/mae.pt as
@@ -23,7 +23,7 @@
 #   sbatch project/jobs/pretrain_mae.sh                  # window 250, 50k steps, dense ladder
 #   THEN=project/jobs/train_wm.sh sbatch --export=ALL,THEN=project/jobs/train_wm.sh project/jobs/pretrain_mae.sh
 #   THEN=project/jobs/cache_latents.sh sbatch --export=ALL,THEN=project/jobs/cache_latents.sh project/jobs/pretrain_mae.sh
-# Extra arguments go to project.pretrain_mae and are remembered in the checkpoint.
+# Extra arguments go to project.train and are remembered in the checkpoint.
 set -euo pipefail
 export HF_DATASETS_DISABLE_PROGRESS_BARS=1
 export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1
@@ -67,7 +67,7 @@ if [ "$LINK" -lt "$MAX_LINKS" ]; then
         "$SCRIPT" "$@" || true ) &
 fi
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
-python -m project.pretrain_mae --out "$OUT" \
+python -m project.train --out "$OUT" \
     --window "$WINDOW" --min-tokens 16 --max-tokens 256 \
     --steps 50000 --batch-size 64 --workers 8 --pin-memory \
     --eval-every 2500 --ckpt-every 500 --time-budget "$BUDGET" --wandb \

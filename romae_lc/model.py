@@ -113,7 +113,7 @@ class RoMAEBase(nn.Module):
         attn_pool: Learned queries of an attention-pooling head over the
             encoder's outputs (:class:`AttnPool`); 0 = none. When present it,
             not the CLS, makes the window vector (:class:`RoMAE` with
-            ``pool="attn"``, ``project.common.PooledEncoder``).
+            ``pool="attn"``, ``project.checkpoint.PooledEncoder``).
     """
 
     def __init__(

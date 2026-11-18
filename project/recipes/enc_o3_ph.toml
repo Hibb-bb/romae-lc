@@ -1,0 +1,5 @@
+# enc_o3_ph: enc_j1 continued for 20k steps with phase rope in the small predictor. No forecast tail.
+extends = "from_j1.toml"
+wandb_group = "option3"
+phase_rope = 4
+phase_freq = "local"

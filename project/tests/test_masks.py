@@ -1,4 +1,4 @@
-"""CPU tests of the masks of :mod:`project.mae_data` (stretches of time hidden
+"""CPU tests of the masks of :mod:`project.masks` (stretches of time hidden
 instead of single points); then the scripts end to end on the toy simulator."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from project.mae_data import block_mask, longest_gap, make_mask
+from project.masks import block_mask, longest_gap, make_mask
 
 MAE_ARGS = [
     "--data", "sim", "--n-sim", "48", "--width", "24", "--depth", "2",
@@ -66,14 +66,14 @@ def test_block_mask_hides_stretches():
 
 
 def test_pretrain_with_stretches_and_two_cache_lengths(tmp_path):
-    from project import cache_latents, period_probe, pretrain_mae
-    from project.common import load_encoder
+    from project import cache_latents, period_probe, train
+    from project.checkpoint import load_encoder
 
     out = tmp_path / "mae"
     common = MAE_ARGS + ["--out", str(out), "--mask-mode", "block", "--mask-blocks", "1", "3"]
-    pretrain_mae.main(common + ["--steps", "4"])
+    train.main(common + ["--steps", "4"])
     assert (out / "mae.pt").is_file()
-    pretrain_mae.main(common + ["--steps", "6"])  # resume keeps the settings
+    train.main(common + ["--steps", "6"])  # resume keeps the settings
     lines = [json.loads(l) for l in open(out / "log.jsonl")]
     evals = [l for l in lines if l["kind"] == "eval"]
     assert max(l["step"] for l in lines) == 6
@@ -137,7 +137,7 @@ def test_absolute_time_features():
 def test_block_position_and_blockplus():
     import torch
 
-    from project.mae_data import block_mask, make_mask
+    from project.masks import block_mask, make_mask
 
     torch.manual_seed(0)
     b, n = 3, 40

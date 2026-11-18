@@ -1,0 +1,4 @@
+# enc_o2_fcbig_ph: enc_o2_fcbig + phase rope in the predictor (the phase at the encoder's own frequency).
+extends = "enc_o2_fcbig.toml"
+phase_rope = 4
+phase_freq = "local"

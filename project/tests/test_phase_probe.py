@@ -23,9 +23,9 @@ MAE_ARGS = [
 def test_phase_error_and_probe(tmp_path):
     e = phase_probe.phase_error(np.array([0.1, 0.95, 0.5]), np.array([0.2, 0.05, 0.0]))
     assert np.allclose(e, [0.1, 0.1, 0.5])
-    from project import pretrain_mae
+    from project import train
 
-    pretrain_mae.main(MAE_ARGS + ["--steps", "2", "--out", str(tmp_path / "mae")])
+    train.main(MAE_ARGS + ["--steps", "2", "--out", str(tmp_path / "mae")])
     cache_latents.main(["--ckpt", str(tmp_path / "mae" / "mae.pt"), "--out", str(tmp_path / "latents.pt"), "--stride", "0.5",
                         "--device", "cpu", "--workers", "0", "--batch-size", "16"])  # fmt: skip
     out = tmp_path / "phase"
@@ -40,7 +40,8 @@ def test_phase_error_and_probe(tmp_path):
     # a latent that holds the phase is read by the ridge
     import argparse
 
-    from project.common import data_args_from, load_data, load_encoder
+    from project.checkpoint import load_encoder
+    from project.data import data_args_from, load_data
 
     cache = torch.load(tmp_path / "latents.pt", map_location="cpu", weights_only=False)
     _, meta = load_encoder(str(tmp_path / "mae" / "mae.pt"), "cpu")

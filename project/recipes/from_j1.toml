@@ -1,0 +1,5 @@
+# The enc_j1 recipe, warm-started from the enc_j1 checkpoint, 20k steps. Not a run by itself:
+# the enc_o2_* and enc_o3_* recipes extend it.
+extends = "enc_j1.toml"
+jepa_init = "project/runs/enc_j1/mae.pt"
+steps = 20000

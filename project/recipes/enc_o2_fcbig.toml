@@ -1,0 +1,5 @@
+# enc_o2_fcbig: enc_o2_fc + a big predictor (4 blocks, 384 wide).
+extends = "enc_o2_fc.toml"
+dec_width = 384
+dec_depth = 4
+dec_heads = 6

@@ -6,15 +6,15 @@ import numpy as np
 import pytest
 import torch
 
-from project import cache_latents, pretrain_mae
-from project.common import load_encoder
+from project import cache_latents, train
+from project.checkpoint import load_encoder
 from project.jepa import TokenJEPA
 from project.tests._args import MAE_ARGS
 
 
 def test_jepa_trains_saves_and_loads(tmp_path):
     out = tmp_path / "jepa"
-    pretrain_mae.main(MAE_ARGS + ["--jepa", "--mask-mode", "blockplus", "--steps", "3", "--out", str(out)])
+    train.main(MAE_ARGS + ["--jepa", "--mask-mode", "blockplus", "--steps", "3", "--out", str(out)])
     assert (out / "mae.pt").is_file() and (out / "DONE").is_file()
     enc, meta = load_encoder(str(out / "mae.pt"), "cpu")
     assert isinstance(enc.model, TokenJEPA) and enc.kind == "mae"
@@ -37,9 +37,9 @@ def test_jepa_trains_saves_and_loads(tmp_path):
 
 def test_jepa_hybrid_and_warm_start(tmp_path):
     mae = tmp_path / "mae"
-    pretrain_mae.main(MAE_ARGS + ["--steps", "2", "--out", str(mae)])
+    train.main(MAE_ARGS + ["--steps", "2", "--out", str(mae)])
     out = tmp_path / "jepa"
-    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-recon-weight", "0.5", "--jepa-init", str(mae / "mae.pt"), "--steps", "2", "--out", str(out)])
+    train.main(MAE_ARGS + ["--jepa", "--jepa-recon-weight", "0.5", "--jepa-init", str(mae / "mae.pt"), "--steps", "2", "--out", str(out)])
     enc, _ = load_encoder(str(out / "mae.pt"), "cpu")
     model = enc.model
     assert model.recon_head is not None and model.jepa_hparams["recon_weight"] == 0.5
@@ -57,7 +57,7 @@ def test_jepa_hybrid_and_warm_start(tmp_path):
 
 def test_jepa_projection(tmp_path):
     out = tmp_path / "proj"
-    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-proj", "8", "--jepa-proj-hidden", "16", "--steps", "3", "--out", str(out)])
+    train.main(MAE_ARGS + ["--jepa", "--jepa-proj", "8", "--jepa-proj-hidden", "16", "--steps", "3", "--out", str(out)])
     enc, _ = load_encoder(str(out / "mae.pt"), "cpu")
     model = enc.model
     assert model.proj is not None and model.jepa_hparams["proj_dim"] == 8
@@ -72,7 +72,7 @@ def test_jepa_projection(tmp_path):
 def test_jepa_no_ema_views(tmp_path):
     """LeJEPA at the token level: no EMA, SIGReg, 2 global + 4 local views, spectral aux, phase rope."""
     out = tmp_path / "noema"
-    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-no-ema", "--jepa-proj", "16", "--jepa-proj-hidden", "16", "--sig-slices", "64",
+    train.main(MAE_ARGS + ["--jepa", "--jepa-no-ema", "--jepa-proj", "16", "--jepa-proj-hidden", "16", "--sig-slices", "64",
                                   "--spectral", "--spectral-aux", "0.5", "--phase-rope", "1", "--dec-width", "48", "--n-frames", "1", "--mask-ratio", "0.85",
                                   "--view-keep", "0.3", "--local-span", "1", "3", "--steps", "3", "--out", str(out)])
     enc, _ = load_encoder(str(out / "mae.pt"), "cpu")
@@ -97,10 +97,10 @@ def test_jepa_no_ema_views(tmp_path):
 def test_resume_refuses_removed_options():
     """A checkpoint saved with flags that this code no longer has resumes when they were off, and is refused when one was on."""
     old = dict(dyn=0, bottleneck=False, encoder="transformer", target="obs", window_range=None, mask_mode="blockplus", dyn_weight=1.0)
-    pretrain_mae.check_resumable(dict(kind="jepa", args=old))
-    pretrain_mae.check_resumable(dict(args={}))  # a plain masked autoencoder has no kind
+    train.check_resumable(dict(kind="jepa", args=old))
+    train.check_resumable(dict(args={}))  # a plain masked autoencoder has no kind
     for bad in (dict(dyn=4), dict(bottleneck=True), dict(mask_mode="mix"), dict(window_range=[20.0, 80.0])):
         with pytest.raises(SystemExit, match="pre-cleanup"):
-            pretrain_mae.check_resumable(dict(kind="jepa", args=dict(old, **bad)))
+            train.check_resumable(dict(kind="jepa", args=dict(old, **bad)))
     with pytest.raises(SystemExit, match="pre-cleanup"):
-        pretrain_mae.check_resumable(dict(kind="gruode", args=old))
+        train.check_resumable(dict(kind="gruode", args=old))

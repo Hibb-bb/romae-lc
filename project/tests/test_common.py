@@ -1,4 +1,4 @@
-"""CPU tests of project/common.py on the toy simulator (seconds each): the error
+"""CPU tests of the shared modules (data, windows, backbone, checkpoint, probes) on the toy simulator (seconds each): the error
 channel and the collate, the window grid, the data args, the dense rotary ladder,
 the backbone layout and the probe metrics."""
 
@@ -13,14 +13,8 @@ import torch
 from romae_lc import FrameConfig
 from romae_lc.data import SimConfig, SurveyConfig, normalize, simulate
 
-from project.common import (
-    TokenSpec,
-    data_args_from,
-    err_channel,
-    err_stats,
-    grid_starts,
-    subset,
-)
+from project.data import data_args_from, subset
+from project.windows import err_channel, err_stats, grid_starts, TokenSpec
 
 SURVEYS = (SurveyConfig("g", 480.7, 160, 0.05), SurveyConfig("r", 622.1, 120, 0.06))
 SIM = SimConfig(baseline_days=400.0, logP_range=(-0.3, 1.0))
@@ -98,15 +92,7 @@ def test_data_args_from():
 
 
 def test_dense_ladder_dealing_and_geometry():
-    from project.common import (
-        Ladder,
-        RopeGeometry,
-        _nest,
-        check_ladder,
-        deal_ladder,
-        resolve_model_args,
-        rope_geometry,
-    )
+    from project.backbone import check_ladder, deal_ladder, Ladder, _nest, resolve_model_args, rope_geometry, RopeGeometry
 
     w = np.geomspace(0.1, 100.0, 12)
     bands = np.array(deal_ladder(w, 2, 2, 3, "bands"))
@@ -183,7 +169,7 @@ def test_dense_ladder_dealing_and_geometry():
 def test_dense_backbone_layout(records, spec):
     from romae_lc import RoMAE
 
-    from project.common import dense_ladder, encoder_config, rope_geometry, rope_layouts
+    from project.backbone import dense_ladder, encoder_config, rope_geometry, rope_layouts
 
     def build_backbone(args, ladder, n_channels):
         return RoMAE(encoder=encoder_config(args), n_channels=n_channels, n_axes=2, rope=rope_layouts(args, ladder))
@@ -216,15 +202,7 @@ def test_dense_backbone_layout(records, spec):
 
 
 def test_probe_metrics_and_baseline(records):
-    from project.common import (
-        balanced_accuracy,
-        baseline_probe,
-        describe_by_class,
-        describe_probe,
-        hand_features,
-        macro_f1,
-        probe_metrics,
-    )
+    from project.probes import balanced_accuracy, baseline_probe, describe_by_class, describe_probe, hand_features, macro_f1, probe_metrics
 
     y, pred = np.array([0, 0, 0, 1, 1, 2]), np.array([0, 0, 1, 1, 1, 0])
     assert macro_f1(y, pred) == pytest.approx((4 / 6 + 4 / 5 + 0.0) / 3)

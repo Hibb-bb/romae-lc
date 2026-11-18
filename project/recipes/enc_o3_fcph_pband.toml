@@ -1,0 +1,5 @@
+# enc_o3_fcph_pband: enc_o3_fcph with a phase band hidden (0.1 to 0.3 cycles of the catalogue period,
+# training only), then random points up to 50 %.
+extends = "enc_o3_fcph.toml"
+mask_mode = "phaseband"
+phase_band = [0.1, 0.3]

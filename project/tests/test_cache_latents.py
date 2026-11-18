@@ -1,5 +1,5 @@
 """CPU tests of the latent cache (project/cache_latents.py) on the toy simulator: a
-tiny autoencoder (``pretrain_mae``, 4 steps) is trained once per module and its window
+tiny autoencoder (``project.train``, 4 steps) is trained once per module and its window
 grid is cached. The tests check the layout of the cache, the window starts and
 ``--max-objects`` / ``--seed``."""
 
@@ -12,8 +12,10 @@ import pytest
 import torch
 
 from project import cache_latents
-from project.cache_latents import object_windows
-from project.common import data_args_from, grid_starts, load_data, load_encoder
+from project.windows import object_windows
+from project.checkpoint import load_encoder
+from project.data import data_args_from, load_data
+from project.windows import grid_starts
 from project.tests._args import MAE_ARGS
 
 STRIDE = 0.5
@@ -27,10 +29,10 @@ def seed():
 
 @pytest.fixture(scope="module")
 def mae_ckpt(tmp_path_factory):
-    from project import pretrain_mae
+    from project import train
 
     out = tmp_path_factory.mktemp("mae")
-    pretrain_mae.main(MAE_ARGS + ["--steps", "4", "--out", str(out)])
+    train.main(MAE_ARGS + ["--steps", "4", "--out", str(out)])
     assert (out / "mae.pt").is_file()
     return out / "mae.pt"
 

@@ -1,0 +1,20 @@
+# enc_j1: the first token JEPA. EMA target, loss in a 32-number projection, plus a reconstruction head.
+# Trained from scratch for 50k steps. Every enc_o2_* and enc_o3_* run starts from its mae.pt.
+#
+# NOTE: this run predates the current code. Its mae.pt is a fixed artifact: use the file as it is, and do
+# not expect a new run of this recipe to give the same weights.
+extends = "base.toml"
+wandb_group = "jepa_aux"
+
+[jepa]
+jepa_proj = 32
+jepa_recon_weight = 0.5
+
+[mask]
+mask_mode = "blockplus" # one hidden stretch plus random points
+mask_ratio = 0.5
+mask_block_share = 0.5
+
+[train]
+steps = 50000
+batch_size = 64

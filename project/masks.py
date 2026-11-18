@@ -11,7 +11,8 @@ one stretch is a 125 d gap, in six stretches about 20 d each).
 
 :func:`make_mask` picks between random points, stretches, and one stretch
 plus random points (``blockplus``). :func:`phase_band_mask` hides a band of
-phases of the catalogue period (training only).
+phases of the catalogue period (training only). :func:`forecast_tail_mask`
+also hides the last days of a window (``--forecast-tail``).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Sequence
 import torch
 
 from romae_lc.model import gen_mask
+
 
 MASK_MODES = ("random", "block", "blockplus", "phaseband")  # phaseband: phase_band_mask (needs the period)
 
@@ -176,3 +178,23 @@ def phase_band_mask(
     pad_extra = tot.max() - tot
     idx = torch.arange(n, device=dev)[None, :]
     return mask | (idx >= (n - pad_extra)[:, None])
+
+
+def forecast_tail_mask(mask, t_days, pad, window, h_range, share=1.0):
+    """``--forecast-tail``: hide every real token in the last ``H`` days of each window (``H`` uniform in
+    ``h_range`` per row; a ``share`` of the rows), keeping the same hidden count in every row, as the JEPA
+    forward needs. Per row the hidden set is the tail first, then the tokens ``mask`` already hid, then random
+    others (padding first), up to ``k``, the largest union of tail and ``mask`` over the rows. Returns ``(mask, share of hidden real tokens
+    that are tail)``."""
+    b, n = mask.shape
+    lo, hi = h_range
+    h = lo + (hi - lo) * torch.rand(b, device=mask.device)
+    on = torch.rand(b, device=mask.device) < share
+    tail = (~pad) & (t_days > (float(window) - h)[:, None]) & on[:, None]
+    k = min(int((mask | tail).sum(1).max()), n - 1)
+    # priority: the tail, then what mask hid, then padding (filler that costs no real token), then other real tokens
+    score = torch.rand(b, n, device=mask.device) + 1.0 * pad.float() + 2.0 * mask.float() + 4.0 * tail.float()
+    idx = score.topk(k, dim=1).indices
+    out = torch.zeros_like(mask).scatter_(1, idx, True)
+    hid_real = (out & ~pad).sum().clamp(min=1)
+    return out, float((out & tail).sum() / hid_real)

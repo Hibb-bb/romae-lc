@@ -1,0 +1,3 @@
+# enc_o3_fcph80: enc_o3_fcph with 80 % of the tokens hidden.
+extends = "enc_o3_fcph.toml"
+mask_ratio = 0.8

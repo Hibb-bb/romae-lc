@@ -1,0 +1,29 @@
+# enc_le1: LeJEPA at the token level, from scratch. One encoder, no EMA, no reconstruction.
+# SIGReg on a 16-number projection of the token latents. Each window gives 2 global and 4 local views;
+# every view predicts the mean of the global views' latents.
+# 200 epochs = 200 x 42,871 stars / 256 stars per step = 33,500 steps.
+extends = "base.toml"
+wandb_group = "lejepa"
+
+[jepa]
+jepa_no_ema = true
+jepa_proj = 16
+sig_lambda = 0.05       # loss = 0.95 prediction + 0.05 SIGReg (+ spectral aux)
+sig_slices = 1024
+phase_rope = 4
+phase_freq = "local"
+
+[views]
+views = [2, 4]          # global, local
+view_keep = 0.15        # share of the window's tokens in each view
+local_span = [30.0, 80.0]  # days
+band_drop = 0.2
+
+[mask]
+mask_mode = "random"    # only the validation loss uses the mask
+mask_ratio = 0.85
+
+[train]
+n_frames = 1            # one window per star per step
+batch_size = 256
+steps = 33500

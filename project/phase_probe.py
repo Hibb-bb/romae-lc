@@ -31,7 +31,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from project.common import add_device_arg, data_args_from, dump_json, get_device, load_data, load_encoder, superclass
+from project.checkpoint import load_encoder
+from project.data import data_args_from, load_data, superclass
+from project.utils import add_device_arg, dump_json, get_device
 
 HEADLINE = ("ECL", "RR", "ROT", "CEP", "DSCT", "LPV")
 

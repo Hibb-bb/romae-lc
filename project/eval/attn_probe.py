@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from project.common import ANOMALY_CLASSES, data_args_from, load_data
+from project.data import ANOMALY_CLASSES, data_args_from, load_data
 from project.period_probe import object_table
 
 

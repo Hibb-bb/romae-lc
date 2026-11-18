@@ -5,17 +5,17 @@ window with ``D`` the width. This script lays a grid of windows over every
 record of every split (``--stride`` window lengths between consecutive window
 starts, the window length and token bounds from the checkpoint's
 :class:`~romae_lc.FrameConfig`), encodes every window once through
-:func:`project.common.load_encoder` and writes them to one ``latents.pt``.
+:func:`project.checkpoint.load_encoder` and writes them to one ``latents.pt``.
 The probes read that file (:mod:`project.period_probe`,
 :mod:`project.eval.attn_probe`, :mod:`project.eval.classify_rf`).
 
 Windows are cut with :func:`~romae_lc.frame_grid` (``fill=True``: every
 window that fits, sparse or empty ones included, so a reader can skip them
 by ``n_tokens``) and their starts agree with
-:func:`project.common.grid_starts` by construction (asserted once). A window
+:func:`project.windows.grid_starts` by construction (asserted once). A window
 above ``--cap`` points is subsampled deterministically (one rng per object
 seeded from ``(seed, record index)``, applied to the windows in order), so
-:func:`object_windows` reproduces any stored row.
+:func:`project.windows.object_windows` reproduces any stored row.
 
 The file is one dict:
 
@@ -52,135 +52,16 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
-from romae_lc import FrameConfig, Record, frame_grid
-
-from project.common import (
-    TokenSpec,
-    add_device_arg,
-    data_args_from,
-    dump_json,
-    get_device,
-    grid_starts,
-    load_data,
-    load_encoder,
-    subsample_frame,
-    superclass,
-)
-
-
-def object_windows(
-    record: Record, cfg: FrameConfig, stride: float, cap: int | None, seed: int, index: int
-):
-    """The grid windows of one record as the cache stores them: ``(starts
-    float64 [K], frames, n_tokens int [K])`` with ``frames`` the ``K``
-    ``(t, y, band, err)`` windows after the deterministic cap (rng seeded
-    from ``(seed, index)``) and
-    ``n_tokens`` their point counts before it."""
-    starts = grid_starts(record, cfg, advance=stride)
-    frames, _ = frame_grid(record, cfg, advance=stride, fill=True)
-    if len(frames) != len(starts):
-        raise AssertionError(
-            f"frame_grid gave {len(frames)} windows, grid_starts {len(starts)}"
-        )
-    n_tokens = [len(f[0]) for f in frames]
-    if cap is not None:
-        rng = np.random.default_rng([seed, index])
-        frames = [subsample_frame(f, cap, rng) for f in frames]
-    return starts, frames, n_tokens
-
-
-class WindowDataset(Dataset):
-    """Every window of every object of every split as one flat index. An
-    item is ``(split_i, obj_i, win)`` resolved lazily: the object's grid is
-    cut once and kept while consecutive items address it (the sampler is
-    sequential, so a worker's batch mostly hits one or two objects)."""
-
-    def __init__(
-        self,
-        splits: list[tuple[str, list[Record], list[int]]],
-        cfg,
-        stride,
-        cap,
-        seed,
-    ):
-        self.splits, self.cfg, self.stride, self.cap, self.seed = (
-            splits,
-            cfg,
-            stride,
-            cap,
-            seed,
-        )
-        self.counts = []  # windows per object, per split
-        self.offsets = []  # first flat index of every object, per split
-        total = 0
-        for _, records, _ in splits:
-            n = np.array(
-                [len(grid_starts(r, cfg, advance=stride)) for r in records],
-                dtype=np.int64,
-            )
-            self.counts.append(n)
-            self.offsets.append(total + np.concatenate([[0], np.cumsum(n)]))
-            total += int(n.sum())
-        self.total = total
-        self._key, self._cached = None, None
-
-    def __len__(self) -> int:
-        return self.total
-
-    def locate(self, i: int) -> tuple[int, int, int]:
-        """``(split_i, obj_i, win)`` of flat index ``i``."""
-        for s, off in enumerate(self.offsets):
-            if i < off[-1]:
-                o = int(np.searchsorted(off, i, side="right") - 1)
-                return s, o, int(i - off[o])
-        raise IndexError(i)
-
-    def windows(self, s: int, o: int):
-        if self._key != (s, o):
-            _, records, indices = self.splits[s]
-            self._cached = object_windows(
-                records[o], self.cfg, self.stride, self.cap, self.seed, indices[o]
-            )
-            self._key = (s, o)
-        return self._cached
-
-    def __getitem__(self, i: int) -> dict:
-        widx = int(i)
-        s, o, w = self.locate(widx)
-        starts, frames, n_tokens = self.windows(s, o)
-        frame = frames[w]
-        return dict(
-            widx=widx,  # the flat window index (the cache row)
-            split=s,
-            obj=self.splits[s][2][o],  # the data[split] position, not the subset's
-            win=w,
-            start=float(starts[w]),
-            n_tokens=int(n_tokens[w]),
-            frame=frame,
-        )
-
-
-def make_collate(spec: TokenSpec):
-    """Tokenise a list of single windows into one padded batch."""
-
-    def collate(items: list[dict]) -> dict:
-        return dict(
-            tokens=spec.tokens([it["frame"] for it in items]),
-            widx=torch.tensor([it["widx"] for it in items], dtype=torch.int64),
-            split=torch.tensor([it["split"] for it in items], dtype=torch.int64),
-            obj=torch.tensor([it["obj"] for it in items], dtype=torch.int64),
-            win=torch.tensor([it["win"] for it in items], dtype=torch.int64),
-            start=torch.tensor([it["start"] for it in items], dtype=torch.float32),
-            n_tokens=torch.tensor([it["n_tokens"] for it in items], dtype=torch.int64),
-        )
-
-    return collate
+from project.checkpoint import load_encoder
+from project.data import data_args_from, load_data, superclass
+from project.utils import add_device_arg, dump_json, get_device
+from project.windows import WindowDataset, make_collate
 
 
 def _pick(n_records: int, n: int | None, seed: int) -> list[int]:
-    """The record positions :func:`project.common.subset` keeps (same rng)."""
+    """The record positions :func:`project.data.subset` keeps (same rng)."""
     if n is None or n >= n_records:
         return list(range(n_records))
     return np.sort(np.random.default_rng(seed).choice(n_records, n, replace=False)).tolist()

@@ -1,0 +1,17 @@
+# What every ICML run shares. Not a run by itself: the run recipes extend it.
+# Keys are the flags of project/train.py ("--mask-ratio" is "mask_ratio"). The [headers] are only for reading.
+# Run settings (--out, --workers, --pin-memory, --eval-every, --ckpt-every, --time-budget, --wandb) are not
+# recipe keys: the job script passes them.
+
+[data]
+window = 250.0          # days per window
+min_tokens = 16
+max_tokens = 256
+
+[model]
+size = "wide"           # 384 wide, 6 heads, 6 blocks
+spectral = true         # the spectral layer in the encoder
+spectral_aux = 0.5      # its loss against the catalogue period (training target only)
+
+[jepa]
+jepa = true             # predict latents of hidden tokens, not their values
