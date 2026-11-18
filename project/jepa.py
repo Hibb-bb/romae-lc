@@ -409,8 +409,8 @@ def forward_views(model: TokenJEPA, values, positions, pad, periods=None, n_glob
         return dict(hit2=float((rel < 0.02).float().mean()), hit10=float((rel < 0.1).float().mean()))
     tok_g = xg[:, 1:] if enc.use_cls else xg
     tok_l = xl[:, 1:] if enc.use_cls else xl
-    zg = model.proj(tok_g.float())  # [G b, kg, D]
-    zl = model.proj(tok_l.float())
+    zg = model.proj(tok_g.float()).float()  # [G b, kg, D]; float32 under autocast too
+    zl = model.proj(tok_l.float()).float()
     D = zg.shape[-1]
     # targets in the window layout: the mean of the global views' projected latents
     zsum = zg.new_zeros(b, n, D)
@@ -429,7 +429,7 @@ def forward_views(model: TokenJEPA, values, positions, pad, periods=None, n_glob
     preds = []
     for x, pc, padc, m in ((xg, pg, padg, n_glob), (xl, pl, padl, n_loc)):
         hid = model._decode(x, pc, padc, q_pos.repeat(m, 1, 1), qpad.repeat(m, 1), None if f is None else f.repeat(m))
-        preds.append(model.proj(enc.head(hid).float()))
+        preds.append(model.proj(enc.head(hid).float()).float())
     pred = torch.cat(preds).view(V, b, -1, D)
     w = (~qpad).float()
     l_pred = (((pred - Tq[None]) ** 2).mean(-1) * w[None]).sum() / (w.sum() * V).clamp(min=1)

@@ -139,6 +139,10 @@ def test_jepa_no_ema_views(tmp_path):
     l_pred, l_sig, l_aux, st = forward_views(model, values, positions, torch.zeros(2, 12, dtype=torch.bool), torch.tensor([0.7, 3.0]),
                                              keep=0.3, local_span=(1.0, 3.0), window=5.0)
     assert torch.isfinite(l_pred) and torch.isfinite(l_sig) and torch.isfinite(l_aux) and st["target_share"] > 0 and "period_hit10_global" in st
+    with torch.autocast("cpu", dtype=torch.bfloat16):  # the GPU run trains under autocast (job 3615321 failed here)
+        l_pred, l_sig, _, _ = forward_views(model, values, positions, torch.zeros(2, 12, dtype=torch.bool), torch.tensor([0.7, 3.0]),
+                                            keep=0.3, local_span=(1.0, 3.0), window=5.0)
+    assert torch.isfinite(l_pred) and torch.isfinite(l_sig)
     with torch.no_grad():
         o = model(values, positions)
     assert o.pred.shape[-1] == 16 and torch.isfinite(o.loss)
