@@ -8,7 +8,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96g
 #SBATCH --time=12:00:00
-#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 # Stage 1 (the autoencoder): masked pretraining of the window encoder, or the

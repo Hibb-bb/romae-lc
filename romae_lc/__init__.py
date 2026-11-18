@@ -2,9 +2,7 @@
 
 Continuous rotary transformers for asynchronous multi-band light curves, with
 axial p-RoPE and nD-RoPE position encodings, softmax or linear attention, and
-three pretraining frameworks: masked autoencoding
-(:class:`RoMAEForPreTraining`), LeJEPA (:class:`LeJEPA`) and LeWorldModel
-(:class:`LeWorldModel`).
+masked-autoencoding pretraining (:class:`RoMAEForPreTraining`).
 """
 
 from .analysis import (
@@ -51,15 +49,6 @@ from .frames import (
     frame_grid,
     sample_frames,
 )
-from .lejepa import LeJEPA, LeJEPAOutput, SlicedEppsPulley, mlp
-from .lewm import (
-    ActionEncoder,
-    ARPredictor,
-    LeWMOutput,
-    LeWorldModel,
-    lewm_mlp,
-    straightness,
-)
 from .model import (
     MAEOutput,
     MaskedDecoder,
@@ -84,8 +73,6 @@ from .tokenize import BAND_WAVELENGTHS_NM, Tokens, tokenize, wavelengths_for
 from .transformer import SIZES, Transformer, TransformerConfig, attention_mask
 
 __all__ = [
-    "ARPredictor",
-    "ActionEncoder",
     "AxialRope",
     "BAND_WAVELENGTHS_NM",
     "BlockRope",
@@ -93,10 +80,6 @@ __all__ = [
     "DEFAULT_SURVEYS",
     "FrameConfig",
     "FrameDataset",
-    "LeJEPA",
-    "LeJEPAOutput",
-    "LeWMOutput",
-    "LeWorldModel",
     "LightCurveDataset",
     "MAEOutput",
     "MaskedDecoder",
@@ -111,7 +94,6 @@ __all__ = [
     "SIZES",
     "SimConfig",
     "SimplexRope",
-    "SlicedEppsPulley",
     "SurveyConfig",
     "TimeEncodingReport",
     "Tokens",
@@ -127,13 +109,11 @@ __all__ = [
     "gen_mask",
     "ladder_rows",
     "layout",
-    "lewm_mlp",
     "load_pc",
     "load_phoebe",
     "make_views",
     "min_axial_dim",
     "min_simplex_scales",
-    "mlp",
     "nd_rope_theta_bound",
     "normalize",
     "periodogram",
@@ -147,7 +127,6 @@ __all__ = [
     "sampling_stats",
     "simulate",
     "spectral_support",
-    "straightness",
     "suggest_time_encoding",
     "time_encoding",
     "time_series",

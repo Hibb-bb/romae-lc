@@ -11,8 +11,7 @@ The catalogue period only picks stars that have one (evaluation only); the model
 
     python -m project.eval.jepa_forecast_demo --ckpt project/runs/enc_o2_fcbig_ph/mae.pt --out project/results/figures/jepa_forecast_demo
 """
-import argparse, os, sys
-sys.path.insert(0, "/projects/bfrf/hibb/romae-lc")
+import argparse, os
 import numpy as np
 import torch
 

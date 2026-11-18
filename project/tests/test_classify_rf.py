@@ -6,7 +6,7 @@ import json
 
 from project import cache_latents, pretrain_mae
 from project.eval import classify_rf as cr
-from project.tests.test_ls_benchmark import MAE_ARGS
+from project.tests._args import MAE_ARGS
 
 
 def test_classify_rf(tmp_path):

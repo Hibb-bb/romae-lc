@@ -8,7 +8,6 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=96g
 #SBATCH --time=02:00:00
-#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 # Fine-class classification with a random forest on frozen features, the collaborators' protocol (project.eval.classify_rf).

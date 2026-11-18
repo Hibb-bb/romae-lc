@@ -34,10 +34,8 @@ from romae_lc import (
     CLASSES,
     DEFAULT_SURVEYS,
     PC_BANDS,
-    ARPredictor,
     FrameConfig,
     FrameDataset,
-    LeWorldModel,
     Record,
     RoMAE,
     RoMAEForPreTraining,
@@ -45,7 +43,6 @@ from romae_lc import (
     collapse_layout,
     collate_frames,
     frame_grid,
-    lewm_mlp,
     load_pc,
     normalize,
     resample_ladder,
@@ -57,6 +54,7 @@ from romae_lc import (
     wavelengths_for,
 )
 from romae_lc import layout as rope_layout
+from romae_lc.lewm import ARPredictor, LeWorldModel, lewm_mlp
 from romae_lc.model import pool_tokens
 
 DATA_ROOT = "/projects/bfrf/data/PC_matches/ZTFxPC"

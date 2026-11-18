@@ -28,8 +28,7 @@ without a catalogue period are skipped.
 
     python -m project.eval.jepa_forecast_probe --ckpts project/runs/enc_p1_fc/mae.pt --out project/results/jepa_forecast/enc_p1_fc.json
 """
-import sys, argparse, json, os, time, numpy as np, torch
-sys.path.insert(0, "/projects/bfrf/hibb/romae-lc")
+import argparse, json, os, time, numpy as np, torch
 from project.common import data_args_from, load_data, load_encoder
 from project.cache_latents import WindowDataset, make_collate
 from project.pretrain_mae import forecast_tail_mask

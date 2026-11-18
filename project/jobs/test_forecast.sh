@@ -8,7 +8,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=110g
 #SBATCH --time=08:00:00
-#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 # Forecast tests on EVERY test star (non-overlapping windows; latent decoder fitted on 1,000 validation stars):

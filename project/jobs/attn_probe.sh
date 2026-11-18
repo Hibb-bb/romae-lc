@@ -8,7 +8,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=120g
 #SBATCH --time=03:00:00
-#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 # Star-level attentive probe (project.eval.attn_probe) of one encoder's cached window latents.

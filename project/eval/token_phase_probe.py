@@ -27,8 +27,7 @@ encoder control).
     python -m project.eval.token_phase_probe --ckpts project/runs/maew_spec/mae.pt --random-init \
         --out project/results/token_phase/maew_spec.json
 """
-import sys, argparse, json, time, numpy as np, torch
-sys.path.insert(0, "/projects/bfrf/hibb/romae-lc")
+import argparse, json, time, numpy as np, torch
 from project.common import data_args_from, load_data, load_encoder, superclass
 from project.cache_latents import WindowDataset, make_collate
 from project.phase_probe import reference_phase

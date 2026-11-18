@@ -18,7 +18,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=120g
 #SBATCH --time=02:00:00
-#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1

@@ -8,7 +8,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=110g
 #SBATCH --time=00:45:00
-#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 # Forecast examples (folded at the catalogue period for display) of enc_o2_fcbig_ph and enc_o3_fcph_pband, 30 and 60 days hidden.

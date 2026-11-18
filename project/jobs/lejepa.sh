@@ -8,7 +8,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=110g
 #SBATCH --time=24:00:00
-#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 # Phase 2 (11-16, the user's run after talking with Randall Balestriero): LeJEPA at the TOKEN level, from scratch.

@@ -8,7 +8,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=110g
 #SBATCH --time=06:00:00
-#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 # ICML plan, Phase 1, option 2 (11-06): make the masked JEPA predictor forecast. Every run warm-starts from J1

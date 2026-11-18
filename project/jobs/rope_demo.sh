@@ -8,7 +8,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=110g
 #SBATCH --time=01:30:00
-#SBATCH --chdir=/projects/bfrf/hibb/romae-lc
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
 # Forecast examples of J1 + phase rope (enc_o2_fcbig_ph) as light curves (30 and 60 days hidden), and the tail

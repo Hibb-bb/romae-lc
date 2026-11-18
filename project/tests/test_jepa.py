@@ -8,7 +8,7 @@ import torch
 from project import cache_latents, pretrain_mae
 from project.common import load_encoder
 from project.jepa import TokenJEPA
-from project.tests.test_ls_benchmark import MAE_ARGS
+from project.tests._args import MAE_ARGS
 
 
 def test_jepa_trains_saves_and_loads(tmp_path):
