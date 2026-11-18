@@ -1,4 +1,4 @@
-"""CPU tests of the latent cache (project/cache_latents.py) on the toy simulator: a
+"""CPU tests of the latent cache (project/eval/encode.py) on the toy simulator: a
 tiny autoencoder (``project.train``, 4 steps) is trained once per module and its window
 grid is cached. The tests check the layout of the cache, the window starts and
 ``--max-objects`` / ``--seed``."""
@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from project import cache_latents
+from project.eval import encode
 from project.windows import object_windows
 from project.checkpoint import load_encoder
 from project.data import data_args_from, load_data
@@ -40,7 +40,7 @@ def mae_ckpt(tmp_path_factory):
 @pytest.fixture(scope="module")
 def latents(mae_ckpt):
     out = mae_ckpt.parent / "latents.pt"
-    cache_latents.main(
+    encode.main(
         [
             "--ckpt", str(mae_ckpt), "--out", str(out), "--stride", str(STRIDE),
             "--device", "cpu", "--workers", "0", "--batch-size", "16",
@@ -103,7 +103,7 @@ def test_cache_max_objects_and_seed(latents, mae_ckpt):
     # position (what objects[split]["index"] holds), and --seed picks the
     # subset and the cap only: the records stay the checkpoint's.
     out = mae_ckpt.parent / "latents_sub.pt"
-    cache_latents.main(
+    encode.main(
         [
             "--ckpt", str(mae_ckpt), "--out", str(out), "--stride", str(STRIDE),
             "--splits", "train", "--max-objects", "5", "--seed", "3",

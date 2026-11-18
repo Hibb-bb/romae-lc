@@ -7,7 +7,8 @@ starts, the window length and token bounds from the checkpoint's
 :class:`~romae_lc.FrameConfig`), encodes every window once through
 :func:`project.checkpoint.load_encoder` and writes them to one ``latents.pt``.
 The probes read that file (:mod:`project.period_probe`,
-:mod:`project.eval.attn_probe`, :mod:`project.eval.classify_rf`).
+:mod:`project.eval.card_class`, :mod:`project.eval.card_period`,
+:mod:`project.eval.classify_rf`).
 
 Windows are cut with :func:`~romae_lc.frame_grid` (``fill=True``: every
 window that fits, sparse or empty ones included, so a reader can skip them
@@ -38,8 +39,8 @@ The file is one dict:
 
 A ``latents.json`` next to it repeats the meta with the counts.
 
-    python -m project.cache_latents --ckpt project/runs/enc_j1/mae.pt
-    python -m project.cache_latents --ckpt project/runs/enc_j1/mae.pt \\
+    python -m project.eval.encode --ckpt project/runs/enc_j1/mae.pt
+    python -m project.eval.encode --ckpt project/runs/enc_j1/mae.pt \\
         --out project/runs/enc_j1/latents_test.pt --splits test
 """
 

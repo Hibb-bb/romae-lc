@@ -313,7 +313,7 @@ class TokenJEPA(nn.Module):
             loss_recon = (F.mse_loss(recon, values_hidden, reduction="none") * real).sum() / real.sum().clamp_min(1e-8)
             loss = loss + self.recon_weight * loss_recon
             self.last_stats_recon = float(loss_recon.detach())
-            self.last_recon = recon.detach()  # the magnitude at the hidden spots, for project.eval.jepa_forecast_probe
+            self.last_recon = recon.detach()  # the magnitude at the hidden spots, for project.eval.card_forecast
         with torch.no_grad():  # collapse watch: the spread of the targets and the predictions across tokens
             self.last_stats = dict(target_std=float(target[real[..., 0] > 0].std(0).mean()), pred_std=float(pred[real[..., 0] > 0].std(0).mean()))
             if self.recon_head is not None:

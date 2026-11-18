@@ -66,7 +66,8 @@ def test_block_mask_hides_stretches():
 
 
 def test_pretrain_with_stretches_and_two_cache_lengths(tmp_path):
-    from project import cache_latents, period_probe, train
+    from project import period_probe, train
+    from project.eval import encode
     from project.checkpoint import load_encoder
 
     out = tmp_path / "mae"
@@ -85,7 +86,7 @@ def test_pretrain_with_stretches_and_two_cache_lengths(tmp_path):
 
     # the same encoder cached at two window lengths, joined in the period probe
     for w in (30, 60):
-        cache_latents.main(
+        encode.main(
             ["--ckpt", str(out / "mae.pt"), "--out", str(tmp_path / f"lat{w}.pt"), "--window", str(w),
              "--stride", "0.5", "--device", "cpu", "--workers", "0", "--batch-size", "16"]  # fmt: skip
         )

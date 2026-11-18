@@ -3,7 +3,7 @@ Lomb-Scargle, with the failure cases mined.
 
 The question: why is the period still not fully learnable from the stage-1
 latents, and where does it fail? The script pools the cached window latents
-of every object (``cache_latents.py``), fits regressors
+of every object (``project/eval/encode.py``), fits regressors
 on log10 period (train split) and scores them on the validation split with
 the numbers astronomers use (the share of objects whose period is recovered
 within 1 % and 10 %, the alias rate at 2 P and P / 2, the residual scatter in
@@ -87,7 +87,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--latents", required=True, help="latents.pt of cache_latents")
+    p.add_argument("--latents", required=True, help="latents.pt of project.eval.encode")
     p.add_argument("--out", required=True, help="output directory")
     p.add_argument(
         "--extra-latents",

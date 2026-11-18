@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 
-from project import cache_latents, train
+from project import train
+from project.eval import encode
 from project.eval import classify_rf as cr
 from project.tests._args import MAE_ARGS
 
 
 def test_classify_rf(tmp_path):
     train.main(MAE_ARGS + ["--steps", "2", "--out", str(tmp_path / "mae")])
-    cache_latents.main(["--ckpt", str(tmp_path / "mae" / "mae.pt"), "--out", str(tmp_path / "latents.pt"), "--stride", "0.5", "--device", "cpu", "--workers", "0", "--batch-size", "16"])
-    cache_latents.main(["--ckpt", str(tmp_path / "mae" / "mae.pt"), "--out", str(tmp_path / "latents_test.pt"), "--splits", "test", "--stride", "0.5", "--device", "cpu", "--workers", "0", "--batch-size", "16"])
+    encode.main(["--ckpt", str(tmp_path / "mae" / "mae.pt"), "--out", str(tmp_path / "latents.pt"), "--stride", "0.5", "--device", "cpu", "--workers", "0", "--batch-size", "16"])
+    encode.main(["--ckpt", str(tmp_path / "mae" / "mae.pt"), "--out", str(tmp_path / "latents_test.pt"), "--splits", "test", "--stride", "0.5", "--device", "cpu", "--workers", "0", "--batch-size", "16"])
     out = tmp_path / "rf"
     res = cr.main(["--latents", str(tmp_path / "latents.pt"), "--test-latents", str(tmp_path / "latents_test.pt"), "--features", "mean", "hand", "--out", str(out),
                    "--grid", '{"n_estimators": [10], "max_depth": [3, null]}', "--n-jobs", "2", "--data", "sim", "--n-sim", "48"])  # fmt: skip

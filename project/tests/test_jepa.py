@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 import torch
 
-from project import cache_latents, train
+from project import train
+from project.eval import encode
 from project.checkpoint import load_encoder
 from project.jepa import TokenJEPA
 from project.tests._args import MAE_ARGS
@@ -24,7 +25,7 @@ def test_jepa_trains_saves_and_loads(tmp_path):
     pt = next(model.target.transformer.parameters()).detach()
     assert not torch.allclose(pc, pt) or model.ema == 1.0
     # a forward pass gives a finite loss and per-token latent targets of the encoder width
-    cache_latents.main(["--ckpt", str(out / "mae.pt"), "--out", str(tmp_path / "latents.pt"), "--stride", "0.5", "--device", "cpu", "--workers", "0", "--batch-size", "16"])
+    encode.main(["--ckpt", str(out / "mae.pt"), "--out", str(tmp_path / "latents.pt"), "--stride", "0.5", "--device", "cpu", "--workers", "0", "--batch-size", "16"])
     cache = torch.load(tmp_path / "latents.pt", map_location="cpu", weights_only=False)
     assert cache["z"].shape[1] == model.embed_dim and np.isfinite(cache["z"].float().numpy()).all()
     values = torch.randn(2, 12, meta.spec.n_channels)

@@ -1,4 +1,4 @@
-"""Colours and helpers shared by the figure scripts (dataset_figs, period_figs)."""
+"""Plot style: the colours and small helpers shared by the figure scripts."""
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt

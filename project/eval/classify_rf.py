@@ -21,11 +21,10 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
 
-from project.data import ANOMALY_CLASSES, data_args_from, load_data
+from project.data import ANOMALY_CLASSES
+from project.eval.common_eval import star_tables
 from project.utils import dump_json
-from project.period_probe import object_table
 
 PARAM_GRID = {"n_estimators": [100, 200, 500], "max_depth": [None, 10, 20, 30], "min_samples_split": [2, 5, 10]}
 DEFAULT_PARAMS = {"n_estimators": 200, "max_depth": 20, "min_samples_split": 2}
@@ -88,15 +87,8 @@ def run(args):
     t0 = time.time()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    cache = torch.load(args.latents, map_location="cpu", weights_only=False)
-    tcache = torch.load(args.test_latents, map_location="cpu", weights_only=False)
-    meta = cache["meta"]
-    ckpt = torch.load(meta["ckpt"], map_location="cpu", weights_only=False)
     over = argparse.Namespace(data=args.data, max_rows=args.max_rows, n_sim=args.n_sim)
-    data = load_data(data_args_from(ckpt["args"], over), splits=("train", "validation", "test"))
-    bands = sorted({int(b) for r in data["train"][:200] for b in np.unique(r.band)})
-    caches = {"train": cache, "validation": cache, "test": tcache}
-    tables = {s: object_table(caches[s], s, data[s], bands, int(meta["min_tokens"])) for s in ("train", "validation", "test")}
+    _, _, tables = star_tables(args.latents, args.test_latents, over)
     rng = np.random.default_rng(args.seed)
     for s, tab in tables.items():
         keep = np.ones(len(tab["fine"]), dtype=bool)

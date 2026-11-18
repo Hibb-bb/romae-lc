@@ -8,7 +8,8 @@ import json
 import numpy as np
 import torch
 
-from project import cache_latents, phase_probe
+from project import phase_probe
+from project.eval import encode
 
 MAE_ARGS = [
     "--data", "sim", "--n-sim", "48", "--width", "24", "--depth", "2",
@@ -26,7 +27,7 @@ def test_phase_error_and_probe(tmp_path):
     from project import train
 
     train.main(MAE_ARGS + ["--steps", "2", "--out", str(tmp_path / "mae")])
-    cache_latents.main(["--ckpt", str(tmp_path / "mae" / "mae.pt"), "--out", str(tmp_path / "latents.pt"), "--stride", "0.5",
+    encode.main(["--ckpt", str(tmp_path / "mae" / "mae.pt"), "--out", str(tmp_path / "latents.pt"), "--stride", "0.5",
                         "--device", "cpu", "--workers", "0", "--batch-size", "16"])  # fmt: skip
     out = tmp_path / "phase"
     phase_probe.main(["--latents", str(tmp_path / "latents.pt"), "--out", str(out), "--steps", "20", "--batch-size", "64",

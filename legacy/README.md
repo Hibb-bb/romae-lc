@@ -63,3 +63,31 @@ here. The tag `pre-cleanup` has it.
 
 A checkpoint trained with one of the removed options cannot be resumed or loaded from this
 branch. The scripts say so and name the tag.
+
+## Moved in step 4 (evaluation and job scripts)
+
+The evaluation scripts were renamed and split into functions. The old files have no copy here
+(the tag `pre-cleanup` has them); this table says where each one went:
+
+| old | now |
+|---|---|
+| `project/cache_latents.py` | `project/eval/encode.py` |
+| `project/eval/attn_probe.py` | `project/eval/card_class.py` (class) and `card_period.py` (log period) |
+| `project/eval/spectral_peak_probe.py` | `project/eval/card_period.py` (`--chen-csv` is gone) |
+| `project/eval/token_phase_probe.py` | `project/eval/card_phase.py` |
+| `project/eval/jepa_forecast_probe.py` | `project/eval/card_forecast.py` |
+| `project/eval/jepa_forecast_demo.py` | `project/eval/card_demo.py` |
+| `project/eval/dataset_figs_style.py` | `project/eval/style.py` |
+
+`project/jobs/` keeps `train.sh` (a recipe, the self-requeue chain, then the test card),
+`test_card.sh`, `demo.sh`, and the helpers `after_done.sh` and `in_session.sh`. These job scripts
+moved to `legacy/project/jobs/`:
+
+- `pretrain_mae.sh`: the old training chain. `train.sh` replaces it.
+- `lejepa.sh`, `option2.sh`, `option2_one.sh`, `option3_one.sh`: the run lanes. Their flags are
+  now the recipe files in `project/recipes/`.
+- `eval_encoder.sh`, `test_forecast.sh`: `test_card.sh` replaces both.
+- `rope_demo.sh`, `rope_demo_int.sh`: `demo.sh` replaces them.
+- `attn_probe.sh`, `token_phase_probe.sh`, `cache_latents.sh`, `period_probe.sh`,
+  `classify_rf.sh`: wrappers of single steps. Run the python module instead.
+- `submit_queue.sh`: the queue helper for the interactive partition.
