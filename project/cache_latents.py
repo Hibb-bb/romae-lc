@@ -1,38 +1,26 @@
-"""Encode a grid of windows once with a frozen encoder (the input of stage 2).
+"""Encode a grid of windows once with a frozen encoder.
 
-Stage 1 is the autoencoder (``pretrain_mae.py``, ``mae.pt``); its latent is
-the pooled CLS feature of the RoMAE encoder, ``[D]`` per window with ``D``
-the width (192 for ``--size light``). Stage 2 trains the predictor on those
-latents with the encoder frozen, so nothing is gained by re-encoding the
-same windows for hundreds of thousands of steps: this script lays a grid of
-windows over every record of every split (``--stride`` window lengths
-between consecutive window starts, the window length and token bounds from
-the checkpoint's :class:`~romae_lc.FrameConfig`), encodes every window once
-through :func:`project.common.load_encoder` (``mae.pt`` or ``wm.pt``) and
-writes them to one ``latents.pt`` that :mod:`project.train_predictor` loads
-onto the GPU whole.
+The latent of a window is the pooled CLS feature of the encoder, ``[D]`` per
+window with ``D`` the width. This script lays a grid of windows over every
+record of every split (``--stride`` window lengths between consecutive window
+starts, the window length and token bounds from the checkpoint's
+:class:`~romae_lc.FrameConfig`), encodes every window once through
+:func:`project.common.load_encoder` and writes them to one ``latents.pt``.
+The probes read that file (:mod:`project.period_probe`,
+:mod:`project.eval.attn_probe`, :mod:`project.eval.classify_rf`).
 
 Windows are cut with :func:`~romae_lc.frame_grid` (``fill=True``: every
-window that fits, sparse or empty ones included, so a sequence sampler can
-skip them by ``n_tokens``) and their starts agree with
+window that fits, sparse or empty ones included, so a reader can skip them
+by ``n_tokens``) and their starts agree with
 :func:`project.common.grid_starts` by construction (asserted once). A window
-above ``--cap`` points is subsampled deterministically, the way
-:func:`project.common.grid_item` does it (one rng per object seeded from
-``(seed, record index)``, applied to the windows in order), so
+above ``--cap`` points is subsampled deterministically (one rng per object
+seeded from ``(seed, record index)``, applied to the windows in order), so
 :func:`object_windows` reproduces any stored row.
 
 The file is one dict:
 
 - ``z`` float16 ``[N, D]``: the latents, rows grouped by split, then by
   object, then in window order;
-- ``z_alt`` float16 ``[K - 1, N, D]`` or ``None``: with ``--realisations
-  K``, ``K - 1`` noise realisations of every window (magnitudes redrawn
-  from the per-point errors and ``--real-drop`` of the points dropped,
-  :func:`realise`, seeded from the window): what the same star would have
-  given the encoder if observed again. The predictor trains on a random
-  realisation per row, so its predicted spread includes the spread that
-  measurement noise alone produces, and the replicate floor of every window
-  comes for free (``val_replicate_std`` next to ``val_sample_std``);
 - ``obj`` int32 ``[N]``: the record's position in ``data[split]``;
 - ``win`` int16 ``[N]``: the window's index in its object's grid;
 - ``start`` float32 ``[N]``: the window start in days (record time);
@@ -50,9 +38,9 @@ The file is one dict:
 
 A ``latents.json`` next to it repeats the meta with the counts.
 
-    python -m project.cache_latents --ckpt project/runs/mae_w250/mae.pt
-    python -m project.cache_latents --ckpt project/runs/mae_w250/mae.pt \\
-        --stride 0.25 --splits train validation --batch-size 512 --workers 8
+    python -m project.cache_latents --ckpt project/runs/enc_j1/mae.pt
+    python -m project.cache_latents --ckpt project/runs/enc_j1/mae.pt \\
+        --out project/runs/enc_j1/latents_test.pt --splits test
 """
 
 from __future__ import annotations
@@ -88,7 +76,7 @@ def object_windows(
     """The grid windows of one record as the cache stores them: ``(starts
     float64 [K], frames, n_tokens int [K])`` with ``frames`` the ``K``
     ``(t, y, band, err)`` windows after the deterministic cap (rng seeded
-    from ``(seed, index)`` like :func:`project.common.grid_item`) and
+    from ``(seed, index)``) and
     ``n_tokens`` their point counts before it."""
     starts = grid_starts(record, cfg, advance=stride)
     frames, _ = frame_grid(record, cfg, advance=stride, fill=True)
@@ -103,25 +91,11 @@ def object_windows(
     return starts, frames, n_tokens
 
 
-def realise(frame: tuple, drop: float, rng: np.random.Generator) -> tuple:
-    """One noise realisation of a ``(t, y, band, err)`` window: the
-    magnitudes redrawn from ``N(y, err)`` and a fraction ``drop`` of the
-    points dropped (at least 2 kept). What the encoder would have seen had
-    the same star been observed again with the same cadence and errors."""
-    t, y, band, err = frame
-    y = (y + rng.standard_normal(len(y)) * err).astype(np.float32)
-    n_keep = max(2, int(np.ceil(len(t) * (1.0 - drop))))
-    return subsample_frame((t, y, band, err), n_keep, rng)
-
-
 class WindowDataset(Dataset):
     """Every window of every object of every split as one flat index. An
     item is ``(split_i, obj_i, win)`` resolved lazily: the object's grid is
     cut once and kept while consecutive items address it (the sampler is
-    sequential, so a worker's batch mostly hits one or two objects). With
-    ``n_real > 1`` every window is followed by ``n_real - 1`` noise
-    realisations of itself (:func:`realise`, seeded from the window), item
-    ``i`` being window ``i // n_real``, realisation ``i % n_real``."""
+    sequential, so a worker's batch mostly hits one or two objects)."""
 
     def __init__(
         self,
@@ -130,8 +104,6 @@ class WindowDataset(Dataset):
         stride,
         cap,
         seed,
-        n_real: int = 1,
-        real_drop: float = 0.5,
     ):
         self.splits, self.cfg, self.stride, self.cap, self.seed = (
             splits,
@@ -140,7 +112,6 @@ class WindowDataset(Dataset):
             cap,
             seed,
         )
-        self.n_real, self.real_drop = int(n_real), float(real_drop)
         self.counts = []  # windows per object, per split
         self.offsets = []  # first flat index of every object, per split
         total = 0
@@ -156,7 +127,7 @@ class WindowDataset(Dataset):
         self._key, self._cached = None, None
 
     def __len__(self) -> int:
-        return self.total * self.n_real
+        return self.total
 
     def locate(self, i: int) -> tuple[int, int, int]:
         """``(split_i, obj_i, win)`` of flat index ``i``."""
@@ -176,16 +147,12 @@ class WindowDataset(Dataset):
         return self._cached
 
     def __getitem__(self, i: int) -> dict:
-        widx, r = divmod(int(i), self.n_real)
+        widx = int(i)
         s, o, w = self.locate(widx)
         starts, frames, n_tokens = self.windows(s, o)
         frame = frames[w]
-        if r > 0:
-            index = self.splits[s][2][o]
-            frame = realise(frame, self.real_drop, np.random.default_rng([self.seed, index, w, r]))
         return dict(
             widx=widx,  # the flat window index (the cache row)
-            real=r,
             split=s,
             obj=self.splits[s][2][o],  # the data[split] position, not the subset's
             win=w,
@@ -202,7 +169,6 @@ def make_collate(spec: TokenSpec):
         return dict(
             tokens=spec.tokens([it["frame"] for it in items]),
             widx=torch.tensor([it["widx"] for it in items], dtype=torch.int64),
-            real=torch.tensor([it["real"] for it in items], dtype=torch.int64),
             split=torch.tensor([it["split"] for it in items], dtype=torch.int64),
             obj=torch.tensor([it["obj"] for it in items], dtype=torch.int64),
             win=torch.tensor([it["win"] for it in items], dtype=torch.int64),
@@ -224,7 +190,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--ckpt", required=True, help="mae.pt (stage 1) or wm.pt")
+    p.add_argument("--ckpt", required=True, help="the encoder checkpoint (mae.pt)")
     p.add_argument("--out", default=None, help="default <ckpt dir>/latents.pt")
     p.add_argument(
         "--stride",
@@ -258,15 +224,6 @@ def main(argv=None):
         default=None,
         help="cap subsample seed (default: the checkpoint's data seed)",
     )
-    p.add_argument(
-        "--realisations",
-        type=int,
-        default=1,
-        help="latents per window: the window itself plus this many minus one "
-        "noise realisations of it (magnitudes redrawn from the errors, "
-        "--real-drop of the points dropped), stored as z_alt [K - 1, N, D]",
-    )
-    p.add_argument("--real-drop", type=float, default=0.5, help="drop per realisation")
     add_device_arg(p)
     args = p.parse_args(argv)
     t_start = time.time()
@@ -280,8 +237,7 @@ def main(argv=None):
         cfg = replace(cfg, window=float(args.window))
     cap = cfg.max_tokens if args.cap is None else args.cap
     # Only the data source may be overridden: --seed is the cap / subset seed
-    # and must not re-simulate or re-split the checkpoint's data (gate.py does
-    # the same).
+    # and must not re-simulate or re-split the checkpoint's data.
     data_ns = data_args_from(
         meta.args, argparse.Namespace(data=args.data, max_rows=args.max_rows)
     )
@@ -298,10 +254,7 @@ def main(argv=None):
         + ", ".join(f"{s} {len(r)} objects" for s, r, _ in splits)
         + f"; loaded in {time.time() - t_start:.0f}s"
     )
-    if args.realisations < 1 or not 0 <= args.real_drop < 1:
-        p.error("--realisations must be >= 1 and --real-drop in [0, 1)")
-    K = args.realisations
-    ds = WindowDataset(splits, cfg, args.stride, cap, seed, K, args.real_drop)
+    ds = WindowDataset(splits, cfg, args.stride, cap, seed)
     loader = DataLoader(
         ds,
         args.batch_size,
@@ -311,7 +264,6 @@ def main(argv=None):
     )
     n = ds.total
     z = torch.empty(n, enc.dim, dtype=torch.float16)
-    z_alt = torch.empty(K - 1, n, enc.dim, dtype=torch.float16) if K > 1 else None
     cols = dict(
         split=torch.empty(n, dtype=torch.int64),
         obj=torch.empty(n, dtype=torch.int64),
@@ -326,14 +278,11 @@ def main(argv=None):
             with amp:
                 zb = enc.encode([batch["tokens"].to(dev)])[:, 0]
             zb = zb.float().cpu().half()
-            widx, real = batch["widx"], batch["real"]
-            base = real == 0
-            z[widx[base]] = zb[base]
+            widx = batch["widx"]
+            z[widx] = zb
             for k, v in cols.items():
-                v[widx[base]] = batch[k][base]
-            if z_alt is not None and (~base).any():
-                z_alt[real[~base] - 1, widx[~base]] = zb[~base]
-            row += int(base.sum())
+                v[widx] = batch[k]
+            row += len(widx)
             if (i + 1) % 50 == 0:
                 print(f"  {row} / {n} windows, {time.time() - t0:.0f}s", flush=True)
     assert row == n
@@ -365,13 +314,10 @@ def main(argv=None):
         min_tokens=int(cfg.min_tokens),
         cap=int(cap),
         frames=asdict(cfg),
-        realisations=int(K),
-        real_drop=float(args.real_drop),
         created=dict(encoder_step=meta.step, args=vars(args), seed=seed),
     )
     state = dict(
         z=z,
-        z_alt=z_alt,
         obj=cols["obj"].to(torch.int32),
         win=cols["win"].clamp(max=32767).to(torch.int16),
         start=cols["start"],
@@ -393,7 +339,7 @@ def main(argv=None):
     dump_json(dict(info, counts=counts), out.with_suffix(".json"))
     print(
         f"saved {out}: {sum(counts['objects'].values())} objects, {n} windows "
-        f"({valid} with >= {cfg.min_tokens} points), {K} realisation(s) each, "
+        f"({valid} with >= {cfg.min_tokens} points), "
         f"{counts['gb']:.2f} GB, "
         f"{counts['seconds']:.0f}s"
     )

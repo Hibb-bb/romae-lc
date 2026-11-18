@@ -38,7 +38,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from romae_lc.model import MAEOutput, RoMAEForPreTraining, attention_mask, gen_mask
+from romae_lc.model import MAEOutput, RoMAEForPreTraining, attention_mask, gen_mask, spectral_frequency
+from romae_lc.spectral import spectral_aux_loss
+
+
+def sigreg(z: torch.Tensor, num_slices: int = 64, t_max: float = 3.0, n_t: int = 17, max_n: int = 2048) -> torch.Tensor:
+    """LeJEPA's SIGReg: the sliced Epps-Pulley statistic of ``z [n, d]``
+    against N(0, I) (from the test bed, unchanged)."""
+    if z.shape[0] > max_n:
+        z = z[torch.randperm(z.shape[0], device=z.device)[:max_n]]
+    n, d = z.shape
+    A = torch.randn(d, num_slices, device=z.device, dtype=z.dtype)
+    A = A / A.norm(dim=0, keepdim=True)
+    p = z @ A
+    tt = torch.linspace(0, t_max, n_t, device=z.device, dtype=z.dtype)
+    x = p[..., None] * tt
+    re, im = x.cos().mean(0), x.sin().mean(0)
+    target = torch.exp(-0.5 * tt ** 2)
+    err = (re - target) ** 2 + im ** 2
+    w = torch.exp(-0.5 * tt ** 2)
+    return torch.trapezoid(err * w, tt, dim=-1).mean() * 10
 
 
 class TokenJEPA(nn.Module):
@@ -83,7 +102,8 @@ class TokenJEPA(nn.Module):
         self.target.requires_grad_(False)
         self.ema, self.ema_end, self.loss_kind, self.use_target = float(ema), float(ema_end), str(loss), bool(use_target) and not self.no_ema
         self.recon_weight = float(recon_weight)
-        # denoising form: the target encoder sees the smooth fit (target_values) in the brightness channel, the context encoder the raw points
+        # clean_target (a denoising form) and attn_pool are options of older code. The arguments stay because
+        # checkpoints store them; the JEPA forward no longer reads clean_target (its code is in legacy/).
         self.clean_target = bool(clean_target)
         # the alignment loss in a low-dimensional projection (BYOL / LeJEPA form): the encoder keeps what the
         # loss does not need, the projection discards it; the probes read the pre-projection latent
@@ -235,7 +255,7 @@ class TokenJEPA(nn.Module):
                 pt.mul_(m).add_(pc.detach(), alpha=1.0 - m)
         return m
 
-    def forward(self, values, positions, pad_mask=None, mask=None, weight=None, target_values=None) -> MAEOutput:
+    def forward(self, values, positions, pad_mask=None, mask=None) -> MAEOutput:
         enc = self.context
         b, n, _ = values.shape
         if pad_mask is None:
@@ -250,15 +270,10 @@ class TokenJEPA(nn.Module):
         # the targets: the EMA encoder's token latents of the whole window at the hidden positions
         with torch.no_grad():
             tg = self.context if self.no_ema else self.target
-            tv = values
-            if self.clean_target and target_values is not None:
-                clean = target_values if target_values.dim() == 3 else target_values[..., None]
-                tv = torch.cat([clean[..., :1].to(values.dtype), values[..., 1:]], -1)
-            xf = tg.embed(tv, positions)
+            xf = tg.embed(values, positions)
             xf, pf, pdf = tg.add_cls(xf, positions, pad_mask)
-            xf = tg.run_transformer(xf, pf, pdf, tv)
+            xf = tg.run_transformer(xf, pf, pdf, values)
             toks = xf[:, 1:] if tg.use_cls else xf
-            self.last_target_tokens = (toks, pad_mask)  # the full window's target tokens, for the add-on's --dyn-target ema
             target = split(toks.float(), mask)
             ptg = self.proj if self.no_ema else self.proj_target
             if ptg is not None:
@@ -281,8 +296,6 @@ class TokenJEPA(nn.Module):
         pad = torch.cat([v_pad, m_pad], dim=1)
         if self.phase_rope:
             # as RoMAE's decoder does with phase_rope: the phase in cycles at the context encoder's own frequency
-            from romae_lc.model import spectral_frequency
-
             f = spectral_frequency(enc.spectral, None, self.phase_freq)
             t_days = (pos[:, 0].float() - 1.0) * enc.spectral.time_scale
             pos = torch.cat([pos, (f[:, None] * t_days)[:, None].to(pos.dtype)], 1)
@@ -295,8 +308,7 @@ class TokenJEPA(nn.Module):
         err = F.smooth_l1_loss(pred, target, reduction="none") if self.loss_kind == "smoothl1" else F.mse_loss(pred, target, reduction="none")
         loss = (err * real).sum() / (real.sum() * target.shape[-1]).clamp_min(1e-8)
         if self.recon_head is not None:
-            src = values[..., :1] if target_values is None else (target_values if target_values.dim() == 3 else target_values[..., None])[..., :1]
-            values_hidden = split(src.to(values.dtype), mask).float()
+            values_hidden = split(values[..., :1], mask).float()
             recon = self.recon_head(hid).float()
             loss_recon = (F.mse_loss(recon, values_hidden, reduction="none") * real).sum() / real.sum().clamp_min(1e-8)
             loss = loss + self.recon_weight * loss_recon
@@ -368,9 +380,6 @@ def forward_views(model: TokenJEPA, values, positions, pad, periods=None, n_glob
     """The no-EMA multi-view loss (LeJEPA at the token level). Returns ``(pred, sigreg, spectral_aux, stats)``;
     the caller weights them. ``periods [b]`` (training-time catalogue period) feeds the spectral aux loss on the
     global views; the phase rope uses the encoder's own frequency from the first global view."""
-    from project.dyn import sigreg
-    from romae_lc.model import spectral_frequency
-
     enc = model.context
     b, n = pad.shape
     ts = enc.spectral.time_scale if enc.spectral is not None else 1.0
@@ -391,8 +400,6 @@ def forward_views(model: TokenJEPA, values, positions, pad, periods=None, n_glob
     xg, pg, padg, og, vpg = encode(keeps[:n_glob])
     aux = None
     if periods is not None and enc.spectral is not None:
-        from romae_lc.spectral import spectral_aux_loss
-
         aux = spectral_aux_loss(enc.spectral, periods.repeat(n_glob))
     f_g = spectral_frequency(enc.spectral, None, model.phase_freq).view(n_glob, b) if enc.spectral is not None else None
     f = f_g[0] if model.phase_rope else None

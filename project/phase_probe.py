@@ -32,15 +32,50 @@ import torch
 import torch.nn as nn
 
 from project.common import add_device_arg, data_args_from, dump_json, get_device, load_data, load_encoder, superclass
-from project.inject import band_templates
 
 HEADLINE = ("ECL", "RR", "ROT", "CEP", "DSCT", "LPV")
+
+
+def fold_template(t, y, period, n_bins=32):
+    """Periodic binned-median template of one band: ``(edges [n_bins + 1],
+    values [n_bins])`` over phase, empty bins filled by periodic linear
+    interpolation."""
+    phase = np.mod(t / period, 1.0)
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    idx = np.minimum((phase * n_bins).astype(int), n_bins - 1)
+    vals = np.full(n_bins, np.nan)
+    for b in range(n_bins):
+        m = idx == b
+        if m.any():
+            vals[b] = np.median(y[m])
+    ok = np.isfinite(vals)
+    if not ok.any():
+        vals[:] = float(np.median(y))
+    elif not ok.all():
+        centers = (edges[:-1] + edges[1:]) / 2
+        x = np.concatenate([centers[ok] - 1, centers[ok], centers[ok] + 1])
+        v = np.tile(vals[ok], 3)
+        vals[~ok] = np.interp(centers[~ok], x, v)
+    return edges, vals
+
+
+def band_templates(record, period: float, min_points=8, n_bins=32):
+    """``{band: (edges, vals, mean)}``: the folded template of every band with enough points."""
+    templates = {}
+    for b in np.unique(record.band):
+        m = record.band == b
+        if m.sum() < min_points:
+            continue
+        nb = int(min(n_bins, max(4, m.sum() // 8)))
+        edges, vals = fold_template(record.t[m], record.y[m], period, nb)
+        templates[int(b)] = (edges, vals, float(vals.mean()))
+    return templates
 
 
 def reference_phase(record, period: float):
     """The phase of maximum light (the smallest magnitude of the template) in
     the band with the most points; NaN without a usable template."""
-    templates, _ = band_templates(record, period)
+    templates = band_templates(record, period)
     if not templates:
         return float("nan")
     b = max(templates, key=lambda k: int((record.band == k).sum()))

@@ -55,7 +55,7 @@ rng.shuffle(val)
 val = val[: a.n_stars]
 cls_of = lambda r: str(r.meta.get("class_str", r.label))
 want = a.classes.split(",")
-ds = WindowDataset([("validation", val, list(range(len(val))))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)
+ds = WindowDataset([("validation", val, list(range(len(val))))], cfg, 0.25, cfg.max_tokens, 0)
 collate = make_collate(spec)
 spec_layers = [m for m in model.context.modules() if type(m).__name__ == "SpectralLayer"]
 

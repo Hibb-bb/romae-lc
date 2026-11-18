@@ -13,9 +13,8 @@
 # Period regression from cached latents next to Lomb-Scargle, with the
 # failure cases mined (project.period_probe). One short job on a latents.pt
 # of cache_latents; the first argument is the cache, the rest go to the
-# script (--out, --pred, --n-ls, ...).
+# script (--out, --n-ls, ...).
 #   sbatch project/jobs/period_probe.sh project/runs/maew_w250/latents_r4.pt --out project/results/period_maew
-#   sbatch project/jobs/period_probe.sh project/runs/maew_w250/latents_r4.pt --out project/results/period_maew --pred project/runs/pred_maew_seq/pred.pt --n-ls 2000
 set -euo pipefail
 export HF_DATASETS_DISABLE_PROGRESS_BARS=1
 export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from project import cache_latents, pretrain_mae
@@ -54,35 +55,6 @@ def test_jepa_hybrid_and_warm_start(tmp_path):
     assert torch.isfinite(o.loss) and "recon" in model.last_stats
 
 
-def test_smooth_targets_mae_and_jepa(tmp_path):
-    out = tmp_path / "tpl"
-    pretrain_mae.main(MAE_ARGS + ["--target", "mix", "--template-harmonics", "2", "--template-min-points", "6", "--steps", "2", "--out", str(out)])
-    assert (out / "DONE").is_file()
-    rows = [l for l in open(out / "log.jsonl") if '"eval"' in l]
-    assert rows and '"template_share"' in rows[-1]
-    out2 = tmp_path / "tpl_jepa"
-    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-recon-weight", "0.5", "--target", "template", "--template-harmonics", "2", "--template-min-points", "6", "--steps", "2", "--out", str(out2)])
-    assert (out2 / "DONE").is_file()
-
-
-def test_jepa_clean_target(tmp_path):
-    out = tmp_path / "clean"
-    pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-clean-target", "--target", "template", "--template-harmonics", "2", "--template-min-points", "6", "--steps", "2", "--out", str(out)])
-    enc, _ = load_encoder(str(out / "mae.pt"), "cpu")
-    assert enc.model.clean_target and enc.model.jepa_hparams["clean_target"]
-
-
-def test_query_tokens_mae_and_clean_jepa(tmp_path):
-    common = ["--target", "template", "--template-harmonics", "2", "--template-min-points", "6", "--query-extra", "6", "--query-delta", "0.5", "5", "--steps", "2"]
-    out = tmp_path / "q_mae"
-    pretrain_mae.main(MAE_ARGS + common + ["--out", str(out)])
-    rows = [l for l in open(out / "log.jsonl") if '"eval"' in l]
-    assert rows and '"query_delta_days"' in rows[-1]
-    out2 = tmp_path / "q_jepa"
-    pretrain_mae.main(MAE_ARGS + common + ["--jepa", "--jepa-clean-target", "--out", str(out2)])
-    assert (out2 / "DONE").is_file()
-
-
 def test_jepa_projection(tmp_path):
     out = tmp_path / "proj"
     pretrain_mae.main(MAE_ARGS + ["--jepa", "--jepa-proj", "8", "--jepa-proj-hidden", "16", "--steps", "3", "--out", str(out)])
@@ -95,32 +67,6 @@ def test_jepa_projection(tmp_path):
         o = model(values, positions)
     assert o.pred.shape[-1] == 8 and o.target.shape[-1] == 8 and torch.isfinite(o.loss)
     assert model.embed_dim == 24  # the probes read the encoder width, not the projection
-
-
-def test_record_templates_and_training(tmp_path):
-    import math
-
-    from romae_lc.data import Record
-    from project.templates import RecordTemplates, fit_record_templates
-
-    rng = np.random.default_rng(0)
-    recs = []
-    for P in (0.7, 3.0):
-        t = np.sort(rng.uniform(0, 900, 400)); band = rng.integers(0, 2, 400)
-        y = np.sin(2 * math.pi * t / P) + 0.3 * np.cos(4 * math.pi * t / P) + band * 0.5 + 0.05 * rng.standard_normal(400)
-        recs.append(Record(t=t.astype(np.float32), y=y.astype(np.float32), err=np.full(400, 0.05, np.float32), band=band.astype(np.int64), label=0, period=P, meta={}))
-    fitted = fit_record_templates(recs, [0.7, 3.0], n_bands=2, workers=2, log=lambda *_: None)
-    assert (fitted["harmonics"] >= 2).all()
-    tpl = RecordTemplates(fitted, "cpu")
-    t_abs = torch.rand(2, 30, dtype=torch.float64) * 900; band = torch.randint(0, 2, (2, 30))
-    P = torch.tensor([0.7, 3.0], dtype=torch.float64)[:, None]
-    truth = torch.sin(2 * math.pi * t_abs / P) + 0.3 * torch.cos(4 * math.pi * t_abs / P) + band * 0.5
-    assert (tpl.eval(torch.tensor([0, 1]), t_abs, band) - truth.float()).abs().mean() < 0.05
-    out = tmp_path / "rec"
-    pretrain_mae.main(MAE_ARGS + ["--target", "template", "--template-fit", "record", "--template-workers", "2", "--query-extra", "6", "--query-delta", "0.5", "5", "--steps", "2", "--out", str(out)])
-    assert (out / "templates.pt").is_file() and (out / "DONE").is_file()
-    rows = [l for l in open(out / "log.jsonl") if '"eval"' in l]
-    assert '"template_share"' in rows[-1] and '"query_delta_days"' in rows[-1]
 
 
 def test_jepa_no_ema_views(tmp_path):
@@ -146,3 +92,15 @@ def test_jepa_no_ema_views(tmp_path):
     with torch.no_grad():
         o = model(values, positions)
     assert o.pred.shape[-1] == 16 and torch.isfinite(o.loss)
+
+
+def test_resume_refuses_removed_options():
+    """A checkpoint saved with flags that this code no longer has resumes when they were off, and is refused when one was on."""
+    old = dict(dyn=0, bottleneck=False, encoder="transformer", target="obs", window_range=None, mask_mode="blockplus", dyn_weight=1.0)
+    pretrain_mae.check_resumable(dict(kind="jepa", args=old))
+    pretrain_mae.check_resumable(dict(args={}))  # a plain masked autoencoder has no kind
+    for bad in (dict(dyn=4), dict(bottleneck=True), dict(mask_mode="mix"), dict(window_range=[20.0, 80.0])):
+        with pytest.raises(SystemExit, match="pre-cleanup"):
+            pretrain_mae.check_resumable(dict(kind="jepa", args=dict(old, **bad)))
+    with pytest.raises(SystemExit, match="pre-cleanup"):
+        pretrain_mae.check_resumable(dict(kind="gruode", args=old))

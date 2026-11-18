@@ -1,5 +1,4 @@
-"""Two changes to what the stage-1 autoencoder is asked to do. Neither one
-uses the period of a star.
+"""The masks of the pretraining: which tokens of a window are hidden.
 
 **Hide stretches of time, not single points** (:func:`block_mask`). With
 random points hidden, every hidden point has close neighbours on both sides
@@ -10,29 +9,20 @@ and grow until the wanted share of the points is hidden, so the share is
 exact and the length of a stretch follows from it (half of a 250 d window in
 one stretch is a 125 d gap, in six stretches about 20 d each).
 
-**Windows of many lengths** (:class:`MultiWindowDataset`). Every training
-window draws its own length, log-uniform between two bounds, so one encoder
-sees short and long windows of every star. A short window holds the detail
-of a fast star, a long one holds several cycles of a slow star. The rotary
-encoding works on time differences in days, so nothing else changes. At use
-every star is encoded at the same few lengths and the latents are joined,
-which needs no period either.
+:func:`make_mask` picks between random points, stretches, and one stretch
+plus random points (``blockplus``). :func:`phase_band_mask` hides a band of
+phases of the catalogue period (training only).
 """
 
 from __future__ import annotations
 
-import math
-import warnings
 from typing import Sequence
 
-import numpy as np
 import torch
-from torch.utils.data import Dataset
 
-from romae_lc import FrameConfig, Record
 from romae_lc.model import gen_mask
 
-MASK_MODES = ("random", "block", "mix", "blockplus", "phaseband")  # phaseband: phase_band_mask (needs the period)
+MASK_MODES = ("random", "block", "blockplus", "phaseband")  # phaseband: phase_band_mask (needs the period)
 
 
 def block_mask(
@@ -98,20 +88,18 @@ def make_mask(
     mask_ratio: float,
     mode: str = "random",
     n_blocks: Sequence[int] = (1, 6),
-    block_prob: float = 0.5,
     generator: torch.Generator | None = None,
     position: str = "random",
     block_share: float = 0.5,
 ) -> torch.Tensor:
-    """The mask of one batch: ``random`` points, ``block`` stretches,
-    ``mix`` (every row is a stretch row with probability ``block_prob``), or
+    """The mask of one batch: ``random`` points, ``block`` stretches, or
     ``blockplus`` (every row hides a stretch holding ``block_share`` of the
     hidden count and random points for the rest: a hidden window plus the
-    easy signal). Every row hides the same number of tokens in every mode,
-    so the modes can be mixed inside a batch. ``position`` places the
-    stretches (``random`` | ``last``)."""
-    if mode not in MASK_MODES:
-        raise ValueError(f"mode must be one of {MASK_MODES}, got {mode!r}")
+    easy signal). Every row hides the same number of tokens in every mode.
+    ``position`` places the stretches (``random`` | ``last``). The
+    ``phaseband`` mode has its own function, :func:`phase_band_mask`."""
+    if mode not in ("random", "block", "blockplus"):
+        raise ValueError(f"mode must be random, block or blockplus, got {mode!r}")
     if mode == "random":
         return gen_mask(mask_ratio, pad_mask, generator)
     if mode == "blockplus":
@@ -131,12 +119,7 @@ def make_mask(
         pad_extra = tot.max() - tot  # equalise the rows with trailing padding, like gen_mask
         idx = torch.arange(n, device=pad_mask.device)[None, :]
         return mask | (idx >= (n - pad_extra)[:, None])
-    blocks = block_mask(t, pad_mask, mask_ratio, n_blocks, generator, position)
-    if mode == "block":
-        return blocks
-    points = gen_mask(mask_ratio, pad_mask, generator)
-    pick = (torch.rand(pad_mask.shape[0], generator=generator) < block_prob).to(pad_mask.device)
-    return torch.where(pick[:, None], blocks, points)
+    return block_mask(t, pad_mask, mask_ratio, n_blocks, generator, position)
 
 
 def longest_gap(t: torch.Tensor, visible: torch.Tensor) -> torch.Tensor:
@@ -153,96 +136,6 @@ def longest_gap(t: torch.Tensor, visible: torch.Tensor) -> torch.Tensor:
         if span > 0:
             out[i] = float(tv.sort().values.diff().max()) / span
     return out
-
-
-class MultiWindowDataset(Dataset):
-    """Frame sequences whose windows have random lengths.
-
-    Every item is ``dict(frames, actions, label, index)`` like
-    :class:`romae_lc.FrameDataset`, so the same collate works, but each of
-    the ``cfg.n_frames`` windows draws its own length, log-uniform in
-    ``window_range`` (days), and its own start inside the record. A window
-    with fewer than ``cfg.min_tokens`` points is redrawn up to
-    ``cfg.max_tries`` times (the fullest draw is kept), and one with more
-    than ``cfg.max_tokens`` points is thinned at random. The windows of an
-    item are not consecutive and ``actions`` is zero: this is data for the
-    autoencoder, which looks at one window at a time. Times are counted from
-    the window start.
-
-    Records shorter than the shortest window are dropped; ``indices`` says
-    which ones were kept, as in ``FrameDataset``.
-    """
-
-    def __init__(
-        self,
-        records: Sequence[Record],
-        cfg: FrameConfig,
-        window_range: Sequence[float],
-        seed: int = 0,
-        epoch_seed: bool = True,
-    ):
-        lo, hi = float(window_range[0]), float(window_range[-1])
-        if not 0 < lo <= hi:
-            raise ValueError(f"window_range must satisfy 0 < lo <= hi, got {tuple(window_range)}")
-        spans = np.array([float(r.t.max() - r.t.min()) if r.n else 0.0 for r in records])
-        keep = [i for i, s in enumerate(spans) if s >= lo]
-        if len(keep) < len(records):
-            warnings.warn(f"{len(records) - len(keep)} of {len(records)} records shorter than {lo:g} d dropped")
-        if not keep:
-            raise ValueError(f"no record spans {lo:g} d")
-        self.records = [records[i] for i in keep]
-        self.indices = keep
-        self.cfg, self.window_range = cfg, (lo, hi)
-        self.seed, self.epoch_seed = seed, epoch_seed
-        self.calls = [0] * len(self.records)
-
-    def __len__(self) -> int:
-        return len(self.records)
-
-    def window(self, record: Record, rng: np.random.Generator):
-        """One window of ``record``: ``(start, length, point indices)``."""
-        cfg = self.cfg
-        t = record.t.astype(np.float64)
-        t_min, span = float(t.min()), float(t.max() - t.min())
-        lo, hi = self.window_range
-        best = None
-        for _ in range(cfg.max_tries):
-            w = min(math.exp(rng.uniform(math.log(lo), math.log(hi))), span)
-            s = t_min + rng.uniform(0.0, span - w) if span > w else t_min
-            idx = np.flatnonzero((t >= s) & (t < s + w))
-            if best is None or len(idx) > len(best[2]):
-                best = (s, w, idx)
-            if len(idx) >= cfg.min_tokens:
-                break
-        s, w, idx = best
-        if len(idx) > cfg.max_tokens:
-            idx = np.sort(rng.choice(idx, size=cfg.max_tokens, replace=False))
-        return s, w, idx
-
-    def __getitem__(self, i: int) -> dict:
-        j = self.indices[i]
-        entropy = [self.seed, j]
-        if self.epoch_seed:
-            self.calls[i] += 1
-            entropy += [self.calls[i], torch.initial_seed()]
-        rng = np.random.default_rng(entropy)
-        record = self.records[i]
-        t = record.t.astype(np.float64)
-        frames, lengths = [], []
-        for _ in range(self.cfg.n_frames):
-            s, w, idx = self.window(record, rng)
-            frame = (
-                (t[idx] - s).astype(np.float32),
-                record.y[idx].astype(np.float32),
-                record.band[idx].astype(np.int64),
-            )
-            if self.cfg.with_err:
-                frame = frame + (record.err[idx].astype(np.float32),)
-            frames.append(frame)
-            lengths.append(w)
-        actions = np.zeros((self.cfg.n_frames, 1), dtype=np.float32)
-        return dict(frames=frames, actions=actions, label=record.label, index=j,
-                    lengths=np.asarray(lengths, dtype=np.float32))  # fmt: skip
 
 
 def phase_band_mask(

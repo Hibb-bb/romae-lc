@@ -10,8 +10,7 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=project/logs/%x-%j.out
 #SBATCH --error=project/logs/%x-%j.err
-# Stage 1 (the autoencoder): masked pretraining of the window encoder, or the
-# bottleneck autoencoder with --bottleneck (project.pretrain_mae), as a chain
+# Pretraining of the window encoder (project.pretrain_mae), as a chain
 # of 2-hour interactive jobs, exactly like train_wm.sh (the successor is
 # queued at the START of every link; $OUT/DONE ends the chain and submits
 # the next stage, THEN or the first entry of PIPELINE, with $OUT/mae.pt as
@@ -22,7 +21,6 @@
 # a train_wm.sh chain passes to its next stage) is dropped: the pretraining
 # takes none. A refused sbatch (QOS queue full) is retried for 20 min.
 #   sbatch project/jobs/pretrain_mae.sh                  # window 250, 50k steps, dense ladder
-#   OUT=project/runs/bn_w250 sbatch --job-name=bn-w250 project/jobs/pretrain_mae.sh --bottleneck
 #   THEN=project/jobs/train_wm.sh sbatch --export=ALL,THEN=project/jobs/train_wm.sh project/jobs/pretrain_mae.sh
 #   THEN=project/jobs/cache_latents.sh sbatch --export=ALL,THEN=project/jobs/cache_latents.sh project/jobs/pretrain_mae.sh
 # Extra arguments go to project.pretrain_mae and are remembered in the checkpoint.

@@ -1,6 +1,6 @@
 """CPU tests of project/common.py on the toy simulator (seconds each): the error
 channel and the collate, the window grid, the data args, the dense rotary ladder,
-the backbone layout and the probe metrics. Taken from the old test_project.py."""
+the backbone layout and the probe metrics."""
 
 from __future__ import annotations
 
@@ -18,11 +18,9 @@ from project.common import (
     data_args_from,
     err_channel,
     err_stats,
-    grid_item,
     grid_starts,
     subset,
 )
-from project.decoder import QueryDecoder
 
 SURVEYS = (SurveyConfig("g", 480.7, 160, 0.05), SurveyConfig("r", 622.1, 120, 0.06))
 SIM = SimConfig(baseline_days=400.0, logP_range=(-0.3, 1.0))
@@ -79,16 +77,15 @@ def test_err_channel_and_collate(records, spec, cfg):
         )
 
 
-def test_grid_item_and_starts(records, cfg):
+def test_grid_starts_and_subset(records, cfg):
+    from romae_lc import frame_grid
+
     r = records[0]
-    item = grid_item(r, cfg, cap=10, seed=0)
+    frames, actions = frame_grid(r, cfg, fill=True)
     starts = grid_starts(r, cfg)
-    assert len(item["frames"]) == len(starts) and item["actions"].shape == (
-        len(starts),
-        1,
-    )
-    for f in item["frames"]:
-        assert len(f) == 4 and len(f[0]) <= 10
+    assert len(frames) == len(starts) and actions.shape == (len(starts), 1)
+    for f in frames:
+        assert len(f) == 4
     assert (
         subset(records, 5, 0) == subset(records, 5, 0) and len(subset(records, 5)) == 5
     )
@@ -183,8 +180,13 @@ def test_dense_ladder_dealing_and_geometry():
     assert np.array(_nest(np.ones((1, 2, 3)), 1, 2)).shape == (2, 3)
 
 
-def test_dense_backbone_and_flat_layout(records, spec):
-    from project.common import build_backbone, dense_ladder, flat_layout, rope_geometry
+def test_dense_backbone_layout(records, spec):
+    from romae_lc import RoMAE
+
+    from project.common import dense_ladder, encoder_config, rope_geometry, rope_layouts
+
+    def build_backbone(args, ladder, n_channels):
+        return RoMAE(encoder=encoder_config(args), n_channels=n_channels, n_axes=2, rope=rope_layouts(args, ladder))
 
     args = argparse.Namespace(
         width=24, heads=2, depth=2, mlp_ratio=4.0, time_frac=0.875, p_rope=0.75, attention="softmax"
@@ -205,23 +207,6 @@ def test_dense_backbone_and_flat_layout(records, spec):
         for v in b.blocks[0].timescale[torch.isfinite(b.blocks[0].timescale)]
     )
     assert got == pytest.approx(sorted(np.asarray(ladder.timescales).ravel().tolist()))
-    flat = flat_layout(backbone)
-    assert len(flat[0]["timescales"]) == 3 and flat[0]["p"] == 0.75
-    dec = QueryDecoder(24, flat, spec.err_stats, "mse", d_model=36, nhead=3, depth=1)
-    assert dec.rope.blocks[0].per_head is False
-    # the query's own error is an input only when asked for (the old, leaky default)
-    torch.manual_seed(0)
-    z, pos = torch.randn(2, 24), torch.rand(2, len(flat), 7) * 3
-    pad = torch.zeros(2, 7, dtype=torch.bool)
-    ls_a, ls_b = torch.randn(2, 7), torch.randn(2, 7)
-    mu_a, _ = dec(z, pos, pad, ls_a)
-    mu_b, _ = dec(z, pos, pad, ls_b)
-    assert not torch.allclose(mu_a, mu_b)
-    clean = QueryDecoder(24, flat, spec.err_stats, "mse", d_model=36, nhead=3, depth=1, sigma_input=False)
-    mu_a, _ = clean(z, pos, pad, ls_a)
-    mu_b, _ = clean(z, pos, pad, ls_b)
-    assert torch.allclose(mu_a, mu_b) and clean.hparams["sigma_input"] is False
-    assert QueryDecoder(**clean.hparams).sigma_input is False
     shared = build_backbone(
         args, dense_ladder(records, rope_geometry(argparse.Namespace(**dict(vars(args), depth=1))), 30.0, "comb", "log", 0.75, 50.0, 8, 0, None, None), 2
     )  # fmt: skip

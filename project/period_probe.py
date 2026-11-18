@@ -3,7 +3,7 @@ Lomb-Scargle, with the failure cases mined.
 
 The question: why is the period still not fully learnable from the stage-1
 latents, and where does it fail? The script pools the cached window latents
-of every object (``cache_latents.py``, realisation 0 only), fits regressors
+of every object (``cache_latents.py``), fits regressors
 on log10 period (train split) and scores them on the validation split with
 the numbers astronomers use (the share of objects whose period is recovered
 within 1 % and 10 %, the alias rate at 2 P and P / 2, the residual scatter in
@@ -19,10 +19,8 @@ Feature sets per object:
 - ``mean``: the mean of the object's valid window latents (``n_tokens >=
   meta.min_tokens``); ``meanmax``: the mean and the max over windows;
 - ``hand``: :func:`project.common.hand_features` of the record (no model);
-- ``seq_last``, ``seq_mean`` (with ``--pred``): the hidden states of a
-  sequence predictor (``train_predictor.load_predictor``, ``model.states``)
-  at the last valid window and averaged over the valid windows. A predictor
-  without a sequence trunk skips these with a message.
+- ``multi`` (with ``--extra-latents``): the mean latent at several window
+  lengths joined.
 
 Regressors, all on log10 period: ridge (alpha 0.1, standardised features), a
 small MLP, and a bin classifier over ``--bins`` log-period bins spanning the
@@ -45,11 +43,8 @@ tables), ``worst.csv`` (the 100 worst validation objects of the best model),
 ``pred_vs_true_ls_window.png``, ``resid_vs_cycles.png``,
 ``resid_vs_points.png``, ``ratio_hist.png``.
 
-    python -m project.period_probe --latents project/runs/maew_w250/latents_r4.pt \\
-        --out project/results/period_maew
-    python -m project.period_probe --latents project/runs/maew_w250/latents_r4.pt \\
-        --out project/results/period_maew --pred project/runs/pred_maew_seq/pred.pt \\
-        --n-ls 2000 --device cuda
+    python -m project.period_probe --latents project/runs/enc_j1/latents.pt \\
+        --out project/results/period_enc_enc_j1 --n-ls 50 --no-fold --device cuda --bins 2400
 """
 
 from __future__ import annotations
@@ -81,7 +76,7 @@ from project.common import (
     superclass,
 )
 
-FEATURE_SETS = ("hand", "mean", "meanmax", "multi", "seq_last", "seq_mean")
+FEATURE_SETS = ("hand", "mean", "meanmax", "multi")
 REGRESSORS = ("ridge", "mlp", "bins", "joint", "winjoint")
 LS_METHODS = ("ls_window", "ls_full", "ls_top5")
 
@@ -104,7 +99,6 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--latents", required=True, help="latents.pt of cache_latents")
     p.add_argument("--out", required=True, help="output directory")
-    p.add_argument("--pred", default=None, help="pred.pt of a sequence predictor")
     p.add_argument(
         "--extra-latents",
         nargs="*",
@@ -160,7 +154,7 @@ def class_order(counts: dict) -> list:
 
 def pool_latents(cache: dict, split: str, min_tokens: int) -> dict:
     """Per object of ``split``: the mean and max of its valid window latents
-    (realisation 0), the number of valid windows, the mean points per valid
+    of ``split``, the number of valid windows, the mean points per valid
     window, the start of the first valid window and the valid rows
     themselves. Objects without a valid window are left out (``keep`` says
     which cache objects survived)."""
@@ -268,60 +262,6 @@ def multi_features(paths, tables: dict) -> None:
                     rows[r, :d], rows[r, d] = pooled["mean"][j], 1.0
             tab["features"]["multi"] = np.concatenate([tab["features"]["multi"], rows], 1)
         print(f"  joined {path} (window {float(extra['meta']['window']):g} d)")
-
-
-# --------------------------------------------------------- sequence features
-
-
-@torch.no_grad()
-def seq_features(pred_path, cache: dict, tables: dict, window: float, device) -> bool:
-    """Add ``seq_last`` and ``seq_mean`` to every table from the hidden
-    states of a sequence predictor. Returns False (with a message) when the
-    predictor cannot provide them."""
-    try:
-        from project.train_predictor import crop_last, load_predictor
-
-        model, _ = load_predictor(pred_path, device)
-    except (ImportError, AttributeError) as e:
-        print(f"sequence features skipped: cannot load {pred_path} ({e})")
-        return False
-    if getattr(model, "arch", "mlp") != "seq" or not hasattr(model, "states"):
-        print(
-            f"sequence features skipped: {pred_path} is not a sequence predictor "
-            f"(arch {getattr(model, 'arch', 'mlp')!r}); only cache features are used"
-        )
-        return False
-    z_all = cache["z"]
-    start = cache["start"].numpy().astype(np.float64)
-    for tab in tables.values():
-        rows = tab["rows"]
-        n = len(rows)
-        last, mean = [None] * n, [None] * n
-        order = np.argsort([len(r) for r in rows])
-        for lo in range(0, n, 256):
-            idx = order[lo : lo + 256]
-            T = max(len(rows[i]) for i in idx)
-            z = torch.zeros(len(idx), T, z_all.shape[1])
-            gaps = torch.zeros(len(idx), T)
-            mask = torch.zeros(len(idx), T, dtype=torch.bool)
-            for b, i in enumerate(idx):
-                r = rows[i]
-                z[b, : len(r)] = z_all[r].float()
-                s = start[r]
-                gaps[b, 1 : len(r)] = torch.from_numpy((s[1:] - s[:-1]) / window).float()
-                mask[b, : len(r)] = True
-            # the core accepts at most max_len windows: keep the last ones
-            z, gaps, mask = crop_last(z, gaps, mask, int(model.max_len))
-            h = model.states(z.to(device), gaps.to(device), mask.to(device)).float().cpu()
-            m = mask[..., None].float()
-            hm = (h * m).sum(1) / m.sum(1).clamp_min(1.0)
-            n_real = mask.sum(1)
-            for b, i in enumerate(idx):
-                last[i] = h[b, int(n_real[b]) - 1].numpy()
-                mean[i] = hm[b].numpy()
-        tab["features"]["seq_last"] = np.stack(last).astype(np.float32)
-        tab["features"]["seq_mean"] = np.stack(mean).astype(np.float32)
-    return True
 
 
 # ------------------------------------------------------------------ regressors
@@ -1049,10 +989,6 @@ def run(args: argparse.Namespace) -> dict:
     )
     if args.extra_latents:
         multi_features(args.extra_latents, tables)
-    if args.pred:
-        seq_features(args.pred, cache, tables, window, dev)
-    else:
-        print("no --pred: sequence features skipped")
 
     counts = {g: int((va["superclass"] == g).sum()) for g in set(va["superclass"].tolist())}
     order = class_order(counts)
@@ -1180,7 +1116,6 @@ def run(args: argparse.Namespace) -> dict:
     res = dict(
         latents=str(args.latents),
         ckpt=str(ckpt),
-        pred=args.pred,
         window=window,
         min_tokens=min_tokens,
         dim=int(meta["dim"]),

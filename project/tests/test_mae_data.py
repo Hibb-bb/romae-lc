@@ -1,6 +1,5 @@
-"""CPU tests of the two stage-1 changes of :mod:`project.mae_data`: stretches
-of time hidden instead of single points, and training windows of many
-lengths; then the scripts end to end on the toy simulator."""
+"""CPU tests of the masks of :mod:`project.mae_data` (stretches of time hidden
+instead of single points); then the scripts end to end on the toy simulator."""
 
 from __future__ import annotations
 
@@ -10,13 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from romae_lc import FrameConfig
-from romae_lc.data import SimConfig, SurveyConfig, normalize, simulate
-
-from project.mae_data import MultiWindowDataset, block_mask, longest_gap, make_mask
-
-SURVEYS = (SurveyConfig("g", 480.7, 160, 0.05), SurveyConfig("r", 622.1, 120, 0.06))
-SIM = SimConfig(baseline_days=400.0, logP_range=(-0.3, 1.0))
+from project.mae_data import block_mask, longest_gap, make_mask
 
 MAE_ARGS = [
     "--data", "sim", "--n-sim", "48", "--width", "24", "--depth", "2",
@@ -72,49 +65,12 @@ def test_block_mask_hides_stretches():
         make_mask(t, pad, 0.5, "stripes")
 
 
-def test_mix_has_both_kinds_of_row():
-    g = torch.Generator().manual_seed(1)
-    t = torch.sort(torch.rand(64, 50, generator=g) * 100, 1).values
-    pad = torch.zeros(64, 50, dtype=torch.bool)
-    m = make_mask(t, pad, 0.5, "mix", (1, 2), 0.5, g)
-    assert (m.sum(1) == 25).all()
-    n_runs = np.array([runs(row) for row in m])
-    assert (n_runs <= 2).sum() > 10 and (n_runs > 5).sum() > 10
-    all_blocks = make_mask(t, pad, 0.5, "mix", (1, 2), 1.0, g)
-    assert all(runs(row) <= 2 for row in all_blocks)
-
-
-def test_multi_window_dataset():
-    recs = [normalize(r) for r in simulate(12, SURVEYS, SIM, seed=1)]
-    cfg = FrameConfig(n_frames=6, window=30.0, min_tokens=4, max_tokens=24, with_err=True)
-    ds = MultiWindowDataset(recs, cfg, (20.0, 200.0), seed=0, epoch_seed=False)
-    assert len(ds) == len(ds.indices) == 12
-    lengths = []
-    for i in range(len(ds)):
-        item = ds[i]
-        assert len(item["frames"]) == 6 and item["actions"].shape == (6, 1)
-        for f, w in zip(item["frames"], item["lengths"]):
-            assert len(f) == 4 and len(f[0]) <= 24
-            assert (f[0] >= 0).all() and (f[0] < w + 1e-3).all()  # counted from the window start
-        lengths += item["lengths"].tolist()
-    lengths = np.array(lengths)
-    assert lengths.min() >= 20.0 - 1e-6 and lengths.max() <= 200.0 + 1e-6
-    assert lengths.min() < 40 and lengths.max() > 100  # short and long windows both occur
-    a, b = ds[0], ds[0]
-    assert all(np.array_equal(x[0], y[0]) for x, y in zip(a["frames"], b["frames"]))  # deterministic
-    with pytest.raises(ValueError):
-        MultiWindowDataset(recs, cfg, (5000.0, 6000.0))
-    with pytest.raises(ValueError):
-        MultiWindowDataset(recs, cfg, (50.0, 20.0))
-
-
-def test_pretrain_with_stretches_and_window_range(tmp_path):
+def test_pretrain_with_stretches_and_two_cache_lengths(tmp_path):
     from project import cache_latents, period_probe, pretrain_mae
     from project.common import load_encoder
 
     out = tmp_path / "mae"
-    common = MAE_ARGS + ["--out", str(out), "--mask-mode", "mix", "--mask-blocks", "1", "3",
-                         "--window-range", "20", "80"]  # fmt: skip
+    common = MAE_ARGS + ["--out", str(out), "--mask-mode", "block", "--mask-blocks", "1", "3"]
     pretrain_mae.main(common + ["--steps", "4"])
     assert (out / "mae.pt").is_file()
     pretrain_mae.main(common + ["--steps", "6"])  # resume keeps the settings
@@ -123,9 +79,7 @@ def test_pretrain_with_stretches_and_window_range(tmp_path):
     assert max(l["step"] for l in lines) == 6
     assert all(np.isfinite(e["val_loss"]) and np.isfinite(e["val_loss_block"]) for e in evals)
     args = json.load(open(out / "args.json"))
-    assert args["mask_mode"] == "mix" and args["window_range"] == [20.0, 80.0] and args["lam_max"] == 160.0
-    ladder = json.load(open(out / "ladder.json"))
-    assert ladder["lam_max"] == 160.0  # the longest window fits the ladder
+    assert args["mask_mode"] == "block" and args["mask_blocks"] == [1, 3]
     enc, meta = load_encoder(out / "mae.pt")
     assert enc.kind == "mae" and meta.cfg.window == 30.0
 
@@ -148,49 +102,6 @@ def test_pretrain_with_stretches_and_window_range(tmp_path):
     )
     assert res["models"]["multi/ridge"]["dim"] == 24 + 25
     assert 0.0 <= res["models"]["multi/bins"]["rec10"] <= 1.0
-
-
-def test_stretches_refused_for_the_bottleneck(tmp_path):
-    from project import pretrain_mae
-
-    with pytest.raises(SystemExit):
-        pretrain_mae.main(MAE_ARGS + ["--out", str(tmp_path / "bn"), "--steps", "2", "--bottleneck",
-                                      "--mask-mode", "block"])  # fmt: skip
-
-
-def test_error_weights_and_weighted_loss():
-    import torch
-
-    from project.pretrain_mae import error_weights
-    from romae_lc import RoMAEForPreTraining
-    from romae_lc.model import gen_mask
-
-    torch.manual_seed(0)
-    b, n = 3, 12
-    values = torch.randn(b, n, 2)
-    pad = torch.zeros(b, n, dtype=torch.bool)
-    pad[0, 9:] = True
-    w = error_weights(values, pad, (0.0, 1.0), cap=20.0)
-    assert w.shape == (b, n) and (w[pad] == 0).all() and (w[~pad] > 0).all()
-    real = (~pad).float()
-    assert torch.allclose((w * real).sum(1) / real.sum(1), torch.ones(b), atol=1e-5)  # mean 1 per window
-    assert w[1][values[1, :, 1].argmin()] >= w[1][values[1, :, 1].argmax()]  # precise points weigh more
-    # the cap: one absurdly precise point cannot take the window over
-    v2 = values.clone()
-    v2[2, 0, 1] = -20.0
-    w2 = error_weights(v2, pad, (0.0, 1.0), cap=20.0)
-    assert w2[2, 0] <= 20.0 * w2[2, 1:].median() * (n / (w2[2] * real[2]).sum()) + 1e-4 and w2[2, 0] < n
-    # uniform weights give the plain loss; the weighted loss follows the weights
-    model = RoMAEForPreTraining(decoder=dict(d_model=16, nhead=2, depth=1), encoder=dict(d_model=16, nhead=2, depth=1),
-                                n_channels=2, target_channels=1)
-    positions = torch.rand(b, 2, n) * 10 + 1
-    mask = gen_mask(0.5, pad, torch.Generator().manual_seed(1))
-    plain = model(values, positions, pad, mask).loss
-    same = model(values, positions, pad, mask, torch.ones(b, n)).loss
-    assert torch.allclose(plain, same, atol=1e-6)
-    heavy = torch.ones(b, n)
-    heavy[:, :1] = 50.0
-    assert torch.isfinite(model(values, positions, pad, mask, heavy).loss)
 
 
 def test_absolute_time_features():

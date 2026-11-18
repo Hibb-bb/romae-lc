@@ -32,5 +32,34 @@ To run any of it, check out the tag `pre-cleanup`. That tag holds the full old t
   that cover kept code were copied to `project/tests/test_common.py`,
   `project/tests/test_cache_latents.py` and `project/tests/test_encoder_loading.py`.
 
-More code moves here in later clean-up steps (the modules that the training script still
-imports today, such as the bottleneck, GRU-ODE, templates and the old `romae_lc/lewm.py`).
+## Moved in step 2 (dead options cut from the kept scripts)
+
+The kept scripts lost the options that no ICML run used. The modules behind those options
+are here now:
+
+- `project/bottleneck.py`, `project/gruode.py`, `project/decoder.py`, `project/flow.py`: the
+  bottleneck autoencoder, the GRU-ODE encoder, the query decoder and the flow predictor.
+- `project/dyn.py`: the dynamic-state add-on. Its `sigreg` function is still used; it now
+  lives in `project/jepa.py`.
+- `project/templates.py`, `project/phase_decoder.py`: smooth-fit targets, query tokens and
+  the phase / fold losses.
+- `project/train_predictor.py`, `project/lookback.py`, `project/inject.py`,
+  `project/diagnostics.py`: the predictor line. `shuffle_score` is still used; it now lives
+  in `project/common.py`. The template helpers that the phase probes use now live in
+  `project/phase_probe.py`.
+- `project/chen_data.py`, `project/eval/period_chen.py`, `project/eval/ls_benchmark.py`,
+  `project/eval/period_report.py`, `project/plot_period_examples.py`, `lomb_scargle.py`: the
+  Chen 800k data path and the old period pages.
+- `romae_lc/lewm.py`, `romae_lc/lejepa.py`: the old world model and LeJEPA classes.
+- `project/tests/test_jepa.py`, `test_mae_data.py`, `test_cycles.py`, `test_common.py`,
+  `test_cache_latents.py`: the full old test files. The tests of removed options (templates,
+  query tokens, bottleneck, window ranges, the `mix` mask, error weights, noise realisations
+  of the cache, the world-model loaders) are only here; the other tests stay in
+  `project/tests/`.
+
+Code that was cut from inside a kept file (for example the dead branches of
+`project/pretrain_mae.py` and the world-model loaders of `project/common.py`) has no copy
+here. The tag `pre-cleanup` has it.
+
+A checkpoint trained with one of the removed options cannot be resumed or loaded from this
+branch. The scripts say so and name the tag.

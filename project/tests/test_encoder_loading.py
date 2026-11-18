@@ -13,7 +13,6 @@ from project.common import (
     FrameEncoder,
     LatentEncoder,
     PooledEncoder,
-    checkpoint_kind,
     data_args_from,
     load_data,
     load_encoder,
@@ -58,20 +57,19 @@ def assert_frozen(enc: LatentEncoder):
 
 def test_load_encoder_mae(mae_ckpt):
     enc, meta = load_encoder(mae_ckpt)
-    assert enc.kind == "mae" and enc.dim == 24 and enc.history == 3
+    assert enc.kind == "mae" and enc.dim == 24
     assert enc.backbone.embed_dim == 24 and enc.backbone.rope_layout
     assert_frozen(enc)
     frames = batch_frames(meta)
     z = enc.encode(frames)
     assert z.shape == (len(frames[0].values), meta.cfg.n_frames, 24)
     assert z.dtype == torch.float32 and torch.isfinite(z).all()
-    assert torch.equal(z, enc.encode(frames, project=False))  # ignored for an AE
     mae, meta2 = load_mae(mae_ckpt)
     ref = FrameEncoder(PooledEncoder(mae)).encode(frames)
     assert torch.allclose(z, ref, atol=1e-6)
     assert meta2.step == meta.step == 4 and meta.args["width"] == 24
+    assert LatentEncoder(mae).encode(frames).shape == z.shape
+    # a checkpoint of a kind whose code moved to legacy/ is refused with a clear message
     ckpt = torch.load(mae_ckpt, map_location="cpu", weights_only=False)
-    assert checkpoint_kind(ckpt) == "mae"
-    assert LatentEncoder(mae, "mae").encode(frames).shape == z.shape
-    with pytest.raises(ValueError):
-        LatentEncoder(mae, "vae")
+    with pytest.raises(ValueError, match="pre-cleanup"):
+        load_mae(dict(ckpt, kind="bottleneck"))

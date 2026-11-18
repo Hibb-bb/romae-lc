@@ -1,4 +1,4 @@
-"""Shared pieces of the latent world model project.
+"""Shared pieces of the project: data, tokens, the rotary ladder, checkpoints, probes.
 
 Everything builds on ``romae_lc``: records come from
 :func:`~romae_lc.load_pc` with the fine ``class_str`` label, windows from
@@ -28,8 +28,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from contextlib import contextmanager
-
 from romae_lc import (
     CLASSES,
     DEFAULT_SURVEYS,
@@ -37,28 +35,24 @@ from romae_lc import (
     FrameConfig,
     FrameDataset,
     Record,
-    RoMAE,
     RoMAEForPreTraining,
     Tokens,
-    collapse_layout,
     collate_frames,
-    frame_grid,
     load_pc,
     normalize,
     resample_ladder,
     simulate,
     suggest_time_encoding,
     time_series,
+    time_shuffle_score,
     timescales_for,
     tokenize,
     wavelengths_for,
 )
 from romae_lc import layout as rope_layout
-from romae_lc.lewm import ARPredictor, LeWorldModel, lewm_mlp
 from romae_lc.model import pool_tokens
 
 DATA_ROOT = "/projects/bfrf/data/PC_matches/ZTFxPC"
-PROJECT_DIR = Path(__file__).resolve().parent
 LABEL_FIELD = "class_str"
 
 
@@ -149,11 +143,6 @@ def load_data(args, splits: Sequence[str] = ("train", "validation")) -> Data:
         out = {s: [normalize(records[i], ref_days=nd) for i in parts[s]] for s in splits}
         wl = {i: s.wavelength_nm for i, s in enumerate(DEFAULT_SURVEYS)}
         return Data(out, CLASSES, wl)
-    from project.chen_data import is_cache, load_chen
-
-    if is_cache(args.data):  # the 800k-star Chen cache (project.chen_data): our periods, splits by id hash
-        out, classes = load_chen(args.data, splits, args.max_rows, args.min_points)
-        return Data(out, classes, wavelengths_for(PC_BANDS))
     classes = class_vocabulary(args.data)
     keep = None if not args.classes else set(args.classes)
     if keep and not keep <= set(classes):
@@ -348,25 +337,6 @@ def grid_starts(record: Record, cfg: FrameConfig, advance=None, start=None):
     return start + advance * cfg.window * np.arange(n, dtype=np.float64)
 
 
-def grid_item(
-    record: Record,
-    cfg: FrameConfig,
-    index=0,
-    advance=None,
-    start=None,
-    cap=None,
-    seed=0,
-) -> dict:
-    """A :func:`~romae_lc.frame_grid` item (every window that fits) with
-    windows above ``cap`` points deterministically subsampled, ready for
-    ``TokenSpec.collate()``."""
-    frames, actions = frame_grid(record, cfg, start=start, advance=advance, fill=True)
-    if cap is not None:
-        rng = np.random.default_rng([seed, index])
-        frames = [subsample_frame(f, cap, rng) for f in frames]
-    return dict(frames=frames, actions=actions, label=record.label, index=index)
-
-
 # ------------------------------------------------------------------- time ladder
 
 
@@ -435,7 +405,7 @@ class RopeGeometry:
 
 
 def rope_geometry(args) -> RopeGeometry:
-    """The rotary geometry of the backbone ``build_backbone(args, ...)``
+    """The rotary geometry of the backbone that ``rope_layouts(args, ...)``
     builds (``--width --heads --depth --time-frac --p-rope``)."""
     head_dim = args.width // args.heads
     blocks = rope_layout(head_dim, 2, time_frac=args.time_frac, p=args.p_rope)
@@ -535,11 +505,6 @@ def add_ladder_args(parser) -> None:
         default=None,
         help="days per position unit for --rope-wavelengths (census: 0.0015915)",
     )
-
-
-def time_block_dim(width: int, heads: int, p: float, time_frac=None) -> int:
-    """Channels of the rotary time block of a backbone of this size."""
-    return rope_layout(width // heads, 2, time_frac=time_frac, p=p)[0]["dim"]
 
 
 def measure_wavelengths(
@@ -707,16 +672,6 @@ def fuse_frames(frames: Sequence) -> tuple[torch.Tensor, torch.Tensor, torch.Ten
     return values, positions, pad
 
 
-def fused_encode(self, frames: Sequence, project: bool = True) -> torch.Tensor:
-    """Drop-in for :meth:`~romae_lc.LeWorldModel.encode` that runs the
-    backbone once over all ``T`` frames (:func:`fuse_frames`) instead of
-    once per frame: the same latents, a quarter of the kernel launches of a
-    4-frame sequence."""
-    b, t = frames[0].values.shape[0], len(frames)
-    feats = self.backbone(*fuse_frames(frames)).view(t, b, -1).transpose(0, 1)
-    return self._project(feats) if project else feats
-
-
 def fused_features(backbone: nn.Module, frames: Sequence) -> torch.Tensor:
     """``[B, T, D]`` features of a ``(values, positions, pad_mask) -> [B, D]``
     backbone over ``T`` frames in one call (:func:`fuse_frames`)."""
@@ -725,9 +680,8 @@ def fused_features(backbone: nn.Module, frames: Sequence) -> torch.Tensor:
 
 
 class FrameEncoder(nn.Module):
-    """A bare backbone with the ``encode(frames, project)`` interface of
-    :class:`~romae_lc.LeWorldModel`, so :func:`probe` and the diagnostics run
-    on an encoder that has no world model yet (masked pretraining)."""
+    """A bare backbone with the ``encode(frames, project)`` interface that
+    :func:`probe` and :func:`shuffle_score` call during pretraining."""
 
     def __init__(self, backbone: nn.Module):
         super().__init__()
@@ -765,37 +719,6 @@ class PooledEncoder(nn.Module):
         return pool_tokens(x, pad, "cls", self.model.use_cls)
 
 
-@contextmanager
-def batch_stats(module: nn.Module):
-    """Run the BatchNorm layers of ``module`` on batch statistics (train
-    mode) inside the block, leaving their running statistics untouched."""
-    bns = [
-        m for m in module.modules() if isinstance(m, nn.modules.batchnorm._BatchNorm)
-    ]
-    saved = [(m.training, m.momentum) for m in bns]
-    for m in bns:
-        m.train()
-        m.momentum = 0.0
-    try:
-        yield
-    finally:
-        for m, (training, momentum) in zip(bns, saved):
-            m.train(training)
-            m.momentum = momentum
-
-
-def use_fused_encode(model: LeWorldModel, enabled: bool = True) -> LeWorldModel:
-    """Install :func:`fused_encode` on one model instance (or restore the
-    per-frame method with ``enabled=False``)."""
-    import types
-
-    if enabled:
-        model.encode = types.MethodType(fused_encode, model)
-    elif "encode" in model.__dict__:
-        del model.encode
-    return model
-
-
 # ------------------------------------------------------------------------ models
 
 
@@ -808,11 +731,7 @@ PRESETS = {
 
 
 def add_model_args(parser) -> None:
-    g = parser.add_argument_group(
-        "model (--size light by default; the design doc's full sizes are "
-        "--depth 12 --pred-depth 6 --pred-heads 16 --pred-dim-head 64 "
-        "--pred-mlp 2048 --proj-hidden 2048)"
-    )
+    g = parser.add_argument_group("model (the encoder; --size light by default)")
     g.add_argument(
         "--size",
         choices=tuple(PRESETS),
@@ -834,35 +753,11 @@ def add_model_args(parser) -> None:
         "wavelength (ZTF has two bands, so 8 of 64 channels suffice for them)",
     )
     g.add_argument("--attention", choices=("softmax", "linear"), default="softmax")
-    g.add_argument("--pred-depth", type=int, default=3)
-    g.add_argument("--pred-heads", type=int, default=4)
-    g.add_argument("--pred-dim-head", type=int, default=48)
-    g.add_argument("--pred-mlp", type=int, default=768)
-    g.add_argument("--pred-dropout", type=float, default=0.1)
-    g.add_argument("--proj-hidden", type=int, default=1024, help="projector width")
-    g.add_argument("--history", type=int, default=3, help="predictor context")
-    g.add_argument("--lamb", type=float, default=0.1, help="SIGReg weight")
-    g.add_argument("--n-slices", type=int, default=1024, help="SIGReg projections")
-    g.add_argument("--knots", type=int, default=17, help="Epps-Pulley nodes")
-    g.add_argument("--t-max", type=float, default=3.0, help="Epps-Pulley bound")
     g.add_argument(
         "--no-err-channel",
         action="store_true",
         help="single-channel encoder (ablation)",
     )
-
-
-MODEL_KEYS = (
-    "size",
-    "width",
-    "depth",
-    "heads",
-    "mlp_ratio",
-    "p_rope",
-    "time_frac",
-    "attention",
-    "no_err_channel",
-)
 
 
 def resolve_model_args(args) -> argparse.Namespace:
@@ -900,56 +795,6 @@ def rope_layouts(args, ladder: Ladder):
     return lay(ladder.timescales)
 
 
-def build_backbone(args, ladder: Ladder, n_channels: int) -> RoMAE:
-    return RoMAE(
-        encoder=encoder_config(args),
-        n_channels=n_channels,
-        n_axes=2,
-        rope=rope_layouts(args, ladder),
-    )
-
-
-def flat_layout(backbone: RoMAE) -> list[dict]:
-    """The backbone's rotary layout with per-head and per-layer ladders
-    collapsed to one shared ladder, for decoders with their own head count."""
-    return collapse_layout(backbone.rope_layout)
-
-
-def build_world_model(
-    args,
-    backbone: RoMAE,
-    n_frames: int,
-    fused: bool = True,
-    projector: nn.Module | None = None,
-) -> LeWorldModel:
-    """The stage-2 world model of ``args`` over ``backbone``; ``projector``
-    replaces the default ``lewm_mlp(d, args.proj_hidden)`` (an
-    ``nn.Identity()`` makes the latent the backbone feature itself, which is
-    what a frozen backbone wants)."""
-    d = backbone.embed_dim
-    predictor = ARPredictor(
-        d,
-        n_frames=max(args.history, n_frames - 1),
-        depth=args.pred_depth,
-        heads=args.pred_heads,
-        dim_head=args.pred_dim_head,
-        mlp_dim=args.pred_mlp,
-        dropout=args.pred_dropout,
-    )
-    model = LeWorldModel(
-        backbone,
-        projector=lewm_mlp(d, args.proj_hidden) if projector is None else projector,
-        predictor=predictor,
-        pred_proj=lewm_mlp(d, args.proj_hidden),
-        history=args.history,
-        lamb=args.lamb,
-        n_slices=args.n_slices,
-        t_max=args.t_max,
-        n_points=args.knots,
-    )
-    return use_fused_encode(model, fused)
-
-
 def n_params(module: nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
 
@@ -959,8 +804,7 @@ def n_params(module: nn.Module) -> int:
 
 @dataclass
 class WMMeta:
-    """Everything a stage-1 (autoencoder, ``mae.pt``) or stage-2 (world
-    model, ``wm.pt``) checkpoint records besides the weights."""
+    """Everything an encoder checkpoint (``mae.pt``) records besides the weights."""
 
     spec: TokenSpec
     cfg: FrameConfig
@@ -969,40 +813,6 @@ class WMMeta:
     args: dict
     step: int
     metrics: dict | None = None
-
-
-def wm_state(
-    model: LeWorldModel, spec, cfg, ladder, classes, args, step, metrics=None, **extra
-):
-    backbone = model.backbone
-    return dict(
-        step=step,
-        args=dict(vars(args)) if isinstance(args, argparse.Namespace) else dict(args),
-        state_dict=model.state_dict(),
-        hparams=model.hparams,
-        backbone=dict(
-            backbone.hparams, encoder=asdict(backbone.cfg), pool=backbone.pool
-        ),
-        spec=spec.to_dict(),
-        frames=asdict(cfg),
-        ladder=ladder.to_dict(),
-        classes=list(classes),
-        metrics=metrics,
-        **extra,
-    )
-
-
-def warm_start(model, ckpt: dict, skip_prefixes: Sequence[str] = ()) -> dict:
-    """Copy every tensor of ``ckpt["state_dict"]`` whose name and shape match
-    ``model``'s, leave the rest as initialised, and return the counts
-    (``copied``, ``left``, ``left_names``). ``skip_prefixes`` are names not
-    to copy (e.g. a head of another width)."""
-    sd = ckpt["state_dict"]
-    own = model.state_dict()
-    picked = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape and not any(k.startswith(p) for p in skip_prefixes)}
-    left = [k for k in own if k not in picked]
-    model.load_state_dict(picked, strict=False)
-    return dict(copied=len(picked), left=len(left), left_names=left)
 
 
 def mae_state(
@@ -1040,15 +850,6 @@ def _read_ckpt(path) -> dict:
     return torch.load(path, map_location="cpu", weights_only=False)
 
 
-def checkpoint_kind(ckpt: dict) -> str:
-    """``"mae"`` for a stage-1 autoencoder checkpoint (:func:`mae_state`, or
-    a bottleneck autoencoder with ``kind == "bottleneck"``), ``"wm"`` for a
-    stage-2 world-model checkpoint (:func:`wm_state`)."""
-    if "mae" in ckpt or ckpt.get("kind") in ("bottleneck", "jepa", "gruode"):
-        return "mae"
-    return "wm"
-
-
 def _meta_from(ckpt: dict) -> WMMeta:
     return WMMeta(
         TokenSpec.from_dict(ckpt["spec"]),
@@ -1062,28 +863,24 @@ def _meta_from(ckpt: dict) -> WMMeta:
 
 
 def load_mae(path, device="cpu") -> tuple[nn.Module, WMMeta]:
-    """``(model in eval mode, meta)`` from a stage-1 ``mae.pt`` (or its
-    ``last.pt``, or the loaded dict); ``model.backbone()`` is the pretrained
-    encoder. A checkpoint with ``kind == "bottleneck"`` rebuilds a
-    :class:`project.bottleneck.BottleneckAE` instead of a
-    :class:`~romae_lc.RoMAEForPreTraining`; both expose ``backbone(pool)``,
-    ``encode``, ``use_cls``, ``rope_layout``, ``embed_dim`` and ``hparams``."""
+    """``(model in eval mode, meta)`` from a ``mae.pt`` (or its ``last.pt``,
+    or the loaded dict). ``kind == "jepa"`` rebuilds a
+    :class:`project.jepa.TokenJEPA`; a checkpoint without ``kind`` is a plain
+    masked autoencoder (:class:`~romae_lc.RoMAEForPreTraining`). Both expose
+    ``backbone(pool)``, ``encode``, ``use_cls``, ``rope_layout``,
+    ``embed_dim`` and ``hparams``. Other kinds (bottleneck, GRU-ODE, world
+    model) are legacy: check out the tag ``pre-cleanup`` to load them."""
     ckpt = _read_ckpt(path)
-    if ckpt.get("kind") == "bottleneck":
-        from project.bottleneck import BottleneckAE  # written by another agent
-
-        model = BottleneckAE.from_checkpoint(ckpt)
-    elif ckpt.get("kind") == "jepa":
+    kind = ckpt.get("kind")
+    if kind == "jepa":
         from project.jepa import TokenJEPA
 
         model = TokenJEPA.from_checkpoint(ckpt)
-    elif ckpt.get("kind") == "gruode":
-        from project.gruode import GRUODEForPreTraining
-
-        model = GRUODEForPreTraining.from_checkpoint(ckpt)
-    else:
+    elif kind is None and "mae" in ckpt:
         model = RoMAEForPreTraining(**ckpt["mae"], **ckpt["backbone"])
         model.load_state_dict(ckpt["state_dict"])
+    else:
+        raise ValueError(f"not a JEPA or masked-autoencoder checkpoint (kind {kind!r}); its code is in legacy/, check out the tag pre-cleanup to load it")
     return model.to(device).eval(), _meta_from(ckpt)
 
 
@@ -1094,76 +891,25 @@ def save_atomic(state: dict, path: Path) -> None:
     tmp.replace(path)
 
 
-def load_wm(path, device="cpu") -> tuple[LeWorldModel, WMMeta]:
-    """``(model in eval mode, meta)`` from a stage-2 ``wm.pt`` (or
-    ``last.pt``, or the loaded dict), with :func:`fused_encode` installed and
-    ``model.encoder_only = False``.
-
-    A stage-1 autoencoder checkpoint (:func:`checkpoint_kind` ``"mae"``) is
-    accepted too: the result wraps its frozen CLS encoder
-    (``mae.backbone("cls")``) in a :class:`~romae_lc.LeWorldModel` with an
-    ``nn.Identity`` projector, ``history=3``, ``lamb=0`` and the default,
-    untrained predictor and ``pred_proj``, and ``model.encoder_only = True``;
-    ``meta.args`` is the autoencoder's args plus ``encoder_frozen=True`` and
-    ``encoder_kind="mae"``. Its ``encode(frames)`` is then the stage-1 latent
-    (the pooled CLS feature, what :class:`LatentEncoder` returns), so the
-    stage-3 decoder, the gates and the probes run on frozen autoencoder
-    latents through this one path; its ``predict()``, ``rollout()`` and
-    ``surprise()`` are untrained noise, so a caller that needs a predictor
-    must check ``encoder_only``. Such a model re-saves through
-    :func:`wm_state` (``proj_hidden`` 0 stands for the Identity projector)
-    as an ordinary stage-2 checkpoint whose predictor is untrained."""
-    ckpt = _read_ckpt(path)
-    if checkpoint_kind(ckpt) == "mae":
-        mae, meta = load_mae(ckpt, device)
-        model = LeWorldModel(
-            mae.backbone("cls"), projector=nn.Identity(), history=3, lamb=0.0
-        )
-        use_fused_encode(model)
-        model.encoder_only = True
-        meta.args = dict(meta.args, encoder_frozen=True, encoder_kind="mae")
-        return model.to(device).eval(), meta
-    backbone = RoMAE(**ckpt["backbone"])
-    model = LeWorldModel.from_hparams(backbone, ckpt["hparams"])
-    model.load_state_dict(ckpt["state_dict"])
-    use_fused_encode(model)
-    model.encoder_only = False
-    return model.to(device).eval(), _meta_from(ckpt)
-
-
 class LatentEncoder(nn.Module):
-    """One frozen encoder over the two kinds of checkpoint the later stages
-    read: a stage-1 autoencoder (``mae.pt``, ``kind == "mae"``: the latent is
-    the pooled CLS feature of the RoMAE encoder, :class:`PooledEncoder`) or
-    a stage-2 world model (``wm.pt``, ``kind == "wm"``: the post-projector
-    latent of :meth:`~romae_lc.LeWorldModel.encode`). ``encode(frames)``
-    returns ``[B, T, dim]`` float latents in one backbone call over the
-    ``T`` frames; they feed the stage-2 predictor (cached), the stage-3
-    decoder, the gates and the probes, so the module is always in eval mode
-    with every parameter frozen (``train()`` keeps eval) and it is never
-    saved. Attributes: ``kind``, ``dim`` (latent width), ``history`` (the
-    world model's predictor context, 3 for an autoencoder), ``backbone``
-    (the ``(values, positions, pad_mask) -> [B, dim]`` encoder module, with
-    ``embed_dim`` and ``rope_layout`` for a decoder built on top) and
-    ``model`` (the loaded checkpoint model).
+    """A frozen encoder loaded from a checkpoint. The latent of a window is
+    the pooled CLS feature of the encoder (:class:`PooledEncoder`).
+    ``encode(frames)`` returns ``[B, T, dim]`` float latents in one backbone
+    call over the ``T`` frames. The module is always in eval mode with every
+    parameter frozen (``train()`` keeps eval) and it is never saved.
+    Attributes: ``kind`` (always ``"mae"``; the latent caches store it),
+    ``dim`` (latent width), ``backbone`` (the ``(values, positions,
+    pad_mask) -> [B, dim]`` encoder module) and ``model`` (the loaded
+    checkpoint model).
 
-        enc, meta = load_encoder("project/runs/mae_w250/mae.pt", device)
-        z = enc.encode(batch["frames"])  # [B, T, 192]
+        enc, meta = load_encoder("project/runs/enc_j1/mae.pt", device)
+        z = enc.encode(batch["frames"])  # [B, T, 384]
     """
 
-    KINDS = ("mae", "wm")
-
-    def __init__(self, model: nn.Module, kind: str):
+    def __init__(self, model: nn.Module):
         super().__init__()
-        if kind not in self.KINDS:
-            raise ValueError(f"kind must be one of {self.KINDS}, got {kind!r}")
-        self.kind, self.model = kind, model
-        if kind == "wm":
-            self.backbone = model.backbone
-            self.history = int(model.history)
-        else:
-            self.backbone = PooledEncoder(model)
-            self.history = 3
+        self.kind, self.model = "mae", model
+        self.backbone = PooledEncoder(model)
         self.dim = int(model.embed_dim)
         self.model.requires_grad_(False)
         self.eval()
@@ -1173,25 +919,15 @@ class LatentEncoder(nn.Module):
         no dropout) whatever the caller asks."""
         return super().train(False)
 
-    def encode(self, frames: Sequence, project: bool | None = None) -> torch.Tensor:
-        """``[B, T, dim]`` latents of ``T`` frames. ``project`` applies to a
-        world model only (``False`` returns its pre-projector backbone
-        features); an autoencoder has no projector and ignores it."""
-        if self.kind == "wm":
-            z = self.model.encode(frames, project=True if project is None else project)
-        else:
-            z = fused_features(self.backbone, frames)
-        return z.float()
+    def encode(self, frames: Sequence) -> torch.Tensor:
+        """``[B, T, dim]`` latents of ``T`` frames."""
+        return fused_features(self.backbone, frames).float()
 
 
 def load_encoder(path, device="cpu") -> tuple[LatentEncoder, WMMeta]:
-    """``(frozen LatentEncoder, meta)`` from a stage-1 ``mae.pt`` or a
-    stage-2 ``wm.pt`` (:func:`checkpoint_kind` tells them apart), via
-    :func:`load_mae` or :func:`load_wm`."""
-    ckpt = _read_ckpt(path)
-    kind = checkpoint_kind(ckpt)
-    model, meta = (load_mae if kind == "mae" else load_wm)(ckpt, device)
-    return LatentEncoder(model, kind), meta
+    """``(frozen LatentEncoder, meta)`` from a ``mae.pt`` (:func:`load_mae`)."""
+    model, meta = load_mae(path, device)
+    return LatentEncoder(model), meta
 
 
 # ------------------------------------------------------------------------ probes
@@ -1280,6 +1016,29 @@ def embed_records(model, records, cfg, spec, batch_size, device, project=False, 
         zs.append(model.encode(frames, project=project).mean(1).float().cpu())
     model.train(was)
     return torch.cat(zs).numpy(), list(ds.indices)
+
+
+@torch.no_grad()
+def shuffle_score(model, records, cfg, spec, device, n=512, batch_size=64, seed=0) -> float:
+    """The package's :func:`~romae_lc.time_shuffle_score` on the first window
+    of one deterministic sequence per record, standardised with shared
+    statistics so the batches are comparable (near 1 = the encoder is blind
+    to time)."""
+    recs = subset(records, n, seed)
+    ds = FrameDataset(recs, cfg, seed=seed, epoch_seed=False)
+    loader = DataLoader(ds, batch_size, shuffle=False, collate_fn=spec.collate())
+    backbone = model.backbone
+    was = backbone.training
+    backbone.eval()
+    toks = [b["frames"][0].to(device) for b in loader]
+    z = torch.cat([backbone(*t).float() for t in toks])
+    stats = (z.mean(0), z.std(0, unbiased=False) + 1e-6)
+    gen = torch.Generator().manual_seed(seed)
+    scores = [
+        time_shuffle_score(backbone, t, generator=gen, stats=stats).cpu() for t in toks
+    ]
+    backbone.train(was)
+    return float(torch.cat(scores).mean())
 
 
 def probe_metrics(
@@ -1444,11 +1203,6 @@ def add_device_arg(parser) -> None:
 
 def get_device(args) -> torch.device:
     return torch.device(args.device)
-
-
-def to_device(batch: dict, device):
-    frames = [f.to(device) for f in batch["frames"]]
-    return frames, batch["actions"].to(device)
 
 
 class JsonlLog:

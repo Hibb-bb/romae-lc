@@ -268,7 +268,7 @@ for ck in a.ckpts:
         recs = fit + recs
         star_train = np.r_[np.ones(len(fit), bool), np.zeros(len(recs) - len(fit), bool)]
     print(f"{a.split}: {int((~star_train).sum())} stars scored; decoder on {int(star_train.sum())} stars of {a.fit_split or a.split}", flush=True)
-    ds = WindowDataset([(a.split, recs, list(range(len(recs))))], cfg, a.stride, cfg.max_tokens, 0, 1, 0.5)
+    ds = WindowDataset([(a.split, recs, list(range(len(recs))))], cfg, a.stride, cfg.max_tokens, 0)
     t0 = time.time()
     Hn, W = collect(model, ds, spec, cfg.window, recs)
     label = os.path.basename(os.path.dirname(ck)) + (f"_pgap{a.phase_gap:g}" if PGAP else f"_gap{a.gap_share:g}" if GAP else "")

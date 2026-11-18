@@ -7,7 +7,7 @@ position vector ``[n_axes]`` (time, then wavelength coordinates), see
 ``pad_mask`` (True = padding).
 
 * :class:`RoMAE` - encoder-only backbone returning a pooled embedding; the
-  model to pretrain with :class:`~romae_lc.lejepa.LeJEPA` and to probe.
+  model to probe.
 * :class:`RoMAEForPreTraining` - the paper's masked-autoencoding recipe:
   the encoder sees the visible tokens, a light decoder reconstructs the
   values of the masked tokens from MASK tokens at their positions.
@@ -768,7 +768,7 @@ class MaskedDecoder(nn.Module):
     encoder that belongs to another model.
 
     The encoder is not registered here (its parameters stay with their
-    owner, e.g. the ``backbone`` of a :class:`~romae_lc.lewm.LeWorldModel`),
+    owner, e.g. the ``backbone`` of a world model),
     it is passed to :meth:`forward`, so a masked reconstruction loss can be
     added to any objective trained on the same backbone. The decoder's
     rotary layout is the encoder's, rescaled by :func:`decoder_layout`

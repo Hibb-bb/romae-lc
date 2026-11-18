@@ -1,7 +1,7 @@
 """CPU tests of the latent cache (project/cache_latents.py) on the toy simulator: a
 tiny autoencoder (``pretrain_mae``, 4 steps) is trained once per module and its window
-grid is cached. The tests check the layout of the cache, the window starts, the extra
-realisations and ``--max-objects`` / ``--seed``. Taken from the old test_predictor.py."""
+grid is cached. The tests check the layout of the cache, the window starts and
+``--max-objects`` / ``--seed``."""
 
 from __future__ import annotations
 
@@ -94,39 +94,6 @@ def test_cache_layout_and_starts(latents, mae_ckpt):
     assert c["n_tokens"][row] == n_tokens[w] and len(frames[w][0]) <= 32
     ref = enc.encode([emeta.spec.tokens([frames[w]])])[0, 0]
     assert torch.allclose(z[row].float(), ref, atol=1e-2, rtol=1e-2)
-
-
-def test_cache_realisations(latents, mae_ckpt):
-    from project.train_predictor import LatentStore
-
-    out = mae_ckpt.parent / "latents_real.pt"
-    cache_latents.main(
-        [
-            "--ckpt", str(mae_ckpt), "--out", str(out), "--stride", str(STRIDE),
-            "--device", "cpu", "--workers", "0", "--batch-size", "7", "--realisations", "3",
-        ]  # fmt: skip
-    )
-    c, base = torch.load(out, map_location="cpu", weights_only=False), torch.load(latents, map_location="cpu", weights_only=False)
-    n = c["z"].shape[0]
-    # realisation 0 is the plain cache (different batch padding: float16 rounding only)
-    assert torch.allclose(c["z"].float(), base["z"].float(), atol=2e-3, rtol=1e-2)
-    assert c["z_alt"].shape == (2, n, 24) and torch.isfinite(c["z_alt"].float()).all()
-    assert c["meta"]["realisations"] == 3 and c["meta"]["real_drop"] == 0.5
-    d = (c["z_alt"].float() - c["z"].float()[None]).norm(dim=-1)
-    assert (d > 0).float().mean() > 0.9  # a realisation moves the latent
-    assert (c["z_alt"][0] != c["z_alt"][1]).any()  # and the two differ
-    store = LatentStore(c, "validation", "cpu", int(c["meta"]["min_tokens"]))
-    assert store.n_real == 3 and store.z_all.shape == (3, store.n, 24)
-    rows = torch.arange(min(5, store.n))
-    g = torch.Generator().manual_seed(0)
-    got = store.gather(rows, g)
-    assert got.shape == (len(rows), 24)
-    ok = torch.stack([(got == store.z_all[k, rows]).all(-1) for k in range(3)]).any(0)
-    assert ok.all()  # every gathered row is one of its realisations
-    assert torch.isfinite(store.replicate_std(rows)).all() and store.replicate_std(rows).shape == (len(rows), 24)
-    plain = LatentStore(base, "validation", "cpu", int(base["meta"]["min_tokens"]))
-    assert plain.n_real == 1 and torch.equal(plain.gather(rows), plain.z[rows])
-    assert torch.isnan(plain.replicate_std(rows)).all()
 
 
 def test_cache_max_objects_and_seed(latents, mae_ckpt):

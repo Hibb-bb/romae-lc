@@ -54,7 +54,7 @@ for ck in a.ckpts:
     # every checkpoint gets tokens built with its own spec (time scale, error stats) and
     # its own window; the first version used the first checkpoint's for all of them
     cfg, spec = meta.cfg, meta.spec
-    ds = WindowDataset([("validation", recs, list(idx))], cfg, 0.25, cfg.max_tokens, 0, 1, 0.5)
+    ds = WindowDataset([("validation", recs, list(idx))], cfg, 0.25, cfg.max_tokens, 0)
     loader = DataLoader(ds, 256, shuffle=False, num_workers=0, collate_fn=make_collate(spec))
     off = ds.offsets[0]
     print(f"[{a.label}] {ck}: window {cfg.window} d, max_tokens {cfg.max_tokens}, time_scale {spec.tokenize['time_scale']:.5f}, {ds.total} windows", flush=True)
