@@ -15,3 +15,4 @@ results/
 *.npz
 .venv-x86/
 project/jobs/queue.txt
+.golden/
