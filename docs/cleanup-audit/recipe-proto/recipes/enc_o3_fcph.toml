@@ -1,0 +1,3 @@
+extends = "enc_o3.toml"
+wandb_group = "option3"
+forecast_tail = [10, 60]

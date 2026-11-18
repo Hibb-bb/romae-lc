@@ -1,0 +1,28 @@
+# Option 3 base (docs/PLAN.md, Phase 1 end): token JEPA from enc_j1, small predictor,
+# phase rope at the encoder's own frequency. 20k steps.
+[model]
+size = "wide"
+spectral = true
+spectral_aux = 0.5
+phase_rope = 4
+phase_freq = "local"
+
+[jepa]
+jepa = true
+jepa_proj = 32
+jepa_recon_weight = 0.5
+jepa_init = "project/runs/enc_j1/mae.pt"
+
+[mask]
+mask_mode = "blockplus"
+mask_ratio = 0.5
+mask_block_share = 0.5
+
+[data]
+window = 250.0
+min_tokens = 16
+max_tokens = 256
+
+[train]
+steps = 20000
+batch_size = 64

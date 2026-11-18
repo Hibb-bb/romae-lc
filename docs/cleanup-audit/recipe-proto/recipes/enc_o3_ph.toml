@@ -1,0 +1,3 @@
+# enc_o3_ph: phase rope only, no forecast tail (lane 1 of jobs/option3_one.sh).
+extends = "enc_o3.toml"
+wandb_group = "option3"
