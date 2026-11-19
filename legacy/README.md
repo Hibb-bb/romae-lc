@@ -45,7 +45,7 @@ are here now:
   the phase / fold losses.
 - `project/train_predictor.py`, `project/lookback.py`, `project/inject.py`,
   `project/diagnostics.py`: the predictor line. `shuffle_score` is still used; it now lives
-  in `project/common.py`. The template helpers that the phase probes use now live in
+  in `project/probes.py`. The template helpers that the phase probes use now live in
   `project/phase_probe.py`.
 - `project/chen_data.py`, `project/eval/period_chen.py`, `project/eval/ls_benchmark.py`,
   `project/eval/period_report.py`, `project/plot_period_examples.py`, `lomb_scargle.py`: the
@@ -58,11 +58,26 @@ are here now:
   `project/tests/`.
 
 Code that was cut from inside a kept file (for example the dead branches of
-`project/pretrain_mae.py` and the world-model loaders of `project/common.py`) has no copy
+`project/pretrain_mae.py`, now `project/train.py`, and the world-model loaders of
+`project/common.py`, now `project/checkpoint.py`) has no copy
 here. The tag `pre-cleanup` has it.
 
 A checkpoint trained with one of the removed options cannot be resumed or loaded from this
 branch. The scripts say so and name the tag.
+
+## Renamed in step 3 (new module layout)
+
+Nothing moved to `legacy/` in this step. Kept files were renamed and split:
+
+| old | now |
+|---|---|
+| `project/pretrain_mae.py` | `project/train.py` |
+| `project/common.py` | `project/data.py`, `windows.py`, `backbone.py`, `checkpoint.py`, `probes.py`, `utils.py` |
+| `project/mae_data.py` | `project/masks.py` |
+| the view helpers of `project/jepa.py` | `project/views.py` |
+
+The flags of the runs are now recipe files in `project/recipes/`. `docs/CODE-MAP.md` has the full
+table of old and new names.
 
 ## Moved in step 4 (evaluation and job scripts)
 
@@ -91,3 +106,10 @@ moved to `legacy/project/jobs/`:
 - `attn_probe.sh`, `token_phase_probe.sh`, `cache_latents.sh`, `period_probe.sh`,
   `classify_rf.sh`: wrappers of single steps. Run the python module instead.
 - `submit_queue.sh`: the queue helper for the interactive partition.
+
+## Moved in step 5 (docs)
+
+- `project/README.md`: the old guide of the world-model line, with its dated decisions. The root
+  `README.md` replaces it as the entry page.
+- The old root `README.md` described the library together with the LeJEPA and LeWorldModel classes.
+  Its library part is now `docs/LIBRARY.md`. The tag `pre-cleanup` has the old page.

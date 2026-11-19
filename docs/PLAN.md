@@ -23,11 +23,11 @@ and forecasting. New ideas that are not in this plan wait until the current phas
 
 ### Test card (every run)
 
-1. Classification: macro F1, 13 classes, attention probe (`project/eval/attn_probe.py`).
+1. Classification: macro F1, 13 classes, attention probe (`project/eval/card_class.py`).
 2. Period: log-period R2 and the spectral-peak hit rate.
-3. Per-token phase R2 (`project/eval/token_phase_probe.py`).
+3. Per-token phase R2 (`project/eval/card_phase.py`).
 4. Forecasting: share within 2 sigma, 0.5 to 10 days past the window
-   (`project/eval/state_decode_probe.py`, figure `project/eval/decode_figs.py`).
+   (`legacy/project/eval/state_decode_probe.py`, figure `legacy/project/eval/decode_figs.py`).
 5. Later: cross-survey retrieval and transfer; physical parameters.
 
 ### Where we are (2026-11-03)
@@ -44,7 +44,7 @@ Forecast decoding of J3 (100 stars, 30 held out, 8,773 forecasts, MLP decoder):
 within 2 sigma, predicted state 0.46, no change 0.27, Fourier fit 0.67, the target's own
 state 0.97 (the ceiling). The state holds the brightness; the prediction step is the weak part.
 
-The add-on predictor (`project/dyn.py`, `DynHead`) is a fixed rotation: state = Linear(384 -> 16)
+The add-on predictor (`legacy/project/dyn.py`, `DynHead`) is a fixed rotation: state = Linear(384 -> 16)
 of the token output, 8 pairs rotated by 2 pi k f dt (f = the star's median spectral estimate),
 times a damping exp(-g_k dt) from the source CLS. About 31k learned weights; the step itself
 is not learned. It can only rotate and shrink the state.
@@ -109,14 +109,14 @@ more harmonics, or a small transformer over state, dt and f) before adding losse
 
 - The interactive queue holds J7, J3c, J4c and J4Hami (about 30 h). J4c and J4Hami carry the
   CLS terms the plan drops; proposed: remove them, keep J7 and J3c.
-- Submit Phase 1a and 1b once the smoke job passes. Done 11-04: job 3528784 (`project/jobs/phase1.sh`, one
+- Submit Phase 1a and 1b once the smoke job passes. Done 11-04: job 3528784 (`legacy/project/jobs/phase1.sh`, one
   4-GPU node, four lanes): D1-D4 on J3, J3b, J4; runs enc_p1_j3t, enc_p1_j3tdec (band + learned spread),
   enc_p1_sig0, enc_p1_sigbatch (SIGReg across stars, no mean penalty), enc_p1_norot, enc_p1_noadd; each then
   eval_encoder.sh and the decoding probe. J4c and J4Hami parked in queue.txt (commented out).
-- Added 11-04, job 3529039 (`project/jobs/phase1b.sh`, second 4-GPU node): enc_p1_nce0 (J3, no contrast),
+- Added 11-04, job 3529039 (`legacy/project/jobs/phase1b.sh`, second 4-GPU node): enc_p1_nce0 (J3, no contrast),
   enc_p1_mask75 (J3, 70-80 % hidden), enc_p1_fc (masked JEPA in forecast mode, `--forecast-tail 5 30`: the last
   5-30 days of each window hidden, no add-on), enc_p1_fc75 (both). Forecast test of the masked predictor:
-  `project/eval/jepa_forecast_probe.py`. On J3 (30 stars, CPU check) its predictor cannot forecast past the
+  `project/eval/card_forecast.py`. On J3 (30 stars, CPU check) its predictor cannot forecast past the
   window: within 2 sigma, recon head 0.10, decoded predicted latent 0.20, window mean 0.12, Fourier 0.54,
   target latent 0.72 (ceiling); latent error / variance 0.99. Expected: J3's predictor only ever interpolated.
 
@@ -146,20 +146,20 @@ the catalogue f changes nothing (f is not the problem); D1 refitting the decoder
 (0.36: information lost, not just off the real states); D3 a 4-harmonic function of phase explains only 29 % of
 a star's state variance (no loop to rotate); D4 failures grow with amplitude (top third 0.31 vs Fourier 0.49).
 
-Masked predictor in forecast mode (`--forecast-tail 5 30`, jepa_forecast_probe): latent error / variance drops
+Masked predictor in forecast mode (`--forecast-tail 5 30`, card_forecast): latent error / variance drops
 from ~1.0 to 0.44, but decoded to magnitude 0.25 within 2 sigma, the same as the window mean (0.22): it
 predicts a flat curve (spread 0.21 vs 1.64). The reconstruction head is weak everywhere (in-window error 2.1 vs
 variance 2.7).
 
 Decision (11-06): D3 says the states do not rotate, so change the predictor. Option 2 first (the masked
-predictor forecasts, no add-on): job 3543932 (`project/jobs/option2.sh`), all from J1 for real: enc_o2_noadd
+predictor forecasts, no add-on): job 3543932 (`legacy/project/jobs/option2.sh`), all from J1 for real: enc_o2_noadd
 (control), enc_o2_fc (tail 10-60 d), enc_o2_fcbig (+ predictor 4 x 384), enc_o2_fcbig_ph (+ phase rope at the
 encoder's own f). Option 1 (a learned step in the add-on) is the fallback.
 
 ### Option 2 results (11-12)
 
 Ran as four single-GPU jobs (3563719-22). Masked-predictor forecast, last 10 days hidden, 0.5-10 d past the last
-visible token, 600 stars (jepa_forecast_probe; within 2 sigma; window mean 0.22, Fourier at the window's f 0.55,
+visible token, 600 stars (card_forecast; within 2 sigma; window mean 0.22, Fourier at the window's f 0.55,
 Fourier at the catalogue f 0.65):
 
 | run | recon head | decoded predicted latent | ceiling | class F1 | period within 10 % | token phase cos / sin |
@@ -186,7 +186,7 @@ Same at 10, 30 and 50 % hidden. Gap mode on the option 2 runs: folded into job 3
 
 ### Option 3 (11-12): close Phase 1, open Phase 2 with two views
 
-Four single-GPU jobs (`project/jobs/option3_one.sh LANE`, 3586857-60), all from J1, 20k steps, small predictor
+Four single-GPU jobs (`legacy/project/jobs/option3_one.sh LANE`, 3586857-60), all from J1, 20k steps, small predictor
 (2 x 192), phase rope at the encoder's own f, no add-on:
 - Phase 1 close-out (is the class / period cost of enc_o2_fcbig_ph the bigger predictor or the rope?):
   enc_o3_fcph (tail 10-60 d + rope), enc_o3_ph (rope only).
@@ -195,7 +195,7 @@ Four single-GPU jobs (`project/jobs/option3_one.sh LANE`, 3586857-60), all from 
   period, then random points to 50 %: `--mask-mode phaseband`, period at training only). Folding at the
   TRUE period matters: at a random period the band is nearly random points for the short-period stars.
   On the 800k the band would use our own period table (712,278 stars), not Chen's.
-- New test (card item 4b): phase gap, `jepa_forecast_probe --phase-gap 0.2`: hide 0.2 cycles at the catalogue
+- New test (card item 4b): phase gap, `card_forecast --phase-gap 0.2`: hide 0.2 cycles at the catalogue
   period (evaluation only) in every cycle of the window; no same-phase point is left to copy. Reference runs
   (J1, o2_noadd, o2_fc, o2_fcbig_ph): job 3586877.
 - Next for Phase 2, after option 3 reports (agreed 11-12, not started): LeJEPA-style views at the TOKEN level.
@@ -293,7 +293,7 @@ gap = 30 % of points hidden at random; phase gap = 0.2 cycles hidden at the cata
   variables are only roughly periodic; a fixed wave is a bad target for them (the model
   explains only 0.2 of their targets even within half a cycle). Use the template's R2 as the
   gate (`--target mix --template-min-r2`), not the model's error. Status: alive, to decide.
-- **H. The sine test (2026-10-11).** `project/sine_test.py` + `jobs/sine_test.sh`: clean sinusoids (random or
+- **H. The sine test (2026-10-11).** `legacy/project/sine_test.py` + `legacy/project/jobs/sine_test.sh`: clean sinusoids (random or
   regular sampling, log-uniform periods 0.05 to 50 d), the same encoder, block masking and decoder at a small
   size; variants plain / phasor at the model's own frequency / oracle phasor at the true frequency, plus regular
   sampling, a second harmonic, noise, and no label in the spectral auxiliary loss. Answers two questions:
@@ -318,13 +318,13 @@ gap = 30 % of points hidden at random; phase gap = 0.2 cycles hidden at the cata
 |---|---|---|
 | maespec50 | 250-day wide spectral MAE at 50k with the block-plus mask, the control for the JEPA runs | alive |
 | jepainit, jepahyb | token JEPA warm-started from maew_spec; JEPA plus a reconstruction head | alive (the JEPA comparison the PIs asked for) |
-| gruode | the collaborators' GRU-ODE encoder (RNNODEEncoderV2) in our pipeline, same objective and probes | alive; moved to the head of the interactive chain 2026-10-11 (user); its throughput benchmark (`project/eval/runtime.py --ckpt project/runs/enc_gruode/mae.pt --batch-sweep`) comes after the probe |
+| gruode | the collaborators' GRU-ODE encoder (RNNODEEncoderV2) in our pipeline, same objective and probes | alive; moved to the head of the interactive chain 2026-10-11 (user); its throughput benchmark (`legacy/project/eval/runtime.py --ckpt project/runs/enc_gruode/mae.pt --batch-sweep`) comes after the probe |
 | cyc, cycph | the cycle curriculum pair (item D) | alive, submitted 2026-10-09 |
 | jepaclean, jepacleanshort, longspecwtpl2 | template runs with queries in days | cancelled 2026-10-09 (superseded by A to C) |
 
 ### Other open items
 
-- Delta CPU job for the StarEmbed hand-crafted baseline (`project/jobs/delta_cpu_starembed.sh`,
+- Delta CPU job for the StarEmbed hand-crafted baseline (`legacy/project/jobs/delta_cpu_starembed.sh`,
   now installs its own x86 environment): submit from the Delta login node. Alive.
 - `git push origin main` from the user's shell (the job shell has no GitHub credential). Alive.
 - Rerun the phase-decoder ladder with the model's periods instead of the catalogue. Parked.

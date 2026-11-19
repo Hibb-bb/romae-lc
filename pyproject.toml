@@ -1,7 +1,7 @@
 [project]
 name = "romae-lc"
 version = "0.2.0"
-description = "RoMAE for light curves: continuous rotary transformers (axial and nD-RoPE, linear attention) with LeJEPA, LeWorldModel and masked-autoencoding pretraining."
+description = "RoMAE for light curves: continuous rotary transformers (axial and nD-RoPE, linear attention) with masked-autoencoding pretraining; token-level JEPA training and evaluation in project/."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

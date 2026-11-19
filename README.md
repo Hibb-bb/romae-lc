@@ -1,304 +1,342 @@
 # romae-lc
 
-RoMAE for light curves: a continuous rotary transformer in which every observation of an asynchronous multi-band light curve is one token with a real-valued (time, wavelength) position, so nothing is binned, aligned or imputed. It ships axial p-RoPE and nD-RoPE (simplex) position encodings, softmax or linear attention, three pretraining frameworks (RoMAE masked autoencoding, LeJEPA and LeWorldModel) and an analysis module that reads the right rotary time unit off a dataset. The library depends on `torch` and `numpy` only; `datasets` (PHOEBE loader) and `matplotlib` (plots) are optional extras.
+Self-supervised encoders for light curves of variable stars (ZTF).
+Every observation is one token with a real time and a real wavelength. Nothing is binned.
+The encoder is trained as a token-level JEPA: it predicts the latents of hidden observations.
 
-## Install
+This page tells you four things:
+
+1. [Where is what](#1-where-is-what): one line per file.
+2. [How train / validation / test work](#2-how-train--validation--test-work): which step uses which split.
+3. [How to train a run and how to test it](#3-how-to-train-a-run-and-how-to-test-it).
+4. [Open items](#4-open-items): known problems that the clean-up did not fix.
+
+More detail:
+
+- `docs/CODE-MAP.md`: the main functions of every file, and old file name -> new file name.
+- `docs/LIBRARY.md`: how to use the `romae_lc` library on its own.
+- `docs/PLAN.md`: the research plan and the results so far.
+- `legacy/README.md`: the old code that is no longer used.
+
+## Set-up
 
 ```bash
-uv sync               # library + dev tools (pytest, black)
-uv sync --all-extras  # also datasets and matplotlib
-uv run pytest         # CPU test suite, under a minute
-uv run black .        # formatting (line length 88)
+uv sync --all-extras          # makes .venv with torch, datasets, matplotlib, wandb, scikit-learn
+source .venv/bin/activate
+python -m pytest project/tests tests -q     # CPU, a few minutes
 ```
 
-## The ZTF period and world-model work
+Run every script from the repo root as a module: `python -m project.train ...`.
+Do not run `python project/train.py`. The imports only work with `python -m`.
 
-The research code on top of the library lives in `project/` (its own
-[README](project/README.md) starts with how to run the training, on the toy
-simulator or on ZTF), the notes and design documents in `docs/`, and the
-Slurm scripts in `project/jobs/`. The library examples below are the
-original ones of the package.
+The data is the ZTFxPC set at `/projects/bfrf/data/PC_matches/ZTFxPC`. `--data sim` uses a small
+simulator instead and needs no files.
 
-## Quickstart
+## 1. Where is what
 
-Tokenize a list of light curves (any epoch order, any number of points per band) and embed them:
+The order follows the data: records, windows, masks, model, training, checkpoints, evaluation.
 
-```python
-import torch
-from romae_lc import RoMAE, tokenize, wavelengths_for
+### The library, `romae_lc/`
 
-# three objects, epochs in days, two bands; one token per observation
-times = [torch.rand(n) * 300 for n in (120, 80, 150)]
-values = [torch.randn(n) for n in (120, 80, 150)]
-bands = [torch.randint(0, 2, (n,)) for n in (120, 80, 150)]
+| file | what it holds |
+|---|---|
+| `romae_lc/data.py` | `Record` (one star: times, values, errors, bands, class, period), `load_pc` (reads ZTFxPC), `simulate` (toy stars), `normalize` |
+| `romae_lc/frames.py` | cutting a record into time windows: `FrameConfig`, `FrameDataset`, `frame_grid` |
+| `romae_lc/tokenize.py` | observations -> tokens with (time, wavelength) positions: `tokenize`, `Tokens` |
+| `romae_lc/rope.py` | the rotary position encoding for real-valued positions |
+| `romae_lc/transformer.py` | the transformer blocks |
+| `romae_lc/spectral.py` | the spectral layer (a learned periodogram inside the encoder) and its loss against a period |
+| `romae_lc/model.py` | the encoder `RoMAE` and the masked autoencoder `RoMAEForPreTraining` |
+| `romae_lc/analysis.py` | helpers to choose the time scales of the rotary encoding |
 
-tokens = tokenize(
-    times,
-    values,
-    bands,
-    band_wavelengths=wavelengths_for(["ZTF_g", "ZTF_r"]),  # {0: 472.0, 1: 634.0} nm
-    time_scale=0.05,  # days per position unit, see "Choosing the time unit"
-)
-backbone = RoMAE(encoder=dict(d_model=96, nhead=3, depth=2), rope_base=1e5)
-z = backbone(*tokens)  # [3, 96], CLS-pooled
-```
+### The research code, `project/`
 
-`tokens` is a `Tokens(values [B, N, 1], positions [B, 2, N], pad_mask [B, N])` batch, sorted by time and padded. `encoder` takes a size name (`"tiny-shallow"`, `"tiny"`, `"small"`, `"base"` follow Table 8 of the RoMAE paper; `"large"` = 960/16/24 is an extrapolation added here) or a dict of `TransformerConfig` fields.
-
-**LeJEPA.** Views are random time windows of the same curves (`ViewConfig`); the loss is invariance across views plus SIGReg, the sliced Epps-Pulley test that keeps the projected embeddings Gaussian:
-
-```python
-from functools import partial
-
-from torch.utils.data import DataLoader
-
-from romae_lc import DEFAULT_SURVEYS, LeJEPA, LightCurveDataset, ViewConfig
-from romae_lc import collate, mlp, normalize, simulate
-
-records = [normalize(r) for r in simulate(64, seed=0)]
-wavelengths = {i: s.wavelength_nm for i, s in enumerate(DEFAULT_SURVEYS)}
-loader = DataLoader(
-    LightCurveDataset(records, ViewConfig(n_global=2, n_local=4)),
-    batch_size=16,
-    collate_fn=partial(collate, band_wavelengths=wavelengths, time_scale=0.05),
-)
-
-backbone = RoMAE(encoder=dict(d_model=96, nhead=3, depth=2), rope_base=1e5)
-model = LeJEPA(backbone, proj=mlp([96, 256, 256, 64]), lamb=0.02)
-opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.05)
-for batch in loader:
-    out = model(global_views=batch["global"], local_views=batch["local"])
-    opt.zero_grad()
-    out.loss.backward()  # out.inv_loss, out.sigreg_loss, out.embedding, ...
-    opt.step()
-
-model.eval()
-z = model.embed(*batch["full"])  # [16, 96]; "full" is capped at view_cfg.max_tokens
-# (512) here; a LightCurveDataset(records) without a view_cfg yields whole curves
-```
-
-`LeJEPA` exposes `.backbone`, `.proj` and an optional `.predictor` (`predictor=mlp([D, 1024, D]), predictor_inst=k` maps the views of instrument `k` into the shared space before the loss). With a predictor the training call must also receive `view_inst`, an `[N, n_global + n_local]` integer tensor giving each view's instrument id (global views first, then local views); omitting it raises `ValueError`. Nothing on the data side knows an instrument (`Record` has no such field and `collate` does not emit one), so build it yourself, e.g. `view_inst = torch.full((N, n_views), inst_id)` or from a field you keep in `Record.meta`, and call `model(global_views=..., local_views=..., view_inst=view_inst)`.
-
-**LeWorldModel.** A frame is a time window of a curve (all bands, `FrameConfig`), the action the advance to the next window in window units; the loss is next-window latent prediction with a causal AdaLN-zero predictor plus SIGReg on the latents of every window, no stop-gradient or EMA (Maes, Le Lidec et al. 2026):
-
-```python
-from romae_lc import FrameConfig, FrameDataset, LeWorldModel, collate_frames, frame_grid
-
-cfg = FrameConfig(n_frames=4, window=30.0)
-loader = DataLoader(
-    FrameDataset(records, cfg),
-    batch_size=16,
-    collate_fn=partial(collate_frames, band_wavelengths=wavelengths, time_scale=0.05),
-)
-backbone = RoMAE(encoder=dict(d_model=192, nhead=3, depth=12), rope_base=1e5)
-model = LeWorldModel(backbone, history=3, lamb=0.1)  # predictor: 6 layers, 16 heads, dropout 0.1
-opt = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=1e-3)
-for batch in loader:
-    out = model(batch["frames"], batch["actions"])  # LeWMOutput(loss, pred_loss, sigreg_loss, embedding [B, 4, D], ...)
-    opt.zero_grad()
-    out.loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    opt.step()
-
-model.eval()
-z = model.encode(batch["frames"])                                   # [16, 4, D] latents z_t
-z_hat = model.rollout(batch["frames"][:3], batch["actions"])        # [16, 5, D] open-loop (4 actions -> 5 latents)
-frames, actions = frame_grid(records[0], cfg, fill=True)            # every contiguous 30-d window of one curve
-grid = collate_frames(
-    [dict(frames=frames, actions=actions, label=0, index=0)],
-    band_wavelengths=wavelengths,
-    time_scale=0.05,
-)
-s = model.surprise(grid["frames"], grid["actions"])                 # [1, n - 1] per-window prediction error
-s[grid["n_tokens"][:, 1:] < cfg.min_tokens] = float("nan")          # empty windows in season gaps carry no information
-```
-
-`LeWorldModel` exposes `.backbone`, `.projector`, `.predictor`, `.action_encoder` and `.pred_proj`; the parts are `ARPredictor` (the causal AdaLN-zero transformer), `ActionEncoder` (`Conv1d(A, 10, 1)-Linear-SiLU-Linear`), `lewm_mlp` (the `Linear-BatchNorm-GELU-Linear` projector used for both `projector` and `pred_proj`) and `straightness` (the latent-path diagnostic of the paper, also in `LeWMOutput.straightness`). Passing `actions=None` runs the predictor unconditioned (the AdaLN layers learn constant per-layer shifts, scales and gates); this is an extension, the official model is always action-conditioned. Custom actions are any `[B, T, A]` tensor with `action_dim=A`, one per frame, the last being the action that would follow the last frame; z-score them, the default advance is O(1) by construction. Two tensors can be probed: `LeWMOutput.embedding` / `encode(frames)` is the paper's latent `z_t` (post-projector, the quantity predicted, regularised and probed there), `LeWMOutput.features` / `encode(frames, project=False)` the backbone output, which is what `examples/train_lewm.py` probes and what its `runs/lewm.pt` checkpoint restores (`runs/lewm_wm.pt` holds the full world model, see Examples).
-
-`FrameConfig` sets the sampler (`with_err=True` makes every frame a `(t, y, band, err)` quadruple and `collate_frames` passes `err` to the tokenizer as `extras`, for encoders or decoders that take the per-point uncertainty): `n_frames` windows of `window` days, the start-to-start advance drawn from `U(*advance)` in window units (`(1.0, 2.0)`: non-overlapping, at most one window apart; `(1.0, 1.0)` is a fixed frame skip), `min_tokens` points per window else the draw is repeated up to `max_tries` times before the best draw is kept, `max_tokens` random subsampling and the optional `resample` augmentation (off, as in the official pipeline). `frame_grid` lays deterministic windows for evaluation (`fill=True`: every window that fits, sparse or empty ones kept, mask them with `n_tokens` as above). Records shorter than `window * (1 + (n_frames - 1) * advance[0])` cannot host a sequence and are dropped by `FrameDataset` with a warning. Windows are tokenized with time re-zeroed at the window start: `use_cls=True` (the `RoMAE` default) is what anchors a window's phase, since without the CLS token at position 0 the encoder is purely relative in time and a window's embedding is invariant to a shift of its contents; with `use_cls=False, pool="mean"` the model can only learn shift-invariant window statistics and every window must be non-empty.
-
-All model and optimiser defaults are those of the paper and the released code (Sec. 3.1, App. D, `config/train/lewm.yaml`): latent width 192, predictor of 6 layers, 16 heads of 64, MLP 2048, dropout 0.1, learned positional embedding over `history=3` frames, projector hidden width 2048, `lamb=0.1` (the released config uses 0.09), 1024 SIGReg projections on 17 knots over `[0, 3]`, AdamW at `lr=5e-5` with weight decay `1e-3`, gradient clipping at 1, batch size 128. The window, advance and action are the light-curve translation (table in the docstring of `FrameConfig`). With `window` many periods long the next window's phase is unpredictable and the world model learns period/shape/amplitude dynamics, not phase: make `window` a few periods when you want phase. With `--auto-time` the rotary ladder's `lam_max` is `2 * window`, since the encoder only ever sees windows.
-
-**Masked autoencoding** (the RoMAE recipe): the encoder sees the visible tokens and a light decoder reconstructs the masked fluxes from MASK tokens at their positions.
-
-```python
-from romae_lc import RoMAEForPreTraining
-
-model = RoMAEForPreTraining(
-    decoder=dict(d_model=48, nhead=3, depth=1),  # the paper uses "tiny-shallow"
-    mask_ratio=0.5,
-    encoder=dict(d_model=96, nhead=3, depth=2),
-    rope_base=1e5,
-)
-out = model(*tokens)  # MAEOutput(loss, pred [B, K, 1], target, mask [B, N])
-# mask_ratio must lie in (0, 1]; a mask that selects no token raises
-out.loss.backward()
-backbone = model.backbone()  # a RoMAE carrying the pretrained encoder
-```
-
-**Classification**, from scratch or on pretrained weights:
-
-```python
-from romae_lc import RoMAEForClassification
-
-clf = RoMAEForClassification(n_classes=5, encoder=dict(d_model=96, nhead=3, depth=2))
-logits = clf(*tokens)  # [3, 5]
-```
-
-## Positional encodings
-
-Positions are `[B, n_axes, N]`: axis 0 is time `t / time_scale`, axis 1 the wavelength coordinate `log(lambda / lambda_ref) / wavelength_scale` (the tokenizer offsets both by +1 so that the CLS token alone sits at 0). The head dimension is cut into blocks, each rotated by its own axes with its own scheme (`rope=` of every model):
-
-| `rope=` | time axis | other axes |
+| step | file | what it holds |
 |---|---|---|
-| `"axial"` (default) | axial p-RoPE, base `rope_base`, fraction `p_rope` | one axial p-RoPE block per axis, base 1e4; the head is split equally |
-| `"simplex"` | axial p-RoPE on half the head | one nD-RoPE block over all remaining axes: wave vectors along the directions of a regular simplex, scales `theta ** (-s / S)`, a random rotation per head (a single wavelength axis reduces it to an axial ladder with base `theta`) |
-| `list[dict]` | any block layout `BlockRope` accepts, see below | |
+| data | `project/data.py` | `load_data`: the records of each split, the class names, the data flags |
+| windows | `project/windows.py` | records -> windows -> tokens: `TokenSpec`, the error channel, the window loaders, `WindowDataset` |
+| masks | `project/masks.py` | which tokens are hidden: random, block, blockplus, phase band, forecast tail |
+| views | `project/views.py` | global and local views of a window (`make_views`), for the no-EMA recipe |
+| model | `project/backbone.py` | the encoder sizes (`--size`) and the rotary time ladder |
+| model | `project/jepa.py` | the model: `TokenJEPA` (EMA and no-EMA), the predictor, `forward_views`, `sigreg` |
+| training | `project/recipe.py` | reads a recipe file (TOML) and turns it into training flags |
+| training | `project/recipes/` | one recipe file per run (`enc_j1`, `enc_o2_*`, `enc_o3_*`, `enc_le1`); `base.toml` and `from_j1.toml` are shared parts |
+| training | `project/train.py` | the training script: flags, loop, validation every few steps, checkpoints |
+| training | `project/probes.py` | the small probes that run during training (linear class probe, log-period ridge, shuffle score, hand-feature baseline) |
+| training | `project/tracking.py` | wandb logging and step timers |
+| training | `project/utils.py` | small helpers: learning-rate schedule, seeds, device, JSON logs |
+| checkpoints | `project/checkpoint.py` | save and load: `mae_state`, `jepa_state`, `load_mae`, `load_encoder`, `EncoderMeta` |
+| evaluation | `project/eval/encode.py` | encodes every window once and saves the latents (`latents.pt`, `latents_test.pt`) |
+| evaluation | `project/eval/card_class.py` | test card 1: class macro F1 with the star probe |
+| evaluation | `project/eval/card_period.py` | test card 2: log-period probe, and the hit rate of the spectral peak |
+| evaluation | `project/eval/card_phase.py` | test card 3: phase R2 per token |
+| evaluation | `project/eval/card_forecast.py` | test card 4: fill in hidden points (last days, random gaps, a phase gap) |
+| evaluation | `project/eval/test_card.py` | runs the four cards for one run and writes one JSON file |
+| evaluation | `project/eval/summary.py` | one table over the JSON files of many runs |
+| evaluation | `project/eval/classify_rf.py` | the random-forest reference for the class task |
+| evaluation | `project/eval/card_demo.py` | forecast example plots (figures only, no score) |
+| evaluation | `project/eval/common_eval.py` | helpers the cards share (no command line) |
+| evaluation | `project/eval/style.py` | plot colours |
+| evaluation, extra | `project/period_probe.py` | many period read-outs from the latents next to Lomb-Scargle, on validation. Not part of the test card |
+| evaluation, extra | `project/phase_probe.py` | phase of a window's start from the window latent, on validation. Not part of the test card. The phase card uses its `reference_phase` |
+| evaluation, extra | `project/fold.py` | the phase-fold test of a period. Only `period_probe.py` uses it |
 
-`layout()` builds the two string layouts; the same dicts can be edited or written by hand:
+### Jobs, tests, the rest
 
-```python
-from romae_lc import layout
+| path | what it holds |
+|---|---|
+| `project/jobs/train.sh` | Slurm job: trains one recipe, in several linked jobs if needed, then runs the test card |
+| `project/jobs/test_card.sh` | Slurm job: the test card of one or more runs |
+| `project/jobs/demo.sh` | Slurm job: the forecast example plots |
+| `project/jobs/after_done.sh` | waits for a file, then submits a job |
+| `project/jobs/in_session.sh` | runs a command inside a running Slurm session named `debug` |
+| `project/tests/` | tests of `project/`. `golden.py` is the before/after check of the clean-up |
+| `tests/` | tests of the library |
+| `project/runs/NAME/` | one folder per run (not in git): `args.json`, `log.jsonl`, `last.pt`, `mae.pt`, `DONE`, the latent caches |
+| `project/results/` | evaluation results (not in git). The test cards are in `project/results/test_card/` |
+| `legacy/` | old code, frozen. Nothing imports it. See `legacy/README.md` |
+| `docs/` | the plan, the notes, the audits of the clean-up |
 
-layout(32, n_axes=2, kind="axial", time_base=1e5)
-# [{'kind': 'axial', 'axes': [0], 'dim': 16, 'base': 100000.0, 'p': 0.75},
-#  {'kind': 'axial', 'axes': [1], 'dim': 16, 'base': 10000.0, 'p': 0.75}]
-layout(32, n_axes=4, kind="simplex", time_frac=0.5, theta=100.0)
-# [{'kind': 'axial', 'axes': [0], 'dim': 16, 'base': 10000.0, 'p': 0.75},
-#  {'kind': 'simplex', 'axes': [1, 2, 3], 'dim': 16, 'theta': 100.0, 'p': 0.75,
-#   'seed': 0}]
+## 2. How train / validation / test work
 
-blocks = [
-    {"kind": "axial", "axes": [0], "dim": 16, "base": 1e5, "p": 0.75},
-    {"kind": "simplex", "axes": [1, 2, 3], "dim": 16, "theta": 100.0, "p": 0.75},
-]
-model = RoMAE(encoder=dict(d_model=96, nhead=3, depth=2), n_axes=4, rope=blocks)
-```
+### Where the splits come from
 
-Block dims must sum to `head_dim = d_model // nhead`, and a simplex block over `k > 1` axes needs a multiple of `2 (k + 1)` channels. `p` is the p-RoPE fraction: the remaining angles are NoPE channels that carry no position.
+- ZTFxPC has three fixed splits made upstream: 43,497 train, 5,472 validation and 5,464 test stars.
+  No star is in two splits.
+- `project.data.load_data` loads `train` and `validation` unless a script asks for `test` by name.
+- Stars with fewer than 8 good points are dropped (`--min-points`). That leaves 43,191 train and
+  5,414 validation stars.
+- Every star is scaled per band with the median and the scatter of its whole light curve.
+- Training needs stars long enough for a sequence of windows. With 8 windows of 250 days that leaves
+  40,309 train stars. `enc_le1` uses one window per sample, so it keeps more.
+- `--data sim` makes its own split: 60 % train, 20 % validation, 20 % test.
 
-The ladders need not be geometric. An axial block takes an explicit `timescales` list (position units, any spacing, at most `dim / 2` values; the rest of the angles are NoPE and `p` becomes the active fraction) and a simplex block an explicit `scales` list of wave-vector magnitudes, both stored as plain floats in the layout (so `hparams` and checkpoints carry them). `RoMAE(..., rope_timescales=[...])` passes a time ladder into the string layouts, and `layout(..., time_timescales=[...])` does the same by hand:
+### The rule
 
-```python
-import math
+- **Train**: the encoder learns from it. Probes are fitted on it.
+- **Validation**: watching a run while it trains, picking a probe's epoch or read-out, fitting the
+  forecast decoder, demo plots, and comparing runs.
+- **Test**: final numbers only.
+- **Catalogue period**: it is a training target on train stars (the spectral aux loss, the
+  phase-band mask). At evaluation it is only a target, a mask for a test, or a baseline.
+  It is never an input of the encoder.
 
-from romae_lc import RoMAE, rotary_ladder, timescales_for
+Today's scripts do not follow this rule everywhere. Section 4 lists where.
 
-wavelengths = rotary_ladder(8, 0.05, 4000.0, "quantile", samples=periods, mix=0.75)  # days
-backbone = RoMAE(
-    encoder=dict(d_model=96, nhead=3, depth=2),  # head_dim 32: 16 time channels, 8 angles
-    rope_timescales=timescales_for(wavelengths, time_scale=0.05 / (2 * math.pi)),
-)
-```
+### Which step uses which split
 
-`rotary_ladder(n, lam_min, lam_max, spacing)` gives `n` wavelengths in days with `"log"` (the geometric ladder `time_scale` and `base` encode), `"linear"` or `"quantile"` spacing; the quantile ladder is the inverse CDF of `log(samples)` (catalogue periods, measured timescales, ...) clipped to the band, blended in log space with the log ladder by `mix` (1 = pure quantile, 0 = pure log; a little log floor keeps sparse parts of the band covered), so channels crowd where the dataset's timescales are dense. `timescales_for(wavelengths, time_scale)` converts days into the position units the block works in. The MAE decoder resamples an explicit ladder to its own number of angles in log space, ends kept (`resample_ladder`). Four axes arise when `tokenize(..., band_positions={band: (c1, c2, c3)})` describes each band by several coordinates instead of one wavelength. `nd_rope_theta_bound(dim, n_axes)` is the largest `theta` at which every wave vector of a simplex block stays resolvable (nD-RoPE paper, App. E); its arguments are the block's own channel count and number of axes, not `d_model // nhead` and the model's `n_axes`, since the time block owns the rest of the head: for the layout above, `nd_rope_theta_bound(blocks[1]["dim"], len(blocks[1]["axes"]))` = `nd_rope_theta_bound(16, 3)` = 1.95, with positions in units of the smallest step to resolve. `layout()`'s default `theta=100` is well above this bound for small blocks. Every block must keep at least one active angle after `p` is applied: an axial block needs `min_axial_dim(p)` channels (`2 * ceil(1 / p)`, so 4 at the default `p=0.75`) and a simplex block `2 (k + 1) * min_simplex_scales(p)`; `layout()` and the rope constructors raise otherwise instead of returning a dead (NoPE) block.
+Training (`project/train.py`):
 
-## PC_matches data
+| step | split | for what | where in the code |
+|---|---|---|---|
+| gradient steps | train | the encoder loss | `build_loaders`, `train_step` |
+| rotary time ladder | train (128 stars, `--ladder-curves`) | the time scales of the position encoding; no labels | `build_tokens` -> `backbone.get_ladder` |
+| error-channel statistics | train | scaling the error channel of the tokens | `build_tokens` -> `windows.err_stats` |
+| catalogue period as a target | train | the spectral aux loss (`--spectral-aux 0.5`, every run); the `phaseband` mask (`enc_o3_fcph_pband`); period-hit logging of the views (`enc_le1`) | `Run.train_periods`, `window_loss`, `views_loss`, `jepa.forward_views` |
+| validation loss | validation: 1,000 stars (`--val-objects`), 931 of them long enough | the loss with random points hidden and with stretches hidden; no aux loss | `validation_losses` |
+| probes during training | fit: 4,000 train stars (`--probe-train`). Score: the validation-loss stars, so at most 931 (`--probe-val 2000` cannot give more) | linear class probe (13 classes) and ridge on log period | `evaluate` -> `probes.probe` |
+| hand-feature baseline | the same stars as the probes | the bar the encoder has to clear | `baseline` |
+| shuffle score | validation (512 of the validation-loss stars) | does the encoder use the order in time | `evaluate` -> `probes.shuffle_score` |
+| the final checkpoint | none | `mae.pt` is the last step. No step is picked on validation | `finish` |
 
-`load_pc(source, split)` reads one sub-dataset of the PC_matches collection (`/projects/bfrf/data/PC_matches/<name>`, a `save_to_disk` directory with a nested `lightcurve.<band>.{mjd, mag, mag_unc, clean}` column) into `Record`s. Band ids index `PC_BANDS`, a fixed list of every band of every survey, so single-survey and multi-survey (`*-isect`) sources share ids and the tokenizer table is always `wavelengths_for(PC_BANDS)`. Values are `-mag` (brighter is up, `normalize` standardises per band), unclean and non-finite points are dropped, and times are MJD re-zeroed at each record's first point (`meta["t0"]`; float32 positions cannot hold an absolute MJD at intra-night resolution). Labels are the 8 `PC_SUPERCLASSES` by default, or `label_field="class_str"` with a shared `classes` vocabulary.
+Evaluation (`project/eval/`), as `test_card.py` runs it:
 
-```python
-from romae_lc import PC_BANDS, load_pc, normalize, wavelengths_for
+| step | fit on | picked on | scored on | notes |
+|---|---|---|---|---|
+| `encode.py` | - | - | - | `latents.pt` holds train + validation, `latents_test.pt` holds test. Every window of every star, stride 0.25 window |
+| class card (`card_class.py`) | train | validation (best epoch, macro F1) | **test** | 13 classes, 40 epochs, seeds 42 / 100 / 200 |
+| period card, log-period probe (`card_period.py`) | train | validation (best epoch, R2) | **test** | the same probe with one output |
+| period card, spectral peak (`card_period.py`) | nothing is fitted | - | **validation**, all stars with a period | the encoder's own period estimate against the catalogue period |
+| phase card (`card_phase.py`) | 70 % of 600 validation stars | - | the other 30 % of the **validation** stars | the split is by star |
+| forecast card (`card_forecast.py`) | decoder on 1,000 validation stars | - | **test**, all stars with 64 points or more | windows do not overlap (stride 1.0). Three modes: last 10 days, 30 % random gaps, a 0.2-cycle phase gap |
+| random forest (`classify_rf.py`, only with `--rf`) | train + validation | fixed parameters, no search | **test** | 16 classes, 3 seeds |
 
-train = [normalize(r) for r in load_pc("/projects/bfrf/data/PC_matches/ZTFxPC", "train")]
-wavelengths = wavelengths_for(PC_BANDS)
-```
+Outside the test card:
 
-The nested columns are read as Arrow arrays (about 1 ms per row). The training scripts detect the layout from the path: `--data /projects/bfrf/data/PC_matches/ZTFxPC --label superclass --min-points 8 --max-rows N`. `jobs/train_lewm_pc.sh` is a Slurm job that trains a LeWorldModel on it; `examples/analyze_pc_periods.py` (`jobs/analyze_pc_periods.sh`) is the period and cadence census whose results in `results/pc_period/` motivate the quantile time ladder above.
+| step | fit on | scored on | notes |
+|---|---|---|---|
+| `card_forecast.py` run by hand with its defaults | 70 % of 600 validation stars | the other 30 % | stride 0.25. This is the protocol of the forecast numbers in `docs/PLAN.md` |
+| `project/period_probe.py` | train | validation | 13 read-outs; the best one is picked on validation and reported on validation. It never scores test |
+| `project/phase_probe.py` | train windows | validation windows | |
+| `card_demo.py` | - | - | validation stars; figures only |
 
-## Linear attention
+### Where the catalogue period is used
 
-`attention="linear"` in an encoder (or decoder) config replaces softmax attention by kernel attention with `phi(x) = elu(x) + 1` features and the rotary phase applied inside the numerator, so the cost is linear in the number of tokens and the position encoding is unchanged:
+- As a training target, on train stars only: the spectral aux loss in every run, the `phaseband` mask
+  in `enc_o3_fcph_pband`, and the period-hit numbers that `forward_views` logs.
+- As an encoder input: never. The phase rope of the predictor uses the spectral layer's own estimate.
+- At evaluation: it is the target of the period probes and of the spectral-peak test. The phase card
+  builds its phase target from it. The forecast card uses it for the phase-gap mask and for one
+  Fourier baseline. The demo uses it to pick stars and to fold the plots.
 
-```python
-backbone = RoMAE(encoder=dict(d_model=96, nhead=3, depth=2, attention="linear"))
-```
+## 3. How to train a run and how to test it
 
-Numerator and denominator are accumulated in float32. Only key (padding) masks are supported: the mask has to be the same for every query, which is what `romae_lc.transformer.attention_mask(pad_mask)` produces; a query-dependent mask raises `NotImplementedError`.
+### Recipes
 
-## Choosing the time unit
+A recipe is a TOML file in `project/recipes/`. Its keys are the flags of `project/train.py`
+(`--mask-ratio` is `mask_ratio`).
 
-A rotary channel of wavelength `lambda` turns once per lag `lambda`: it separates tokens closer than that and wraps around beyond. The active channels of the time block form the ladder `2 pi time_scale base ** (2 i / dim)` days, so the ladder has to reach below the shortest timescale that carries signal (the high-frequency end of the periodogram, harmonics included) and up to the baseline of the curves. Time in days with the language-model default `base = 1e4` puts the shortest wavelength at `2 pi` days: sub-day periods are invisible and the encoder degrades into a bag of magnitudes. `suggest_time_encoding` measures both ends with a generalised Lomb-Scargle periodogram over the dataset and inverts the ladder to `time_scale` and `base`; `time_shuffle_score` is the check on an encoder.
+- The defaults live in the parser of `project/train.py`. A recipe sets some of them.
+- `extends = "other.toml"` takes another recipe first. `enc_o3_fcph.toml` extends `enc_o3_ph.toml`,
+  which extends `from_j1.toml`, and so on down to `base.toml`.
+- A flag on the command line beats the recipe.
+- A key that is not a flag stops the run. So does a wrong value.
+- Run settings are not recipe keys. Give them on the command line: `--out`, `--workers`,
+  `--pin-memory`, `--eval-every`, `--ckpt-every`, `--time-budget`, `--wandb`, `--device`.
+- The checkpoint stores all flags (`args`) and the text of the recipe files (`recipe`).
 
-```python
-from romae_lc import suggest_time_encoding, time_series, time_shuffle_score
+`python -m project.train --help` lists every flag.
 
-records = [normalize(r) for r in simulate(128, seed=0)]
-times, values, bands = time_series(records)
-encoder = dict(d_model=96, nhead=3, depth=2)
-dim = RoMAE(encoder=encoder).rope.dims[0]  # channels of the time block
-report = suggest_time_encoding(times, values, dim, p=0.75, bands=bands)
-print(report)  # sampling limits, spectral support, time_scale, base, ladder
+### Train on the cluster
 
-backbone = RoMAE(encoder=encoder, rope_base=report.base)
-curves = records[:32]
-tokens = tokenize(
-    [torch.from_numpy(r.t) for r in curves],
-    [torch.from_numpy(r.y) for r in curves],
-    [torch.from_numpy(r.band) for r in curves],
-    band_wavelengths=wavelengths,
-    time_scale=report.time_scale,
-)
-score = time_shuffle_score(backbone, tokens).mean()  # ~1: blind to time
-```
-
-`suggest_time_encoding(..., spacing="quantile", samples=None, mix=1.0)` returns the same report with a data-driven ladder: `report.wavelengths` follows the quantiles of the pooled shortest, peak and longest timescales of the detected curves (or of `samples`, e.g. a catalogue's periods and their harmonics), and `report.timescales` is that ladder in position units for `RoMAE(..., rope_timescales=report.timescales)` (`report.base` is then only the log-spaced equivalent). `spacing="linear"` is the arithmetic ladder. The training scripts expose this as `--time-spacing {log,linear,quantile} --time-mix`, next to `--auto-time`, and `--rope-wavelengths` (days) sets any ladder by hand.
-
-`suggest_time_encoding` works curve by curve: each light curve gets a generalised Lomb-Scargle periodogram on a linear grid fine enough to resolve peaks over its own baseline (`max_evals` bounds the cost by subsampling observations, never the grid; at least 256 observations are kept), a curve counts as detected when its peak clears the noise floor `1 - (1 - median) ** (2 log2 n_freq)` (the Beta tail of a white-noise periodogram pushed through its median), and its support runs out to the highest harmonic holding a tenth of the peak power (`rel`). The pooled support takes quantiles over the detected curves (`q`), so a broad-band class cannot hide the short periods of another; `lam_min` and `lam_max` override the two ends when you know them (the shortest period in a catalogue, the survey baseline). Curves with fewer than three distinct epochs are skipped (`report.n_skipped`). `plot_time_encoding(report)` draws the detected periods against the ladder; `rotary_wavelengths` / `time_encoding` are the ladder and its inverse, `rotary_kernel` the lag response of a ladder and `wave_vectors` the nD-RoPE wave vectors of a `BlockRope`, for figures like those of the nD-RoPE paper. `time_shuffle_score` is only informative for a trained encoder: at initialisation attention is nearly uniform, so every untrained model scores about 1. It is a batch statistic (embeddings are standardised over the batch, so a single curve raises): to compare or pool the scores of several batches pass the same `stats=(mean, std)` of a reference embedding set to every call.
-
-## Data
-
-A `Record` holds one object: flat float32 arrays `t` (days), `y`, `err` over all bands, int64 `band` ids, a class `label`, a `period` and a `meta` dict; build them directly for your own data. `simulate` is a port of the lc-sim-model toy generator (sinusoid, RR Lyrae, eclipsing, double-mode, damped random walk, with band-dependent amplitude and phase lag) evaluated at irregular epochs inside yearly seasons; `SurveyConfig` and `SimConfig` set the bands and the population. `normalize` standardises fluxes per band by median/MAD (falling back to the std, then to a scale of 1, when the MAD is zero) and `make_views` cuts the LeJEPA windows:
-
-```python
-import numpy as np
-
-from romae_lc import CLASSES, make_views
-
-records = simulate(16, seed=0)  # bands g, r, i over a 1000 d baseline
-r = normalize(records[0])
-print(r.n, r.bands, CLASSES[r.label], r.period, sorted(r.meta))
-rng = np.random.default_rng(0)
-global_views, local_views = make_views(r, ViewConfig(), rng)  # (t, y, band) triples
-```
-
-`LightCurveDataset(records, ViewConfig())` with `collate` (a `functools.partial` carrying the `tokenize` keywords, as in the quickstart) yields `dict(global=[Tokens, ...], local=[...], full=Tokens, label, index)` batches with fresh views every epoch; `full` is the whole curve unless capped by `max_tokens` (the dataset's own argument, else the `ViewConfig`'s), in which case it is a random subsample re-drawn per epoch; `time_series(records)` gives the `(times, values, bands)` lists for `suggest_time_encoding`.
-
-**PHOEBE eclipsing binaries.** `load_phoebe(source, split)` reads the PHOEBE 2 dataset of lc-sim-model from a Hugging Face repo id or a directory written by `DatasetDict.save_to_disk`. Rows carry `<band>_time`, `<band>_flux` and `<band>_flux_err` for each band in `PHOEBE_BANDS` (`Gaia_G`, `LSST_g`, `LSST_r`, `LSST_i`, `TESS_T`) plus `id`, `period`, `t0` and `morphology` (`contact`, `detached`, `semidetached` become labels 0, 1, 2):
-
-```python
-from romae_lc import PHOEBE_BANDS, load_phoebe
-
-records = [normalize(r) for r in load_phoebe("path/to/phoebe", split="train")]
-band_wavelengths = wavelengths_for(PHOEBE_BANDS)  # {0: 641.5, 1: 480.7, ...}
-```
-
-## Examples
+Submit from the repo root. The script trains, and then runs the test card.
 
 ```bash
-uv run python examples/train_lejepa.py --n 2048 --epochs 20 --auto-time
-uv run python examples/train_mae.py --n 2048 --epochs 20 --rope simplex --attention linear --auto-time
-uv run python examples/train_lewm.py --n 2048 --epochs 20 --auto-time --window 30 --advance 1 2
-uv run python examples/analyze_time_encoding.py --n 512 --plot runs/time_encoding.png --ckpt runs/lejepa.pt
+sbatch --job-name=enc_o3_ph project/jobs/train.sh enc_o3_ph
+# a long run as two linked jobs:
+sbatch --job-name=enc_le1 --time=24:00:00 --export=ALL,MAX_LINKS=2,BUDGET=84000 project/jobs/train.sh enc_le1
 ```
 
-The training scripts take `--data sim` (default), a PHOEBE source, or a PC_matches sub-dataset directory (see below), the model arguments `--width --depth --heads --rope --attention --p-rope`, the MAE decoder's own `--decoder-width --decoder-depth --decoder-heads` (default tiny-shallow, whatever the encoder size), the time unit as `--time-scale --rope-base` or `--auto-time` (the `suggest_time_encoding` recommendation on the training curves), and print a linear-probe accuracy (class) and a ridge R2 (log period) of the frozen embeddings every `--eval-every` epochs. Checkpoints in `runs/` hold the state dict, the backbone's `hparams` and the tokenizer keywords; `examples/common.py` restores them with `load_backbone`. `train_lewm.py` additionally writes `<out>_wm.pt` (the whole `LeWorldModel` state dict, its `hparams`, the backbone's `hparams`, the tokenizer keywords, the `FrameConfig` and a `no_actions` flag), restored with `load_world_model(path) -> (model, tokenize_kwargs, cfg)`. Its validation losses are computed in eval mode (BatchNorm running statistics, no predictor dropout, as the official validation step), so in very short runs `val pred` lags the train-mode `pred` until the running statistics catch up, and SIGReg is the Epps-Pulley statistic on a batch of latents, which carries a factor of the batch size: `val sigreg` (printed with its batch size) is on the training scale only when the validation batches have `--batch-size` rows. A CPU smoke run is `--n 256 --epochs 2 --width 96 --depth 2 --heads 3`; on a shared many-core node set `OMP_NUM_THREADS` to something like 16, since torch's default thread count oversubscribes it. The analysis script prints the report, plots it and, given a checkpoint, the mean `time_shuffle_score` on the validation curves.
+- The first argument is a recipe name or the path of a `.toml` file. More arguments go to
+  `project.train` and beat the recipe.
+- The run folder is `project/runs/<recipe name>`. Set `OUT` for another folder.
+- `BUDGET` is the training time of one job in seconds. `MAX_LINKS` is how many jobs the run may take.
+  A later job resumes from `last.pt`.
+- `EVAL=0` trains only.
+- The script uses `.venv` in the repo root. Set `VENV` for another one.
+- The `enc_o2_*` and `enc_o3_*` recipes start from `project/runs/enc_j1/mae.pt`. That file has to exist.
+- `enc_j1` itself was trained by older code. Its recipe gives the same flags, not the same code.
+  Keep its `mae.pt`. Training it again will not give the same weights.
 
+### Train by hand
 
 ```bash
-python examples/train_lejepa.py ... --time-scale 0.0015915 \
-  --rope-wavelengths 0.01 0.053 0.107 0.218 0.428 0.835 1.64 3.43 6.98 14.3 34.9 6000
+python -m project.train --recipe project/recipes/enc_o3_ph.toml --out project/runs/NAME --wandb
 ```
 
-Do it for Le world model
+A small run on simulated stars, on the CPU (about 2 minutes with 4 threads). It uses the `enc_le1` recipe and makes
+everything small on the command line:
 
-## Acknowledgements
+```bash
+python -m project.train --recipe project/recipes/enc_le1.toml --data sim --n-sim 300 \
+    --width 24 --depth 2 --heads 2 --dec-width 48 --dec-heads 2 --dec-depth 1 \
+    --window 100 --min-tokens 4 --max-tokens 64 --batch-size 8 --steps 20 --eval-every 10 \
+    --probe-train 64 --probe-val 32 --shuffle-objects 16 --ladder-curves 8 \
+    --local-span 10 30 --view-keep 0.3 --sig-slices 64 --workers 0 --device cpu \
+    --out /tmp/toy_le1
+```
 
-- RoMAE, Zivanovic et al. 2025, [arXiv:2505.20535](https://arxiv.org/abs/2505.20535): the model, the masked pretraining recipe and the tiny-shallow/tiny/small/base encoder sizes.
-- nD-RoPE, Li et al. 2026, [arXiv:2606.12146](https://arxiv.org/abs/2606.12146): the simplex wave vectors, the `theta` bound and the frequency-domain view of the encoding.
-- LeJEPA, Balestriero and LeCun 2025, [arXiv:2511.08544](https://arxiv.org/abs/2511.08544): SIGReg and the multi-view objective. Next-latent prediction on top of SIGReg is the LeWorldModel of the Quickstart.
-- LeWorldModel, Maes, Le Lidec, Scieur, LeCun, Balestriero 2026, [arXiv:2603.19312](https://arxiv.org/abs/2603.19312): the predictor, AdaLN-zero conditioning, projector and loss, ported from [lucas-maes/le-wm](https://github.com/lucas-maes/le-wm) (MIT).
-- [Hibb-bb/lc-sim-model](https://github.com/Hibb-bb/lc-sim-model): the toy simulator ported in `romae_lc.data` and the PHOEBE dataset.
-- [stable-pretraining](https://github.com/Hibb-bb/LeJEPA-Code): the light-curve RoMAE, rotary and LeJEPA code was ported and trimmed from its light-curve experiments.
+On a busy login node, put `OMP_NUM_THREADS=4` in front. Without it the run can be many times slower.
 
-MIT license.
+What a run folder holds:
+
+- `args.json`: every flag of the run. `ladder.json`: the time ladder.
+- `log.jsonl`: one row per log step and per validation.
+- `last.pt`: the newest checkpoint, with the optimizer. A run started again with the same `--out`
+  resumes from it. Model and data flags then come from the checkpoint, not from the command line.
+- `mae.pt` and `DONE`: written when `--steps` is reached. `mae.pt` is what the evaluation loads.
+
+### The test card
+
+```bash
+sbatch project/jobs/test_card.sh enc_o3_ph enc_o3_fcph       # on the cluster
+python -m project.eval.test_card --run enc_o3_ph             # by hand
+python -m project.eval.summary                               # one table over all runs
+```
+
+- `--run NAME` reads `project/runs/NAME/mae.pt`. `--ckpt PATH` takes any checkpoint.
+- It first makes `latents.pt` and `latents_test.pt` next to the checkpoint, if they are missing.
+- It then runs the class, period, phase and forecast cards and writes
+  `project/results/test_card/NAME.json`. The file is written after every card.
+- A card that is already in the file is skipped. So a job that ran out of time can be submitted again.
+  `--force` runs everything again. `--cards class period` runs only some cards.
+- `--rf` (or `RF=1` for the job) adds the random-forest reference.
+- `PERIOD_PROBE=1` for the job also runs `project.period_probe` (validation read-outs).
+- `project.eval.summary` prints the table. The line under the table says which split each column is
+  scored on.
+
+The test card of the small run from above (5 to 10 minutes on the CPU):
+
+```bash
+python -m project.eval.test_card --ckpt /tmp/toy_le1/mae.pt --data sim --results /tmp/toy_le1/results \
+    --epochs 2 --workers 0 --min-context 4
+python -m project.eval.summary --dir /tmp/toy_le1/results/test_card
+```
+
+Each card also runs alone, for example `python -m project.eval.card_forecast --help`.
+The forecast example plots: `sbatch project/jobs/demo.sh enc_o3_fcph_pband`.
+
+### Tests and the golden check
+
+```bash
+python -m pytest project/tests tests -q
+CUDA_VISIBLE_DEVICES= python -m project.tests.golden check --strict
+```
+
+The golden check compares today's code with files recorded before the clean-up (in `.golden/`, not
+in git): the flags of the 10 runs, the outputs of the 9 trained checkpoints on a fixed batch, and
+5 short training runs. It reads the checkpoints from `/projects/bfrf/hibb/romae-lc/project/runs`.
+
+## 4. Open items
+
+The clean-up moved and renamed code. It did not change what any evaluation computes.
+These known problems are still there.
+
+### Split protocol
+
+1. **Test numbers are used to compare runs.** The results table in `docs/PLAN.md` ("Option 3
+   results") compares runs by class F1 on test, and decisions were drawn from it. The validation
+   score of the same probe is saved (`val_best` in the card, `class_f1_attn_val` in its headline).
+   `summary.py` still prints the test number.
+2. **The PLAN table mixes splits without saying so.** Forecast columns are validation numbers,
+   class F1 is a test number, and "period within 10 %" is the best of 13 read-outs on validation.
+3. **`period_probe.py` never scores test.** Its best read-out is picked on validation and reported
+   on validation, so the number is too good.
+4. **The peak and phase cards score validation, not test.** By the rule, final numbers belong on test.
+5. **Each probe fits on a different set.** The class and period probes fit on train. The random
+   forest fits on train + validation. The forecast decoder fits on validation stars. The phase probe
+   fits on 70 % of 600 validation stars.
+6. **The same metric has more than one protocol.** Forecast by hand: 600 validation stars, stride
+   0.25. Forecast in the test card: all test stars, stride 1.0. Class probe: 13 classes. Random
+   forest: 16 classes. Probe during training: linear, 13 classes.
+7. **The probe during training is smaller than its flag says.** `--probe-val 2000` draws from the
+   validation-loss stars (`--val-objects 1000`, 931 after the length filter). It also only sees
+   stars long enough for 8 windows.
+8. **Every run trains with the catalogue period as a target** (`--spectral-aux 0.5`, train stars).
+   This is not a leak between splits. But the period and phase numbers are not label-free, and
+   `docs/PLAN.md` only states the rule for inference.
+9. **Scaling uses the whole light curve.** The median and scatter of a star include the points that
+   the forecast and gap tests hide. `--norm-days` exists; no run uses it.
+10. **The forecast masks are not seeded.** `card_forecast.py` draws them with `torch.rand` and nothing
+    seeds it. The gap and phase-gap numbers move a little from run to run. `--seed` only fixes the stars.
+11. **The random-forest parameters have no known source.** `test_card.py` uses fixed values
+    (`RF_PARAMS`) taken from the old job script. Nobody knows which data they were tuned on.
+12. **The peak, phase and forecast cards read `--data`, not the checkpoint's data.** The default is
+    ZTFxPC. The class and period probes use the data path stored in the checkpoint.
+
+### Other
+
+- **No test card files exist yet for the trained runs.** Their results are in the old folders of the
+  main checkout (`project/results/attn_probe_<run>`, `project/results/jepa_forecast`, and others),
+  written by the old scripts. Run `project/jobs/test_card.sh` on a run to get its
+  `test_card/NAME.json`.
+- **`enc_le1` is not trained yet.** The golden check covers its flags but not its checkpoint.
+- **`enc_j1` cannot be rebuilt as it was** (see section 3).
+- **`project/period_probe.py` (1,177 lines) and `project/fold.py` were not reworked.** They were only
+  trimmed.
+- **Do not merge this branch into `main` while a training chain is queued there.** A queued job runs
+  the code of the checkout it was submitted from, and its old job script is gone on this branch.
+- **The Python environment belongs to the main checkout.** Its editable install points there. From
+  another checkout, `python -m ...` from that checkout's root imports the right code. A script run
+  by its path does not.
+- **`pytest` without a path runs only `tests/`** (`pyproject.toml`). Give both folders, as above.
+- **Older notes in `docs/` use old file names** (`EXPERIMENTS.md`, `ROPE.md`, `SPECTRAL-LAYER.md`, the
+  session notes, the design doc). `docs/CODE-MAP.md` has the table old name -> new name.
+- **A checkpoint trained with a removed option cannot be loaded or resumed here.** The scripts say so
+  and name the git tag `pre-cleanup`, which holds the full old tree.
+
+## Credits
+
+RoMAE: Zivanovic et al. 2025, [arXiv:2505.20535](https://arxiv.org/abs/2505.20535).
+LeJEPA (SIGReg, views): Balestriero and LeCun 2025, [arXiv:2511.08544](https://arxiv.org/abs/2511.08544).
+The full list is at the end of `docs/LIBRARY.md`. MIT license.

@@ -1,143 +1,169 @@
 # Code map
 
-One line per file: what it is and its status. Written 2026-10-19 as step 1
-of the clean-up, next to `EXPERIMENTS.md`. The statuses are a proposal, not
-a change: nothing has been moved yet.
+The main names in every file, for the tree after the clean-up (2026-11-18, branch `cleanup`).
+The root `README.md` has the short version: one line per file. This page adds the function and
+class names, and a table from the old file names to the new ones.
 
-Statuses: **core** = the encoder and its training, needed by everything;
-**paper** = evaluation that makes the encoder paper's tables and figures;
-**decoder** = the phase rope / forecast work; **tool** = cluster and
-tracking helpers; **archive** = the world-model line (September 26 to
-October 1) and rejected ideas; nothing alive imports it except where noted;
-**drop** = leftovers nothing references.
+Run scripts from the repo root as modules: `python -m project.train`, not `python project/train.py`.
 
-Sizes: library 11 files / 4.8k lines; `project/` 85 files / 25k lines;
-44 job scripts; 36 test files.
+## The pipeline in one picture
 
-## Top level
+```
+records            project/data.py        load_data -> Data (train / validation / test records)
+   |
+windows, tokens    project/windows.py     frame_config, frame_loader, TokenSpec, WindowDataset
+   |
+hidden tokens      project/masks.py       make_mask, phase_band_mask, forecast_tail_mask
+(or views)         project/views.py       make_views
+   |
+model              project/backbone.py    sizes, rotary time ladder
+                   project/jepa.py        TokenJEPA, forward_views, sigreg
+   |
+training           project/train.py       flags (from project/recipes/*.toml), loop, validation
+   |
+checkpoint         project/checkpoint.py  mae.pt / last.pt: save, load_mae, load_encoder
+   |
+evaluation         project/eval/          encode -> card_class, card_period, card_phase,
+                                          card_forecast -> test_card -> summary
+```
 
-| path | what | status |
+## `romae_lc/`: the library
+
+It does not import `project/`. `docs/LIBRARY.md` shows how to use it.
+
+| file | lines | main names |
 |---|---|---|
-| `romae_lc/` | the library: tokens, rotary ladder, transformer, spectral layer, data | core |
-| `project/` | the research code on top of it | see below |
-| `tests/` | library tests, 10 files | core |
-| `docs/` | design doc, plan, this map, the ledger, the rope and spectral notes, two dated session notes | keep; the two session notes can fold into the ledger |
-| `examples/` | the library's original examples (`train_mae.py`, `train_lejepa.py`, `train_lewm.py`, `common.py`, `analyze_pc_periods.py`, `analyze_time_encoding.py`, `jobs/`) from 09-23 | drop (`analyze_pc_periods.py` chose the ladder; its output `results/pc_period/recommendation.json` is worth a copy into docs) |
-| `lomb_scargle.py` | a loose Lomb-Scargle script at the root, 10-06; nothing imports it | drop (check first whether `project/fold.py` already has what it does) |
-| `runs/`, `results/`, `logs/` (top level) | three September checkpoints, the pc_period analysis, six old job logs | drop after copying the recommendation |
-| `README.md` | library README plus a pointer to `project/` | keep; becomes the entry page in step 4 |
-| `pyproject.toml`, `uv.lock`, `.python-version`, `LICENSE`, `.gitignore` | packaging | keep |
+| `data.py` | 685 | `Record`, `simulate`, `load_pc`, `load_phoebe`, `normalize`, `ViewConfig`, `LightCurveDataset`, `collate`, `PC_BANDS`, `CLASSES` |
+| `frames.py` | 385 | `FrameConfig`, `sample_frames`, `frame_grid`, `FrameDataset`, `collate_frames` |
+| `tokenize.py` | 206 | `tokenize`, `Tokens`, `wavelengths_for` |
+| `rope.py` | 538 | `AxialRope`, `SimplexRope`, `BlockRope`, `layout`, `ladder_rows`, `resample_ladder` |
+| `transformer.py` | 261 | `TransformerConfig`, `Transformer`, `Attention`, `Block`, `attention_mask` |
+| `spectral.py` | 205 | `SpectralLayer`, `soft_bin_target`, `spectral_aux_loss` |
+| `model.py` | 828 | `RoMAEBase`, `RoMAE`, `RoMAEForPreTraining`, `RoMAEForClassification`, `MaskedDecoder`, `gen_mask`, `phase_rope_layout` |
+| `analysis.py` | 654 | `suggest_time_encoding`, `rotary_ladder`, `timescales_for`, `periodogram`, `time_shuffle_score` |
 
-## `romae_lc/`
+## `project/`: data to checkpoint
 
-| file | what | status |
+| file | lines | main names |
 |---|---|---|
-| `model.py` | `RoMAE`, `RoMAEForPreTraining`, the MAE forward with mask tokens, `spectral_frequency`, `phase_rope_layout`, `PhasorFeatures` | core (phasor is dead weight once the decoder paper is written) |
-| `rope.py` | axial p-RoPE, nD-RoPE, the dense quantile ladder | core |
-| `spectral.py` | the spectral layer (learned periodogram over the tokens, reader, CLS summary) | core |
-| `transformer.py` | blocks, attention (softmax and linear) | core (linear attention is a dead branch, see `maew_lin`) |
-| `tokenize.py` | one token per observation, (time, wavelength) positions | core |
-| `data.py` | light-curve records, the toy simulator, PHOEBE loader, views, collation | core (PHOEBE loader unused by the project) |
-| `analysis.py` | reads the rotary time unit off a dataset; used by `examples/analyze_pc_periods.py` only | tool (keep small, or move its ladder-choice function next to `rope.py`) |
-| `frames.py` | LeWorldModel frames and actions; nothing in `project/` imports it | archive |
-| `lewm.py` | LeWorldModel; imported by `project/train_wm.py` only | archive (goes with `train_wm.py`) |
-| `lejepa.py` | LeJEPA; nothing in `project/` imports it | archive |
-| `__init__.py` | exports | core (trim with the above) |
+| `data.py` | 152 | `load_data`, `Data`, `add_data_args`, `data_args_from`, `subset`, `class_vocabulary`, `superclass`, `fine_class`, `ANOMALY_CLASSES`, `DATA_ROOT` |
+| `windows.py` | 314 | `TokenSpec`, `err_stats`, `err_channel`, `add_frame_args`, `frame_config`, `frame_loader`, `fuse_frames`, `collate_err_frames`, `grid_starts`, `object_windows`, `WindowDataset`, `make_collate` |
+| `masks.py` | 200 | `MASK_MODES`, `block_mask`, `make_mask`, `phase_band_mask`, `forecast_tail_mask`, `longest_gap` |
+| `views.py` | 65 | `make_views`, `pack`, `take` |
+| `backbone.py` | 410 | `PRESETS`, `add_model_args`, `resolve_model_args`, `encoder_config`, `Ladder`, `get_ladder`, `measure_ladder`, `dense_ladder`, `deal_ladder`, `rope_geometry`, `rope_layouts` |
+| `jepa.py` | 396 | `TokenJEPA`, `forward_views`, `sigreg` |
+| `recipe.py` | 85 | `apply_recipe`, `read_recipe`, `recipe_files`, `recipe_text` |
+| `train.py` | 781 | in file order: `RUN_CONTROL`, `check_resumable`, `add_train_args`, `build_parser`, `read_flags` / `build_tokens`, `build_loaders` / `build_model` / `Run`, `window_loss`, `views_loss`, `train_step`, `train_loop` / `validation_losses`, `evaluate`, `baseline` / `save`, `restore`, `finish` / `main` |
+| `probes.py` | 267 | `probe`, `probe_metrics`, `linear_probe`, `ridge_r2`, `shuffle_score`, `baseline_probe`, `hand_features`, `embed_records` |
+| `tracking.py` | 163 | `Tracker`, `add_wandb_args`, `StepTimer`, `gpu_stats` |
+| `utils.py` | 68 | `cosine_schedule`, `seed_all`, `add_device_arg`, `get_device`, `JsonlLog`, `dump_json` |
+| `checkpoint.py` | 229 | `mae_state`, `jepa_state`, `save_atomic`, `load_mae`, `load_encoder`, `EncoderMeta`, `FrameEncoder`, `PooledEncoder`, `LatentEncoder` |
 
-## `project/` top-level scripts
+### Recipes, `project/recipes/`
 
-| file | lines | what | status |
-|---|---|---|---|
-| `common.py` | 1480 | the hub: data loading (ZTFxPC and the Chen cache), model build and checkpoint loading, the in-training probe, warm start; imported by 53 files | core (split in step 5) |
-| `pretrain_mae.py` | 926 | stage-1 training: masks, targets, spectral aux, cycle queries, phase rope, warm start, JEPA and GRU-ODE switches | core (imports `decoder`, `diagnostics`, `bottleneck`, `gruode`, `jepa`, `tracking`; those stay until these imports are cut) |
-| `mae_data.py` | 245 | windows, masks, targets for stage 1 | core |
-| `templates.py` | 354 | whole-record Fourier templates, cycle queries | core / decoder |
-| `chen_data.py` | 124 | the 800k-star cache: build and load, hash splits, our period rule | core |
-| `fold.py` | 257 | fold R2 (6-harmonic weighted fit), fine search, candidates; imported by 11 files | paper |
-| `period_probe.py` | 1252 | the period probe: read-outs on frozen latents, Lomb-Scargle next to it, figures | paper |
-| `cache_latents.py` | 403 | encode every window once (`latents.pt`); 7 importers | paper |
-| `plot_period_examples.py` | 232 | shared figure helpers; 11 importers in `eval/` | paper |
-| `baselines.py` | 93 | per-band imputation baselines (constant, linear, GP); used by `forecast`, `train_decoder`, `infer` | archive with them |
-| `tracking.py` | 163 | Weights & Biases helper | tool |
-| `bench.py` | 224 | loader and encoder throughput benchmark | tool (optional) |
-| `sine_test.py` | 281 | the sine test of the decoder | decoder |
-| `gruode.py` | 134 | GRU-ODE encoder baseline (triton deregistered at import) | paper (one ablation row); could move under `baselines/` later |
-| `jepa.py` | 264 | token-level JEPA objective | paper (ablation rows) |
-| `bottleneck.py` | 322 | the bottleneck autoencoder (`--bottleneck`); imported by `common` and `pretrain_mae` | archive (dead result) once the two imports are cut |
-| `decoder.py` | 271 | stage-3 decoder on frozen latents; imported by `pretrain_mae` and the archive scripts | archive once `pretrain_mae` stops importing it |
-| `diagnostics.py` | 108 | time-shuffle score, surprise along window grids; imported by `pretrain_mae`, `gate`, `inject`, `train_wm` | archive once `pretrain_mae` stops importing it (the shuffle score is printed in the probe line) |
-| `phase_probe.py` | 227 | is the window's phase in the latent? (always chance) | paper (negative result) |
-| `phase_decoder.py` | 815 | the phase decoder ladder (ceiling, context) | archive (its ceiling result is in the ledger) |
-| `pretrain_phase.py` | 338 | the phase bottleneck stage 1 | archive (dead) |
-| `period_head.py` | 506 | conv net on a Lomb-Scargle spectrum | archive (rejected by the user) |
-| `token_head.py` | 352 | per-token period read-out | archive (dead) |
-| `train_predictor.py` | 1659 | stage-2 flow / sequence predictor on cached latents | archive (world model) |
-| `train_wm.py` | 765 | joint LeWorldModel training | archive (world model) |
-| `train_decoder.py` | 530 | stage-3 decoders | archive (world model) |
-| `lookback.py` | 572 | the lookback decoder on the forecast task | archive (world model) |
-| `forecast.py` | 646 | end-to-end brightness forecast with predictor + decoder | archive (world model; the forecast scoring code may be reused for the decoder paper) |
-| `residual.py` | 730 | residual model (M4) | archive (world model) |
-| `energy.py`, `flow.py`, `infer.py` | 248, 129, 606 | energies, flow matching, energy-based inference (M6, M7) | archive (world model; `flow.py` is imported by `decoder.py`) |
-| `gate.py` | 531 | the gate on frozen latents | archive (world model) |
-| `inject.py`, `anomaly.py` | 348, 414 | injected anomalies (M2) and the anomaly test | archive (world model) |
-| `check_nll.py` | 155 | is the flow's NLL real? | archive (world model) |
-| `README.md` | 751 | decisions log and command book; mixes alive and archived commands | keep; rewrite in step 4 (the decisions move to the ledger) |
-
-## `project/eval/`
-
-| file | what | status |
-|---|---|---|
-| `period_table.py` | a period for every star of every split | paper |
-| `period_report.py` | the all-star report (main table) | paper |
-| `hit_curves.py` | hit-rate curves strict / alias | paper |
-| `ls_benchmark.py` | search efficiency against Lomb-Scargle | paper |
-| `ls_allstars.py` | the collaborator's astropy search at several budgets | paper |
-| `budget_sweep.py` | model-seeded search over its own budget | paper |
-| `period_sensitivity.py` | smallest resolvable period change | paper |
-| `runtime.py` | ms per star, batched, compiled, quantised | paper |
-| `classify_rf.py` | random forest on frozen features | paper |
-| `period_chen.py` | periods for the 800k Chen set | paper |
-| `period_page.py`, `method_page.py` | the two artifact pages | paper |
-| `fold_examples.py`, `scatter_by_class.py`, `scatter_per_class.py`, `slides_figs.py`, `diagrams.py` | talk and paper figures | paper |
-| `recon_demo.py` | masked-reconstruction pictures | paper |
-| `forecast_demo.py`, `sine_demo.py` | decoder pictures | decoder |
-| `starembed_feats.py` | StarEmbed features (never ran; needs x86) | archive unless the comparison is revived |
-
-## `project/jobs/` (Slurm)
-
-| script | status |
+| file | what |
 |---|---|
-| `pretrain_mae.sh` (the chain), `submit_queue.sh`, `queue.txt` (ignored by git), `cache_latents.sh`, `period_probe.sh`, `encoder_ablation.sh`, `chen_cache.sh`, `period_chen.sh`, `sine_test.sh` | core / decoder |
-| `period_table.sh`, `period_report.sh`, `period_report_inner.sh`, `eval_bundle.sh`, `ls_benchmark.sh`, `ls_allstars.sh`, `budget_sweep.sh`, `period_sensitivity.sh`, `runtime.sh`, `classify_rf.sh`, `phase_probe.sh`, `rope_ablation.sh` | paper |
-| `smoke_wandb.sh`, `bench.sh`, `delta_cpu_starembed.sh`, `starembed_feats.sh` | tool / archive |
-| `pretrain_mae_wide.sh`, `pretrain_mae_bn.sh`, `pretrain_phase.sh`, `phase_decoder.sh`, `period_head.sh`, `token_head.sh` | archive |
-| `train_wm.sh`, `train_wm_w60.sh`, `train_predictor.sh`, `train_decoder.sh`, `train_lookback.sh`, `forecast.sh`, `gate.sh`, `inject.sh`, `anomaly.sh`, `residual.sh`, `infer.sh`, `pipeline.sh`, `submit_pipeline.sh` | archive (world model) |
+| `base.toml` | what every run shares. Not a run |
+| `enc_j1.toml` | the first JEPA run. Extends `base.toml` |
+| `from_j1.toml` | `enc_j1` continued for 20k steps from its checkpoint. Not a run. Extends `enc_j1.toml` |
+| `enc_o2_noadd.toml`, `enc_o2_fc.toml`, `enc_o2_fcbig.toml`, `enc_o2_fcbig_ph.toml` | the option 2 runs. Each extends the one before; the first extends `from_j1.toml` |
+| `enc_o3_ph.toml`, `enc_o3_fcph.toml`, `enc_o3_fcph80.toml`, `enc_o3_fcph_pband.toml` | the option 3 runs. `enc_o3_ph` extends `from_j1.toml`, `enc_o3_fcph` extends `enc_o3_ph`, the last two extend `enc_o3_fcph` |
+| `enc_le1.toml` | the no-EMA run with views and SIGReg. Extends `base.toml` |
+
+### What a checkpoint holds (`mae.pt`, `last.pt`)
+
+One dict. `kind` (`"jepa"` or absent for a plain masked autoencoder), `state_dict`, `backbone`, `mae`,
+`jepa` (how to rebuild the model), `spec`, `frames`, `ladder` (how to make tokens), `classes`, `args`
+(every flag), `recipe` (the recipe text), `step`, `metrics`, `epoch`, `elapsed`, `wandb_id`, `aux`
+(always empty now). `last.pt` also holds `opt` and `sched`.
+
+`project.checkpoint.load_encoder(path)` gives the frozen encoder and its `EncoderMeta`.
+
+## `project/eval/`: evaluation
+
+| file | lines | main names | command line |
+|---|---|---|---|
+| `common_eval.py` | 122 | `eval_device`, `run_name`, `window_dataset`, `window_loader`, `spectral_layers`, `fourier_forecast`, `zstats`, `period_hits`, `star_tables`, `write_json`, `git_commit` | no |
+| `encode.py` | 231 | `main` | yes |
+| `card_class.py` | 218 | `StarProbe`, `star_probe`, `probe_inputs`, `batches`, `scores`, `run` | yes |
+| `card_period.py` | 133 | `logp_probe`, `peak_stars`, `peak_periods`, `peak_hits` | yes |
+| `card_phase.py` | 247 | `Stars`, `pick_stars`, `pick_windows`, `embed`, `probes`, `run` | yes |
+| `card_forecast.py` | 337 | `Mode`, `TEST_CARD`, `CARD_MODES`, `gap_mask`, `phase_gap_mask`, `collect`, `score`, `pick_stars`, `run` | yes |
+| `card_demo.py` | 148 | `main` | yes |
+| `classify_rf.py` | 189 | `run`, `plot_confusion`, `PARAM_GRID` | yes |
+| `test_card.py` | 147 | `CARDS`, `RF_PARAMS`, `make_latents`, `main` | yes |
+| `summary.py` | 133 | `headline`, `rows`, `table`, `COLUMNS`, `LEGEND` | yes |
+| `style.py` | 29 | `tidy`, `save`, the colours | no |
+
+Extra read-outs in `project/`, not part of the test card:
+
+| file | lines | main names |
+|---|---|---|
+| `period_probe.py` | 1,177 | `object_table`, `pool_latents`, `fit_ridge`, `fit_mlp`, `fit_bins`, `fit_joint`, `fit_winjoint`, `score`, `gls_power`, `ls_reference`, `failure_tables`, `run` |
+| `phase_probe.py` | 264 | `fold_template`, `band_templates`, `reference_phase`, `window_targets`, `fit_ridge`, `fit_mlp`, `run` |
+| `fold.py` | 257 | `fold_r2`, `fold_compare`, `refine_period`, `refine_all`, `fold_tables`, `plot_fold` |
+
+Who uses them: `common_eval.star_tables` uses `period_probe.object_table`. `card_phase.py` uses
+`phase_probe.reference_phase`. `tests/test_spectral.py` uses `period_probe.gls_power`.
+
+## `project/jobs/`
+
+| file | what |
+|---|---|
+| `train.sh RECIPE [flags]` | trains a recipe, as linked jobs if `MAX_LINKS` > 1, then calls `test_card.sh` |
+| `test_card.sh RUN ...` | `project.eval.test_card` for each run. `RF=1`, `PERIOD_PROBE=1`, `CARD_ARGS` |
+| `demo.sh RUN ...` | `project.eval.card_demo` for each run. `HIDE`, `DEMO_ARGS` |
+| `after_done.sh FILE sbatch ...` | waits for a file, then submits |
+| `in_session.sh CMD ...` | runs a command inside the running Slurm job named `debug`, or here if there is none |
 
 ## Tests
 
-`tests/` (library, 10 files) stays. In `project/tests/`, the tests follow
-their module: `test_project.py`, `test_mae_data.py`, `test_cycles.py`,
-`test_encoder_loading.py`, `test_period_probe.py`, `test_period_table.py`,
-`test_period_report.py`, `test_period_sensitivity.py`, `test_runtime.py`,
-`test_ls_benchmark.py`, `test_budget_sweep.py`, `test_classify_rf.py`,
-`test_phase_probe.py`, `test_gruode.py`, `test_jepa.py` stay; the rest
-(`test_anomaly`, `test_bottleneck`, `test_forecast`, `test_gate`,
-`test_lookback`, `test_period_head`, `test_phase_decoder`, `test_predictor`,
-`test_pretrain_phase`, `test_token_head`) move with their modules.
+| file | what it tests |
+|---|---|
+| `project/tests/golden.py` | the before/after check of the clean-up. Not a pytest file: `python -m project.tests.golden check` |
+| `project/tests/_args.py` | the small training flags the tests share (`MAE_ARGS`) |
+| `project/tests/test_common.py` | the error channel, window grids, the ladder, the probes |
+| `project/tests/test_masks.py` | the masks |
+| `project/tests/test_jepa.py` | `TokenJEPA`, the views, short training runs |
+| `project/tests/test_cycles.py` | the phase rope and the frequency estimate of the spectral layer |
+| `project/tests/test_recipe.py` | the recipe loader and every recipe file |
+| `project/tests/test_encoder_loading.py` | `load_encoder` |
+| `project/tests/test_cache_latents.py` | `project.eval.encode` |
+| `project/tests/test_eval.py` | the shared evaluation helpers, the forecast modes, the summary table |
+| `project/tests/test_classify_rf.py` | the random-forest script |
+| `project/tests/test_period_probe.py`, `test_phase_probe.py` | the two extra probes |
+| `tests/test_*.py` | the library: data, frames, tokens, rope, transformer, spectral layer, model, analysis |
 
-## Machine-specific paths (step 4 turns these into one config)
+## Old name -> new name
 
-`/projects/bfrf/data/PC_matches/ZTFxPC` (the default `--data`),
-`/work/hdd/bfrf/hibb/chen_cache` and `chen20_ztf_dr24`, `project/runs` and
-`project/results` as relative output roots, the `.venv` activation in the
-job scripts, and the partition names in `project/jobs/*.sh`.
+The tag `pre-cleanup` holds the old tree. There are no shims: the old import paths do not work.
 
-## Order of removal, when step 3 starts
+| old | new |
+|---|---|
+| `project/pretrain_mae.py` | `project/train.py`. `forecast_tail_mask` went to `project/masks.py` |
+| `project/common.py` | split into `project/data.py`, `windows.py`, `backbone.py`, `checkpoint.py`, `probes.py`, `utils.py`. `WMMeta` is now `EncoderMeta` |
+| `project/mae_data.py` | `project/masks.py` |
+| `project/jepa.py`: `make_views`, `_pack`, `_take` | `project/views.py` (`make_views`, `pack`, `take`) |
+| `project/jepa.py`: `jepa_state` | `project/checkpoint.py` |
+| `project/dyn.py`: `sigreg` | `project/jepa.py`. The rest of `dyn.py` is in `legacy/` |
+| `project/diagnostics.py`: `shuffle_score` | `project/probes.py`. The rest is in `legacy/` |
+| `project/inject.py`: `fold_template`, `band_templates` | `project/phase_probe.py`. The rest is in `legacy/` |
+| `project/cache_latents.py` | `project/eval/encode.py`. `object_windows`, `WindowDataset`, `make_collate` went to `project/windows.py` |
+| `project/eval/attn_probe.py` | `project/eval/card_class.py` (class) and `card_period.py` (log period) |
+| `project/eval/spectral_peak_probe.py` | `project/eval/card_period.py` |
+| `project/eval/token_phase_probe.py` | `project/eval/card_phase.py` |
+| `project/eval/jepa_forecast_probe.py` | `project/eval/card_forecast.py` |
+| `project/eval/jepa_forecast_demo.py` | `project/eval/card_demo.py` |
+| `project/eval/dataset_figs_style.py` | `project/eval/style.py` |
+| `project/jobs/pretrain_mae.sh`, `lejepa.sh`, `option2.sh`, `option2_one.sh`, `option3_one.sh` | `project/jobs/train.sh` with a recipe from `project/recipes/` |
+| `project/jobs/eval_encoder.sh`, `test_forecast.sh` | `project/jobs/test_card.sh` |
+| `project/jobs/rope_demo.sh`, `rope_demo_int.sh` | `project/jobs/demo.sh` |
+| `romae_lc/lewm.py`, `romae_lc/lejepa.py`, `examples/`, `lomb_scargle.py` | `legacy/`, same path |
+| every other old file of `project/` | `legacy/project/`, same path (see `legacy/README.md`) |
 
-1. Cut the imports of `decoder`, `diagnostics`, `bottleneck` from
-   `pretrain_mae.py` and `common.py` (behind flags nobody uses now).
-2. Move the world-model scripts, their jobs and tests to `project/archive/`
-   together with `romae_lc/lewm.py`, `frames.py`, `lejepa.py`.
-3. Move the rejected period and phase scripts the same way.
-4. Drop the top-level leftovers.
-5. Run both test suites after each move.
+## `legacy/`
+
+Old code, frozen, with the old paths under `legacy/`: 28 modules in `legacy/project/`, 29 in
+`legacy/project/eval/`, 62 job scripts, 24 test files, the two old library modules and the examples.
+Nothing outside `legacy/` imports it, and it is not expected to run from this branch.
+`legacy/README.md` says what is there and how to run it from the tag `pre-cleanup`.

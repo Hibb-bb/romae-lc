@@ -3,7 +3,7 @@
 > **Revision 2026-09-26.** Sections 4 and 5 below (stage 1 = encoder and
 > predictor trained jointly on next-latent MSE + SIGReg, stage 2 = a residual
 > model on top of it) are superseded by the frozen-autoencoder pipeline of
-> `project/README.md` ("Decisions (2026-09-26)"). Reason: started from a
+> `legacy/project/README.md` ("Decisions (2026-09-26)"). Reason: started from a
 > masked-pretrained encoder that had learned period (within-superclass
 > log-period R2 0.53), the joint objective erased it in 50k steps (0.50 to
 > 0.24, ROT 0.42 to -0.21) while its prediction loss kept improving, because a
